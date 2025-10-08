@@ -75,24 +75,6 @@ pip install -e .
 
 ---
 
-## ▶️ Example Usage
-
-Run the example pipeline:
-
-```bash
-python -m examples.run_pipeline
-```
-
-Sample output:
-
-```
-Train batch: torch.Size([16, 2, 2048]) torch.Size([16, 2, 2048])
-Validation batch: torch.Size([16, 2, 2048]) torch.Size([16, 2, 2048])
-Test batch: torch.Size([16, 2, 2048]) torch.Size([16, 2, 2048])
-```
-
----
-
 ## 📚 Roadmap
 
 ### ✅ Completed / Near-complete
