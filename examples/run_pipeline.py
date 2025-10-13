@@ -78,7 +78,7 @@ def parse_args():
         'perturber_args': {
             'amp_mean': 0.0,
             'amp_var_low': 0.0, 'amp_var_high': 0.0,
-            'phase_low': 1.0, 'phase_high': 2.0,
+            'phase_low': 0.0, 'phase_high': 0.0,
             'freq_low': 0.0, 'freq_high': 0.0,
             'misalign': False
         }

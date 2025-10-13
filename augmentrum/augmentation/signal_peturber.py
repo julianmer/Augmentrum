@@ -69,6 +69,7 @@ class SignalPerturber:
             data[:] *= np.exp(1j * time * freq_noise * 2 * np.pi)
 
         if self.misalign:
+            # TODO: implement misalignment for edited spectra
             raise NotImplementedError("Misalignment not implemented yet.")
 
         return data, water
