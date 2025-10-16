@@ -91,7 +91,8 @@ class BaseMRSDataset:
         """
         if self.mode == 'deterministic':
             subj_idx, coil_idx, average_idx = self.deterministic_idxs[idx]
-            data, water = self.data[subj_idx].copy(), self.water[subj_idx].copy()
+            data = self.data[subj_idx].copy()
+            water = self.water[subj_idx].copy() if self.water is not None else None
             data, water = self.pipeline(data=data, water=water, coil_indices=coil_idx,
                                         average_indices=average_idx)
             if self.to_tensor:
@@ -129,7 +130,8 @@ class BaseMRSDataset:
             batch_data, batch_water = [], []
             for _ in range(batch_size):
                 s_idx = torch.randint(0, len(self.data), (1,)).item()
-                data, water = self.data[s_idx].copy(), self.water[s_idx].copy()
+                data = self.data[s_idx].copy()
+                water = self.water[s_idx].copy() if self.water is not None else None
                 data, water = self.pipeline(data=data, water=water)
                 batch_data.append(data)
                 batch_water.append(water)
@@ -151,12 +153,12 @@ class BaseMRSDataset:
                 min_c, max_c = self._get_limits(self.n_coils, d.shape[d.dim_position('DIM_COIL')] - 1)
                 c_max = d.shape[d.dim_position('DIM_COIL')] - 1
             else:
-                min_c, max_c = 0, 1
+                min_c, max_c, c_max = 0, 1, 0
             if 'DIM_DYN' in getattr(d, 'dim_tags', []):
                 min_a, max_a = self._get_limits(self.n_averages, d.shape[d.dim_position('DIM_DYN')] - 1)
                 a_max = d.shape[d.dim_position('DIM_DYN')] - 1
             else:
-                min_a, max_a = 0, 1
+                min_a, max_a, a_max = 0, 1, 0
             coil_combinations = []
             for n_c in range(min_c, max_c + 1):
                 for n_a in range(min_a, max_a + 1):

@@ -109,15 +109,17 @@ def safe_squeeze(mrs_obj, dims=None):
 #***************************************#
 #   own nifti eddy current correction   #
 #***************************************#
-def own_nifti_ecc(data, reference):
+def own_nifti_ecc(data, reference, report=None):
     """
     Eddy current correction for MRS data in the NIfTI format. Using the code from suspect.
 
     @param data -- The MRS data to be corrected.
     @param reference -- The reference data for the correction.
+    @param report -- The report file (default=None).
 
     @returns -- The corrected MRS data.
     """
+    from suspect.processing.denoising import sliding_gaussian
 
     if data.shape != reference.shape \
             and reference.ndim > 4:
@@ -137,6 +139,9 @@ def own_nifti_ecc(data, reference):
         ec_smooth = sliding_gaussian(np.unwrap(np.angle(ref)), 32)
         ecc = np.exp(-1j * ec_smooth)
         corrected_obj[idx] = dd * ecc
+
+    if report is not None:
+        raise NotImplementedError("Report generation not implemented yet for own_nifti_ecc")
 
     # update processing prov
     processing_info = f'{__name__}.ecc, '
@@ -252,7 +257,7 @@ def coil_combination_adaptive(data, water=None):
         return combined
 
     if water is None:
-        return combine(data)
+        return combine(data), None
     else:
         return combine(data), combine(water)
 
@@ -260,33 +265,34 @@ def coil_combination_adaptive(data, water=None):
 #****************************************#
 #   nifit wrapper for coil combination   #
 #****************************************#
-def own_nifti_coil_combination_adaptive(data, reference, report=None):
+def own_nifti_coil_combination_adaptive(data, reference=None, report=None):
     """
     Nifit wrapper for the adaptive coil combination.
 
     @param data -- The MRS data to be combined.
-    @param reference -- The reference data for the combination.
+    @param reference -- The reference data for the combination (default=None).
     @param report -- The report file (default=None).
 
     @returns -- The combined MRS data.
     """
-    if data.shape[data.dim_position('DIM_COIL')] != reference.shape[data.dim_position('DIM_COIL')]:
+    if (reference is not None and data.shape[data.dim_position('DIM_COIL')] !=
+            reference.shape[data.dim_position('DIM_COIL')]):
         raise DimensionsDoNotMatch('Reference and data coil dimension does not match.')
 
     combined_data = data.copy(remove_dim='DIM_COIL')
-    combined_wat = reference.copy(remove_dim='DIM_COIL')
+    combined_wat = reference.copy(remove_dim='DIM_COIL') if reference is not None else None
 
     for main, idx in data.iterate_over_spatial():
         main = np.reshape(main, data.shape[3:])   # prevent loosing dim when avg is 1
 
         # coil combination
-        data_metab, data_wref = coil_combination_adaptive(main, reference[idx])
-
+        data_metab, data_wref = coil_combination_adaptive(main, reference[idx] if reference is not None else None)
         data_metab = np.reshape(data_metab, combined_data[idx].shape)   # adjust to lost dim when avg is 1
 
         # update data
         combined_data[idx] = data_metab
-        combined_wat[idx] = data_wref
+        if combined_wat is not None:
+            combined_wat[idx] = data_wref
 
     # plot
     if report is not None:
@@ -309,7 +315,7 @@ def own_nifti_coil_combination_adaptive(data, reference, report=None):
 
     # update processing prov
     processing_info = f'{__name__}.coil_combination, '
-    processing_info += f'reference={reference.filename}.'
+    processing_info += f'reference={reference.filename if reference is not None else "None"}.'
     update_processing_prov(combined_data, 'Coil combination', processing_info)
 
     return combined_data, combined_wat

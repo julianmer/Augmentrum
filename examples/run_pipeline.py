@@ -57,7 +57,8 @@ def parse_args():
                         help='Range of averages to use (start, end (exclusive))')
 
     parser.add_argument('--cache_det', action='store_true', help='Enable cache_det')
-    parser.add_argument('--no_cache_det', dest='cache_det', action='store_false', help='Disable cache_det')
+    parser.add_argument('--no_cache_det', dest='cache_det', action='store_false',
+                        help='Disable cache_det')
     parser.set_defaults(cache_det=False)
 
     args = parser.parse_args()
@@ -134,6 +135,6 @@ if __name__ == "__main__":
     # This script can be run directly from the command line.
     #
     # Example usage(s):
-    # python -m examples.run_pipeline --data_dir ../data/fMRSinPain/SUBJECTS/RAW/
+    # python -m examples.run_pipeline --data_dir data/fMRSinPain/SUBJECTS/RAW/
 
     main()
