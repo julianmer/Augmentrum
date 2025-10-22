@@ -212,8 +212,8 @@ class TricubicHermiteMAkima3D(nn.Module):
         Returns:
             torch.Tensor: Interpolated values, shape [batchSize, num_shots, 1, shot_length].
         """
-        print('Forward pass (Cleaned)')
-        batch_size, num_shots, _, shot_length = coords.shape
+        batch_size, num_shots, D, shot_length = coords.shape
+        coords = coords.transpose(1,2).contiguous().view(batch_size, 1, D, num_shots*shot_length)
         x_coords, y_coords, z_coords = coords.split(1, dim=2)
         
         # --- PRE-PROCESSING: Reshape and Find Indices/Local Coords ---
@@ -244,7 +244,7 @@ class TricubicHermiteMAkima3D(nn.Module):
         )
 
         # --- POST-PROCESSING: Reshape back to API output format ---
-        return interpolated_vals.view(batch_size, num_shots, 1, shot_length)
+        return interpolated_vals.view(batch_size, 1, num_shots, shot_length).transpose(1,2)
         
 
 if __name__ == "__ main __":
@@ -260,7 +260,7 @@ if __name__ == "__ main __":
     
     # Example trajectory coordinates: [B, S, D, L]
     coords = (torch.rand(B, S, D, L) * 2 - 1).to(dtype=torch.float32, device=device) 
-    coords = coords.transpose(1,2).contiguous().view(B, 1, D, S*L)
+    # coords = coords.transpose(1,2).contiguous().view(B, 1, D, S*L)
     
     # Ensure coordinates require grad for autograd test
     coords.requires_grad_(True)
