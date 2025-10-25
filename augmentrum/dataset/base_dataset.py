@@ -17,14 +17,15 @@
 #*************#
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 # internal
 from augmentrum.augmentation.pipeline import AugmentationPipeline
-from augmentrum.augmentation.signal_peturber import SignalPerturber
+from augmentrum.augmentation.signal_peturber import NoisePerturber
 from augmentrum.processing.raw_processor import RawProcessor
 from augmentrum.sampling.coil_average_sampler import CoilAverageSampler
 from augmentrum.sampling.subject_splitter import SubjectSplitter
+
 
 
 #**************************************************************************************************#
@@ -35,7 +36,7 @@ from augmentrum.sampling.subject_splitter import SubjectSplitter
 # augmentation. Supports both random and deterministic sampling modes.                             #
 #                                                                                                  #
 #**************************************************************************************************#
-class BaseMRSDataset:
+class BaseMRSDataset(Dataset):
     """
     Takes care of building the pipeline and managing random/deterministic sampling modes.
     """
@@ -70,6 +71,7 @@ class BaseMRSDataset:
         if self.mode == 'deterministic':
             self.deterministic_idxs = []
             self.build_deterministic_indices()
+            print(self.deterministic_idxs)
 
     def __len__(self):
         """
@@ -252,9 +254,9 @@ class BaseMRSDatasetLoader:
             for mode in ['train', 'val', 'test']:
                 steps = [CoilAverageSampler(mode=self.sampling_mode[mode],
                                             n_coils=n_coils, n_averages=n_averages),
-                         RawProcessor()]
+                         RawProcessor(**kwargs)]
                 if mode == 'train':
-                    steps.append(SignalPerturber(**perturber_args))
+                    steps.append(NoisePerturber(**perturber_args))
                 self.pipelines[mode] = AugmentationPipeline(steps)
         else:
             self.pipelines = pipelines
@@ -268,52 +270,54 @@ class BaseMRSDatasetLoader:
                     dataset = BaseMRSDataset(data=data, water=water, mode='deterministic',
                                              pipeline=self.pipelines[mode], n_coils=self.n_coils,
                                              n_averages=self.n_averages, to_tensor=self.to_tensor)
-                    self.cached_data[mode] = [dataset[i] for i in range(len(dataset))]
+                    self.cached_data[mode] = dataset
+                else:
+                    self.cached_data[mode] = None
         else:
             self.cached_data = {mode: None for mode in ['train', 'val', 'test']}
 
     def select_with_mode(self, mode, shuffle=False):
         """
-        Selects the appropriate DataLoader or generator based on the sampling mode.
+        Selects the appropriate DataLoader, generator, or raw list based on the sampling mode.
 
         Args:
             mode (str): 'train', 'val', or 'test'.
-            shuffle (bool): Whether to shuffle the data (only applicable for deterministic mode).
+            shuffle (bool): Whether to shuffle the data (only for deterministic mode).
+            as_dataloader (bool): If True, returns a PyTorch DataLoader. If False, returns raw data.
         """
-        if self.sampling_mode[mode] == 'random':
+        if self.cached_data[mode] is not None:
+            dataset = self.cached_data[mode]
+        else:
             data, water = self.splits[mode]
-            dataset = BaseMRSDataset(data=data, water=water, mode='random',
-                                     pipeline=self.pipelines[mode], n_coils=self.n_coils,
-                                     n_averages=self.n_averages, to_tensor=self.to_tensor)
+            dataset = BaseMRSDataset(
+                data=data, water=water, mode=self.sampling_mode[mode],
+                pipeline=self.pipelines[mode], n_coils=self.n_coils,
+                n_averages=self.n_averages, to_tensor=self.to_tensor
+            )
 
+        if self.sampling_mode[mode] == 'random':
             def infinite_gen():
                 while True:
                     yield next(dataset.iter_batches(batch_size=self.batch_size))
-
             return infinite_gen()
+
         elif self.sampling_mode[mode] == 'deterministic':
-            if mode in self.cached_data and self.cached_data[mode] is not None:
-                return DataLoader(self.cached_data[mode],
-                                  batch_size=len(self.cached_data[mode]), shuffle=shuffle)
+            if self.to_tensor:
+                return DataLoader(dataset, batch_size=self.batch_size, shuffle=shuffle)
             else:
-                data, water = self.splits[mode]
-                dataset = BaseMRSDataset(data=data, water=water, mode='deterministic',
-                                         pipeline=self.pipelines[mode], n_coils=self.n_coils,
-                                         n_averages=self.n_averages, to_tensor=self.to_tensor)
-                batch_size = self.batch_size if mode == 'train' else len(dataset)
-                return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+                data, water = zip(*[dataset[i] for i in range(len(dataset))])
+                return list(data), list(water)
         else:
             raise ValueError(f"Unknown sampling mode: {self.sampling_mode[mode]}")
 
     def train_dataloader(self):
-        """ Returns the training DataLoader or generator. """
+        """ Returns the training DataLoader or generator/raw list. """
         return self.select_with_mode('train', shuffle=True)
 
     def val_dataloader(self):
-        """ Returns the validation DataLoader or generator. """
+        """ Returns the validation DataLoader or generator/raw list. """
         return self.select_with_mode('val', shuffle=False)
 
     def test_dataloader(self):
-        """ Returns the test DataLoader or generator. """
+        """ Returns the test DataLoader or generator/raw list. """
         return self.select_with_mode('test', shuffle=False)
-

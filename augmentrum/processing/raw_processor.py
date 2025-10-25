@@ -39,9 +39,15 @@ class RawProcessor:
     """
 
     def __init__(self, conj=True, coil=True, align=True, remove_outliers=True, average=True,
-                 ecc=True, truncate=False, remove_water=False, shift_ref=True, phase_correct=True):
+                 ecc=True, truncate=False, remove_water=False, shift_ref=True, phase_correct=True,
+                 coil_method='adaptive', registration_method='fsl-mrs', remove_method='fsl-mrs',
+                 average_method='fsl-mrs', ecc_method='own', water_removal_method='fsl-mrs',
+                 shift_ref_method='fsl-mrs', phase_correct_method='fsl-mrs', **kwargs):
         """
-        Initializes the processor with specified steps.
+        Initializes the processor with specified steps. Make sure custom/added steps use some
+        form of update processing provenance, for clarification see:
+        augmentrum.processing.utils.update_processing_prov,
+        fsl_mrs.utils.preproc.nifti_mrs_proc.update_processing_prov
 
         Args:
             conj (bool): Whether to conjugate the data.
@@ -54,6 +60,15 @@ class RawProcessor:
             remove_water (bool): Whether to remove residual water peak.
             shift_ref (bool): Whether to shift spectrum to reference peak.
             phase_correct (bool): Whether to perform phase correction.
+
+            coil_method (str): Coil combination method ('fsl-mrs' or 'adaptive').
+            registration_method (str): Registration method.
+            remove_method (str): Outlier removal method.
+            average_method (str): Averaging method.
+            ecc_method (str): Eddy current correction method ('fsl-mrs' or 'own').
+            water_removal_method (str): Water removal method.
+            shift_ref_method (str): Frequency shifting method.
+            phase_correct_method (str): Phase correction method.
         """
         self.conj = conj
         self.coil = coil
@@ -66,14 +81,14 @@ class RawProcessor:
         self.shift_ref = shift_ref
         self.phase_correct = phase_correct
 
-        self.coil_method = 'adaptive'  # 'fsl-mrs' or 'adaptive'
-        self.registration_method = 'fsl-mrs'  # 'fsl-mrs', ...
-        self.remove_method = 'fsl-mrs'  # 'fsl-mrs', ...
-        self.average_method = 'fsl-mrs'  # 'fsl-mrs', ...
-        self.ecc_method = 'own'  # 'fsl-mrs' or 'own'
-        self.water_removal_method = 'fsl-mrs'  # 'fsl-mrs', ...
-        self.shift_ref_method = 'fsl-mrs'  # 'fsl-mrs', ...
-        self.phase_correct_method = 'fsl-mrs'  # 'fsl-mrs', ...
+        self.coil_method = coil_method
+        self.registration_method = registration_method
+        self.remove_method = remove_method
+        self.average_method = average_method
+        self.ecc_method = ecc_method
+        self.water_removal_method = water_removal_method
+        self.shift_ref_method = shift_ref_method
+        self.phase_correct_method = phase_correct_method
 
     def __call__(self, data_met, data_wat=None, report=None, **kwargs):
         """
@@ -108,9 +123,9 @@ class RawProcessor:
             data_met, data_wat = self.combine_averages(data_met, data_wat,
                                                        method=self.average_method, report=report)
 
-        if 'DIM_DYN' in data_met.dim_tags:
+        if 'DIM_DYN' in data_met.dim_tags or 'DIM_COIL' in data_met.dim_tags:
             data_met = safe_squeeze(data_met)
-        if data_wat is not None and 'DIM_DYN' in data_wat.dim_tags:
+        if data_wat is not None and ('DIM_DYN' in data_wat.dim_tags or 'DIM_COIL' in data_wat.dim_tags):
             data_wat = safe_squeeze(data_wat)
 
         if self.ecc:  # eddy current correction
@@ -150,7 +165,10 @@ class RawProcessor:
         """
         if 'DIM_COIL' in getattr(data_met, 'dim_tags', []) and data_met.shape[data_met.dim_position('DIM_COIL')] > 1:
             if method == 'fsl-mrs':
-                avg_ref = proc.average(data_wat, 'DIM_DYN') if data_wat is not None else None
+                if data_wat is not None and 'DIM_DYN' in getattr(data_wat, 'dim_tags', []):
+                    avg_ref = proc.average(data_wat, 'DIM_DYN')
+                else:
+                    avg_ref = data_wat
                 noise, covariance, no_prewhiten = self._estimate_noise_cov(data_met)
                 data_met = proc.coilcombine(data_met, reference=avg_ref, report=report, noise=noise,
                                             covariance=covariance, no_prewhiten=no_prewhiten)
@@ -176,18 +194,18 @@ class RawProcessor:
         Returns:
             Registered metabolite and water MRS data (NiftiMRS objects).
         """
-        if 'DIM_DYN' in getattr(data_met, 'dim_tags', []) and data_met.shape[data_met.dim_position('DIM_DYN')] > 1:
-            # squeeze coil dim if still present
-            if 'DIM_COIL' in data_met.dim_tags:
-                data_met = data_met.copy(remove_dim='DIM_COIL')
-            if data_wat is not None and 'DIM_COIL' in data_wat.dim_tags:
-                data_wat = data_wat.copy(remove_dim='DIM_COIL')
-
-            if method == 'fsl-mrs':
+        if method == 'fsl-mrs':
+            if 'DIM_DYN' in getattr(data_met, 'dim_tags', []) and data_met.shape[data_met.dim_position('DIM_DYN')] > 1:
+                # squeeze coil dim if still present
+                if 'DIM_COIL' in data_met.dim_tags:
+                    data_met = data_met.copy(remove_dim='DIM_COIL')
                 data_met = proc.align(data_met, 'DIM_DYN', ppmlim=(0.2, 4.2), report=report)
-                data_wat = proc.align(data_wat, 'DIM_DYN', ppmlim=(0, 8)) if data_wat is not None else None
-            else:
-                raise ValueError(f"Unknown registration method: {method}")
+            if data_wat is not None and 'DIM_DYN' in getattr(data_wat, 'dim_tags', []):
+                if data_wat is not None and 'DIM_COIL' in data_wat.dim_tags:
+                    data_wat = data_wat.copy(remove_dim='DIM_COIL')
+                data_wat = proc.align(data_wat, 'DIM_DYN', ppmlim=(0, 8))
+        else:
+            raise ValueError(f"Unknown registration method: {method}")
         return data_met, data_wat
 
     def remove_unlike(self, data_met, data_wat=None, method='fsl-mrs', report=None):
@@ -226,6 +244,7 @@ class RawProcessor:
         if 'DIM_DYN' in getattr(data_met, 'dim_tags', []):
             if data_met.shape[data_met.dim_position('DIM_DYN')] > 1:
                 data_met = proc.average(data_met, 'DIM_DYN', report=report)  # combine averages
+        if data_wat is not None and 'DIM_DYN' in getattr(data_wat, 'dim_tags', []):
             if data_wat is not None and data_wat.shape[data_wat.dim_position('DIM_DYN')] > 1:
                 data_wat = proc.average(data_wat, 'DIM_DYN')
         return data_met, data_wat

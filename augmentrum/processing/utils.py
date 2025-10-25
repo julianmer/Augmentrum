@@ -16,14 +16,51 @@
 #*************#
 import nifti_mrs.utils as utils
 import numpy as np
-import torch
+
+from datetime import datetime
 
 from fsl_mrs.core.nifti_mrs import NIFTI_MRS
-from fsl_mrs.utils.preproc.nifti_mrs_proc import update_processing_prov, DimensionsDoNotMatch
+from fsl_mrs.utils.preproc.nifti_mrs_proc import DimensionsDoNotMatch
 
 from scipy import integrate
 
 # from suspect.processing.denoising import sliding_gaussian
+
+# own
+from augmentrum import __version__
+
+
+#***********************************************#
+#   update nifti header with processing steps   #
+#***********************************************#
+def update_processing_prov(nmrs_obj, method, details):
+    """
+    Insert appropriate processing provenance information into the NIfTI-MRS header extension.
+
+    https://github.com/wtclarke/fsl_mrs/blob/master/fsl_mrs/utils/preproc/nifti_mrs_proc.py
+
+    @param nmrs_obj -- The NIFTI-MRS object which has been modified.
+    @param method -- The processing method applied.
+    @param details -- The details of the processing method.
+    """
+    # 1. Check for ProcessingApplied key and create if not present
+    if 'ProcessingApplied' in nmrs_obj.hdr_ext:
+        current_processing = nmrs_obj.hdr_ext['ProcessingApplied']
+    else:
+        current_processing = []
+
+    # 2. Form object to append.
+    prov_dict = {
+        'Time': datetime.now().isoformat(sep='T', timespec='milliseconds'),
+        'Program': 'Augmentrum',
+        'Version': __version__,
+        'Method': method,
+        'Details': details}
+
+    # 3. Append
+    current_processing.append(prov_dict)
+    nmrs_obj.add_hdr_field('ProcessingApplied', current_processing)
+
 
 
 #*********************************#
@@ -144,7 +181,7 @@ def own_nifti_ecc(data, reference, report=None):
         raise NotImplementedError("Report generation not implemented yet for own_nifti_ecc")
 
     # update processing prov
-    processing_info = f'{__name__}.ecc, '
+    processing_info = f'{__name__}.own_nifti_ecc, '
     processing_info += f'reference={reference.filename}.'
     update_processing_prov(corrected_obj, 'Eddy current correction', processing_info)
 

@@ -17,10 +17,6 @@
 #*************#
 import argparse
 
-# own
-from augmentrum.dataset.brainbeats import BrainBeatsData
-from augmentrum.dataset.fmrsinpain import fMRSinPainData
-
 
 #***************************************************#
 #   parse command line arguments and build config   #
@@ -99,15 +95,21 @@ def main():
     # load dataset
     print(f"Loading dataset from {config['data_dir']}...")
     if 'fmrsinpain' in config['data_dir'].lower():
+        from augmentrum.dataset.fmrsinpain import fMRSinPainData
         dataset = fMRSinPainData(**config)
     elif 'brainbeats' in config['data_dir'].lower():
+        from augmentrum.dataset.brainbeats import BrainBeatsData
         dataset = BrainBeatsData(**config)
+    elif 'ds006812' in config['data_dir'].lower():
+        from augmentrum.dataset.cows import COWSData
+        dataset = COWSData(**config)
 
     # example
     train_loader = dataset.train_dataloader()
     x, x_ref = next(train_loader)
     import matplotlib.pyplot as plt
     for elem in x:
+        print(elem.hdr_ext)
         elem.plot()
         plt.show()
 

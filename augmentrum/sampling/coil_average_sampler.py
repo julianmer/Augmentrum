@@ -18,6 +18,9 @@ import torch
 
 from fsl_mrs.core.nifti_mrs import split
 
+# own
+from augmentrum.processing.utils import update_processing_prov
+
 
 #**************************************************************************************************#
 #                                        Class CoilAverageSampler                                  #
@@ -58,32 +61,37 @@ class CoilAverageSampler:
             average_indices: List of average indices to select (for deterministic mode).
             **kwargs: Additional arguments.
         """
+        data_met, data_wat = self.sample_coils(data_met, data_wat, coil_indices)
+        data_met, data_wat = self.sample_averages(data_met, data_wat, average_indices)
+
+        if self.reweight:
+            data_met, data_wat = self._reweight_signals(data_met, data_wat)
+        return data_met, data_wat
+
+    def sample_coils(self, data_met, data_wat=None, coil_indices=None):
+        """
+        Samples specified coils from the data.
+
+        Args:
+            data_met: Metabolite MRS data (NiftiMRS object).
+            data_wat: Water reference MRS data (NiftiMRS object), optional
+            coil_indices: List of coil indices to select.
+        """
         dim_tags = getattr(data_met, 'dim_tags', [])
         has_coil = 'DIM_COIL' in dim_tags
-        has_dyn = 'DIM_DYN' in dim_tags
 
         # sampling logic
         if self.mode == 'random':
-            if coil_indices is not None or average_indices is not None:
-                raise ValueError("coil_indices and average_indices should be None in random mode")
-
+            if coil_indices is not None:
+                raise ValueError("coil_indices should be None in random mode")
             if has_coil:
                 coil_dim = data_met.dim_position('DIM_COIL')
                 min_c, max_c = self._get_limits(self.n_coils, data_met.shape[coil_dim] - 1)
                 if min_c < max_c:
                     num_coils = torch.randint(min_c, max_c, (1,)).item()
                     coil_indices =  torch.randperm(data_met.shape[coil_dim])[:num_coils].tolist()
-
-            if has_dyn:
-                dyn_dim = data_met.dim_position('DIM_DYN')
-                min_a, max_a = self._get_limits(self.n_averages, data_met.shape[dyn_dim] - 1)
-                if min_a < max_a:
-                    num_averages = torch.randint(min_a, max_a, (1,)).item()
-                    average_indices = torch.randperm(data_met.shape[dyn_dim])[:num_averages].tolist()
-
         elif self.mode == 'deterministic':
-            assert coil_indices is not None or average_indices is not None
-
+            assert coil_indices is not None
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
 
@@ -93,12 +101,53 @@ class CoilAverageSampler:
                 _, data_met = split(data_met, 'DIM_COIL', coil_indices)
                 if data_wat is not None:
                     _, data_wat = split(data_wat, 'DIM_COIL', coil_indices)
+
+            # update processing provenance
+            processing_info = f'{__name__}.sample_coils, '
+            processing_info += f'coil_indices={coil_indices}.'
+            update_processing_prov(data_met, 'Random Coil Sampling', processing_info)
+            if data_wat is not None:
+                update_processing_prov(data_wat, 'Random Coil Sampling', processing_info)
+
+        return data_met, data_wat
+
+    def sample_averages(self, data_met, data_wat=None, average_indices=None):
+        """
+        Samples specified averages from the data.
+
+        Args:
+            data_met: Metabolite MRS data (NiftiMRS object).
+            data_wat: Water reference MRS data (NiftiMRS object), optional.
+            average_indices: List of average indices to select.
+        """
+        dim_tags = getattr(data_met, 'dim_tags', [])
+        has_dyn = 'DIM_DYN' in dim_tags
+
+        # sampling logic
+        if self.mode == 'random':
+            if average_indices is not None:
+                raise ValueError("average_indices should be None in random mode")
+            if has_dyn:
+                dyn_dim = data_met.dim_position('DIM_DYN')
+                min_a, max_a = self._get_limits(self.n_averages, data_met.shape[dyn_dim] - 1)
+                if min_a < max_a:
+                    num_averages = torch.randint(min_a, max_a, (1,)).item()
+                    average_indices = torch.randperm(data_met.shape[dyn_dim])[:num_averages].tolist()
+        elif self.mode == 'deterministic':
+            assert average_indices is not None
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}")
+
+        # apply sampling
         if has_dyn and average_indices is not None:
             if isinstance(average_indices, list) or (isinstance(average_indices, int) and average_indices > 0):
                 _, data_met = split(data_met, 'DIM_DYN', average_indices)
 
-        if self.reweight:
-            data_met, data_wat = self._reweight_signals(data_met, data_wat)
+            # update processing provenance
+            processing_info = f'{__name__}.sample_averages, '
+            processing_info += f'coil_indices={average_indices}.'
+            update_processing_prov(data_met, 'Random Average Sampling', processing_info)
+
         return data_met, data_wat
 
     def _reweight_signals(self, data, water):
