@@ -211,6 +211,6 @@ if __name__ == '__main__':
     import matplotlib.pyplot as plt
 
     for elem in x:
-        print(elem.hdr_ext)a
+        print(elem.hdr_ext)
         elem.plot()
         plt.show()
