@@ -78,6 +78,8 @@ class NoisePerturber(SignalPerturber):
     """
     Implements signal-level augmentations of MRS data, including noise injection, frequency shifts,
     phase errors, and spectral misalignments (for edited spectra).
+
+    TODO: replace with better implementation
     """
     def __init__(self, amp_mean=0.0, amp_var_low=0.0, amp_var_high=0.0,
                  phase_low=0.0, phase_high=0.0, freq_low=0.0, freq_high=0.0, misalign=False):
@@ -115,22 +117,21 @@ class NoisePerturber(SignalPerturber):
             water: Optional water reference data (NiftiMRS object).
             **kwargs: Additional arguments.
         """
-
         # amplitude noise
-        if self.amp_var_high > self.amp_var_low:
+        if self.amp_var_high != 0 or self.amp_var_low != 0 or self.amp_mean != 0:
             amp_var = np.random.uniform(self.amp_var_low, self.amp_var_high, size=data.shape)
             amp_noise = (np.random.normal(self.amp_mean, np.sqrt(amp_var), size=data.shape) +
                          1j * np.random.normal(self.amp_mean, np.sqrt(amp_var), size=data.shape))
             data[:] += amp_noise
 
         # phase noise
-        if self.phase_high > self.phase_low:
+        if self.phase_high != 0 or self.phase_low != 0:
             phase = np.random.uniform(self.phase_low, self.phase_high,
                                       size=data.shape[:3] + (1,) + data.shape[4:])
             data[:] *= np.exp(1j * phase)
 
         # frequency shift
-        if self.freq_high > self.freq_low:
+        if self.freq_high != 0 or self.freq_low != 0:
             time = np.arange(data.shape[3]) * data.dwelltime
             freq_noise = np.random.uniform(self.freq_low, self.freq_high,
                                            size=data.shape[:3] + (1,) + data.shape[4:])
@@ -140,4 +141,13 @@ class NoisePerturber(SignalPerturber):
             # TODO: implement misalignment for edited spectra
             raise NotImplementedError("Misalignment not implemented yet.")
 
+        # TODO: update processing provenance with specific perturbations applied
+
         return data, water
+
+    # def update_processing_prov(self, data, water=None, **kwargs):
+    #     """
+    #     Placeholder for updating processing provenance. Makes sure the generic message is not added.
+    #     While the actual update is handled in the forward method to add the specific perturbations applied.
+    #     """
+    #     pass
