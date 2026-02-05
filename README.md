@@ -1,94 +1,75 @@
 # Augmentrum
-(Unlocking the full augmentation spectrum in MRS data)
 
-A modular system for spectral augmentation of synthetic and in-vivo MRS data, including subject sampling, coil/average selection, fast processing, and signal-level modifications.  
+*A Data Augmentation Package for MR Spectroscopy*  
 
----
-
-## 🔹 Features
-
-- **Subject Sampling**
-  - Reproducible train/val/test splits
-  - Random or deterministic sampling
-
-- **Coil / Average Selection**
-  - Flexible coil and average sampling
-  - Phased array coil modeling
-
-- **Processing Pipeline (Raw → Processed)**
-  - Coil combination
-  - Alignment
-  - Outlier removal
-  - Averaging
-  - Eddy current correction (ECC)
-  - Truncation
-  - Water removal
-  - Frequency shifting
-  - Phase correction
-
-- **Signal-level Augmentation (Processed → Augmented)**
-  - Noise corruption (amplitude, phase, frequency)
-  - Background (baselines, random walks, random peaks)
-  - Shimming issues (Lorentzian & Gaussian broadening)
-  - Eddy current corruption
-
-- **Pseudo-raw Simulation (Processed → Pseudo-Raw)**
-  - Coils from phased array
-  - Averages with scanner drifts, motion artifacts, etc.
+[![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![ISMRM 2026](https://img.shields.io/badge/ISMRM-Abstract%20%2305685-lightgrey.svg)](TODO fillink)
 
 ---
 
-## 📦 Package Structure
+## Overview
+**Augmentrum** is a modular Python framework designed to help researchers with limited *in-vivo* MRS data create diverse, physically consistent datasets through flexible augmentation. It supports **k-space resampling**, **coil and average sampling**, **signal-level perturbations**, and **synthetic artifact generation**, expanding both synthetic and *in-vivo* data in a realistic and controlled manner.
 
-```
-augmentrum/
-├── augmentation/              # Augmentation modules
-│   ├── signal_peturber.py
-│   └── pipeline.py
-│
-├── processing/                # Raw → Processed pipeline
-│   ├── raw_processor.py
-│   └── utils.py
-│
-├── dataset/                   # Dataset loaders
-│   ├── base_dataset.py
-│   ├── fmrsinpain.py
-│   └── brainbeats.py
-│
-├── sampling/                  # Subject splitting and sampling
-│   ├── subject_splitter.py
-│   └── coil_average_sampler.py
-│
-└── utils/                     # Helper functions
-    └── philips.py
-```
+Built for data-driven MRS applications, Augmentrum streamlines the integration of data augmentation into existing workflows. It operates on the **NIfTI-MRS** standard, making it compatible with any acquisition format. Simply load your data as NIfTI (using `spec2nii` if needed) and apply either predefined augmentation settings or build a custom pipeline by combining modules. Each augmentation can be parameterized or used with default ranges to populate a dense and diverse dataset environment.
+
+From MRSI reconstruction and acquisition variability to spectral perturbations and artifact synthesis, Augmentrum handles it all in a **modular**, **flexible**, and **easy-to-use** structure. Dataloaders allow **on-the-fly augmentation** for deep learning backends such as **PyTorch**, **TensorFlow**, **Keras**, and **JAX**, enabling robust training beyond static datasets.
+
+> **Note:** Augmentrum is currently in **alpha development**. It is an active research framework and may undergo changes as modules and interfaces evolve.
 
 ---
 
-## 🚀 Installation
+## Features
+- Modular augmentation across time, frequency, and k-space domains  
+- Physically valid transformations for realistic variability  
+- Native NIfTI-MRS I/O and metadata tracking  
+- Customizable pipelines with user-defined parameters  
+- On-the-fly augmentation for machine learning workflows  
 
+---
+
+## Installation
 ```bash
-git clone https://github.com/yourname/augmentrum.git
-cd augmentrum
+pip install augmentrum
+```
+or from source:
+```bash
+git clone https://github.com/julianmer/Augmentrum.git
+cd Augmentrum
 pip install -e .
 ```
 
 ---
 
-## 📚 Roadmap
+## Quick Start
+```python
+from augmentrum import Augmentrum
 
-### ✅ Completed / Near-complete
-- Raw → Processed pipeline (coil combination, alignment, outlier removal, averaging, ECC, truncation, water removal, frequency shifting, phase correction)  
-- Noise corruption (amplitude, phase, frequency)  
-- Dataloader module: automatic splits, online/offline sampling  
+data   # list of NIfTI-MRS files
+water   # list of corresponding water reference files (optional)
 
-### 🚧 In Progress
-- Background augmentation: baselines, random walks, peaks  
-- Shimming issues: Lorentzian & Gaussian broadening  
-- Eddy current corruption  
-- Processed → pseudo-raw modeling (coils, averages)  
+# custom pipline example
+pipeline = [
+    'coil_sampling',
+    'average_sampling',
+    'processing',
+    'noise_addition',
+]
 
-### 📝 To Do
-- Performance benchmarking (processing speed check)  
-- Make it pip-installable
-- Documentation and tutorials
+# initialize Augmentrum with data and optional water references
+augmenter = Augmentrum(data, water=water, pipeline=pipeline)
+
+# get a dataloader for PyTorch with on-the-fly augmentation
+train_data = augmenter.get_dataloader(
+    batch_size=16,
+    shuffle=True,
+    backend='pytorch'  # or 'tensorflow', 'keras', 'jax'
+)
+```
+
+---
+
+## Citation
+J. T. LaMaster, J. P. Merkofer, K. C. Igwe, "Augmentrum: A Data Augmentation Package for MR Spectroscopy", _International Society for Magnetic Resonance in Medicine (ISMRM)_, Abstract #05685, Cape Town, South Africa, 2026.
+
+---
