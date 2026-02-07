@@ -6,7 +6,7 @@
 #                                                                                                  #
 # Created: 2025-10-07                                                                              #
 #                                                                                                  #
-# Purpose: Implements for fast processing of selected coil/average subsets.                        #
+# Purpose: Implements NIfTI-based processing for raw MRS data using FSL-MRS functions              #
 #                                                                                                  #
 ####################################################################################################
 
@@ -20,27 +20,34 @@ from fsl_mrs.utils.preproc import nifti_mrs_proc as proc
 
 # own
 from augmentrum.processing.utils import safe_squeeze
+from augmentrum.core.base_module import BaseModule
+from augmentrum.core import Backend
 
 
 #**************************************************************************************************#
-#                                       Class RawProcessor                                         #
+#                                    Class NIfTI_RawProcessor                                      #
 #**************************************************************************************************#
 #                                                                                                  #
-# Processes raw MRS data with steps like coil combination, alignment, outlier removal,             #
-# averaging, eddy current correction, truncation, water removal, frequency shifting, and phase     #
-# correction.                                                                                      #
+# Processes raw MRS data using FSL-MRS functions that operate on NIfTI-MRS objects.                #
+# Handles: coil combination, alignment, outlier removal, averaging, eddy current correction,       #
+# truncation, water removal, frequency shifting, and phase correction.                             #
 #                                                                                                  #
 #**************************************************************************************************#
-class RawProcessor:
+class NIfTI_RawProcessor(BaseModule):
     """
-    Processes raw MRS data with steps like coil combination, alignment, outlier removal,
-    averaging, eddy current correction, truncation, water removal, frequency shifting, and phase
-    correction.
+    Processes raw MRS data using FSL-MRS functions on NIfTI-MRS objects.
+
+    This module operates on the NIFTI_LIST backend, processing each NIFTI_MRS
+    object individually using FSL-MRS processing functions.
+
+    Logging is automatic via BaseModule (only if not volatile).
     """
+
+    SUPPORTED_BACKENDS = [Backend.NIFTI_LIST]
 
     def __init__(self, conj=True, coil=True, align=True, remove_outliers=True, average=True,
                  ecc=True, truncate=False, remove_water=False, shift_ref=True, phase_correct=True,
-                 coil_method='adaptive', registration_method='fsl-mrs', remove_method='fsl-mrs',
+                 coil_method='fsl-mrs', registration_method='fsl-mrs', remove_method='fsl-mrs',
                  average_method='fsl-mrs', ecc_method='own', water_removal_method='fsl-mrs',
                  shift_ref_method='fsl-mrs', phase_correct_method='fsl-mrs', **kwargs):
         """
@@ -70,6 +77,8 @@ class RawProcessor:
             shift_ref_method (str): Frequency shifting method.
             phase_correct_method (str): Phase correction method.
         """
+        super().__init__(**kwargs)
+
         self.conj = conj
         self.coil = coil
         self.align = align  # after water removal the slowest step
@@ -90,9 +99,40 @@ class RawProcessor:
         self.shift_ref_method = shift_ref_method
         self.phase_correct_method = phase_correct_method
 
-    def __call__(self, data_met, data_wat=None, report=None, **kwargs):
+    def process_nifti_list(self, data_list, water_list=None, report=None, **kwargs):
         """
-        Processes the MRS data with the specified steps.
+        Processes lists of NIfTI-MRS data with the specified steps.
+
+        Each NIFTI_MRS object in the list is processed individually using
+        FSL-MRS processing functions.
+
+        Args:
+            data_list: List of metabolite MRS data (NIFTI_MRS objects).
+            water_list: List of water reference MRS data (NIFTI_MRS objects), optional.
+            report: Optional report object for logging processing steps.
+            **kwargs: Additional arguments.
+
+        Returns:
+            Tuple of (processed_data_list, processed_water_list)
+        """
+        processed_data = []
+        processed_water = []
+
+        for i, data_met in enumerate(data_list):
+            data_wat = water_list[i] if water_list is not None else None
+
+            # Process this subject
+            proc_met, proc_wat = self._process_single(data_met, data_wat, report=report, **kwargs)
+
+            processed_data.append(proc_met)
+            if water_list is not None:
+                processed_water.append(proc_wat if proc_wat is not None else data_wat)
+
+        return processed_data, (processed_water if water_list is not None else None)
+
+    def _process_single(self, data_met, data_wat=None, report=None, **kwargs):
+        """
+        Processes a single subject's MRS data with the specified steps.
 
         Args:
             data_met: Metabolite MRS data (NiftiMRS object).

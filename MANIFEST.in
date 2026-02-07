@@ -1,0 +1,8 @@
+include README.md
+include LICENSE
+recursive-include augmentrum *.py
+recursive-include assets *.png *.jpg *.svg
+recursive-exclude * __pycache__
+recursive-exclude * *.pyc
+recursive-exclude * *.pyo
+recursive-exclude * .DS_Store

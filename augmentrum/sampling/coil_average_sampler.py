@@ -20,6 +20,8 @@ from fsl_mrs.core.nifti_mrs import split
 
 # own
 from augmentrum.processing.utils import update_processing_prov
+from augmentrum.core.base_module import BaseModule
+from augmentrum.core import Backend
 
 
 #**************************************************************************************************#
@@ -30,10 +32,21 @@ from augmentrum.processing.utils import update_processing_prov
 # and reweighting.                                                                                 #
 #                                                                                                  #
 #**************************************************************************************************#
-class CoilAverageSampler:
+class CoilAverageSampler(BaseModule):
     """
     Samples coils and averages from raw MRS data.
+
+    Supports all backends by using NIfTI-MRS metadata to identify dimensions,
+    then efficiently sampling from the underlying data (whether NIFTI objects or tensors).
+
+    For non-NIFTI_LIST backends, automatically converts to NIFTI_LIST for dimension
+    inspection, performs sampling, then converts back to original backend.
+
+    This ensures compatibility with all backends while maintaining efficiency.
     """
+
+    SUPPORTED_BACKENDS = [Backend.NIFTI_LIST, Backend.NUMPY, Backend.PYTORCH,
+                         Backend.TENSORFLOW, Backend.KERAS, Backend.JAX]
 
     def __init__(self, mode='random', n_coils=(1, None), n_averages=(1, None), reweight=False):
         """
@@ -45,21 +58,104 @@ class CoilAverageSampler:
             n_averages (tuple): Min/max number of averages to sample.
             reweight (bool): Whether to reweight signals after sampling.
         """
+        super().__init__(mode=mode, n_coils=n_coils, n_averages=n_averages, reweight=reweight)
+
         self.mode = mode
         self.n_coils = n_coils
         self.n_averages = n_averages
         self.reweight = reweight
 
-    def __call__(self, data_met, data_wat=None, coil_indices=None, average_indices=None, **kwargs):
+    def __call__(self, data, water=None, **kwargs):
         """
-        Samples coils and averages from the data.
+        Process data with automatic backend conversion.
+
+        If backend is not NIFTI_LIST, automatically converts to NIFTI_LIST,
+        processes (using NIfTI-MRS metadata for dimension info), then converts back.
+
+        This allows efficient processing while maintaining backend compatibility.
+        """
+        from augmentrum.core import NIfTI_MRS_Plus
+
+        if not isinstance(data, NIfTI_MRS_Plus):
+            # Plain list - wrap it
+            data = NIfTI_MRS_Plus(nifti_list=data, backend=Backend.NIFTI_LIST)
+
+        # Store original backend
+        original_backend = data.backend
+        original_volatile = data.volatile
+
+        # Convert to NIFTI_LIST if needed (for dimension inspection)
+        if original_backend != Backend.NIFTI_LIST:
+            # Convert to NIFTI_LIST for processing
+            data = NIfTI_MRS_Plus(
+                nifti_list=data.to_nifti_list(),
+                backend=Backend.NIFTI_LIST,
+                volatile=original_volatile
+            )
+            if water is not None:
+                water = NIfTI_MRS_Plus(
+                    nifti_list=water.to_nifti_list(),
+                    backend=Backend.NIFTI_LIST,
+                    volatile=original_volatile
+                )
+
+        # Process using parent class method (calls process_nifti_list)
+        result_data, result_water = super().__call__(data, water, **kwargs)
+
+        # Convert back to original backend if needed
+        if original_backend != Backend.NIFTI_LIST:
+            result_data = NIfTI_MRS_Plus(
+                nifti_list=result_data.to_nifti_list(),
+                backend=original_backend,
+                volatile=original_volatile
+            )
+            if result_water is not None:
+                result_water = NIfTI_MRS_Plus(
+                    nifti_list=result_water.to_nifti_list(),
+                    backend=original_backend,
+                    volatile=original_volatile
+                )
+
+        return result_data, result_water
+
+    def process_nifti_list(self, data_list, water_list=None, coil_indices=None, average_indices=None, **kwargs):
+        """
+        Samples coils and averages from each NIFTI_MRS in the list.
+
+        Args:
+            data_list: List of metabolite MRS data (NIFTI_MRS objects).
+            water_list: List of water reference MRS data (NIFTI_MRS objects), optional.
+            coil_indices: List of coil indices to select (for deterministic mode).
+            average_indices: List of average indices to select (for deterministic mode).
+            **kwargs: Additional arguments.
+
+        Returns:
+            Tuple of (processed_data_list, processed_water_list)
+        """
+        processed_data = []
+        processed_water = []
+
+        for i, data_met in enumerate(data_list):
+            data_wat = water_list[i] if water_list is not None else None
+
+            # Sample coils and averages for this subject
+            data_met, data_wat = self._process_single(data_met, data_wat, coil_indices, average_indices)
+
+            processed_data.append(data_met)
+            if water_list is not None:
+                processed_water.append(data_wat if data_wat is not None else water_list[i])
+
+        return processed_data, (processed_water if water_list is not None else None)
+
+    def _process_single(self, data_met, data_wat=None, coil_indices=None, average_indices=None):
+        """
+        Samples coils and averages from a single subject's data.
 
         Args:
             data_met: Metabolite MRS data (NiftiMRS object).
             data_wat: Water reference MRS data (NiftiMRS object), optional.
             coil_indices: List of coil indices to select (for deterministic mode).
             average_indices: List of average indices to select (for deterministic mode).
-            **kwargs: Additional arguments.
         """
         data_met, data_wat = self.sample_coils(data_met, data_wat, coil_indices)
         data_met, data_wat = self.sample_averages(data_met, data_wat, average_indices)
@@ -75,25 +171,27 @@ class CoilAverageSampler:
         Args:
             data_met: Metabolite MRS data (NiftiMRS object).
             data_wat: Water reference MRS data (NiftiMRS object), optional
-            coil_indices: List of coil indices to select.
+            coil_indices: List of coil indices to select (if provided, use deterministic mode).
         """
         dim_tags = getattr(data_met, 'dim_tags', [])
         has_coil = 'DIM_COIL' in dim_tags
 
-        # sampling logic
-        if self.mode == 'random':
-            if coil_indices is not None:
-                raise ValueError("coil_indices should be None in random mode")
-            if has_coil:
-                coil_dim = data_met.dim_position('DIM_COIL')
-                min_c, max_c = self._get_limits(self.n_coils, data_met.shape[coil_dim] - 1)
-                if min_c < max_c:
-                    num_coils = torch.randint(min_c, max_c, (1,)).item()
-                    coil_indices =  torch.randperm(data_met.shape[coil_dim])[:num_coils].tolist()
-        elif self.mode == 'deterministic':
-            assert coil_indices is not None
-        else:
-            raise ValueError(f"Unknown mode: {self.mode}")
+        # Determine mode at runtime: if coil_indices provided, use them (deterministic)
+        # Otherwise, sample randomly (if mode='random') or use all (if mode='deterministic' but no indices)
+        if coil_indices is not None:
+            # Deterministic mode: use provided indices
+            pass  # Will apply indices below
+        elif self.mode == 'random' and has_coil:
+            # Random mode: sample random coils
+            coil_dim = data_met.dim_position('DIM_COIL')
+            min_c, max_c = self._get_limits(self.n_coils, data_met.shape[coil_dim] - 1)
+            if min_c < max_c:
+                num_coils = torch.randint(min_c, max_c, (1,)).item()
+                coil_indices = torch.randperm(data_met.shape[coil_dim])[:num_coils].tolist()
+        elif self.mode == 'deterministic' and has_coil:
+            # Deterministic mode but no indices provided: use all coils
+            coil_dim = data_met.dim_position('DIM_COIL')
+            coil_indices = list(range(data_met.shape[coil_dim]))
 
         # apply sampling
         if has_coil and coil_indices is not None:
@@ -123,20 +221,22 @@ class CoilAverageSampler:
         dim_tags = getattr(data_met, 'dim_tags', [])
         has_dyn = 'DIM_DYN' in dim_tags
 
-        # sampling logic
-        if self.mode == 'random':
-            if average_indices is not None:
-                raise ValueError("average_indices should be None in random mode")
-            if has_dyn:
-                dyn_dim = data_met.dim_position('DIM_DYN')
-                min_a, max_a = self._get_limits(self.n_averages, data_met.shape[dyn_dim] - 1)
-                if min_a < max_a:
-                    num_averages = torch.randint(min_a, max_a, (1,)).item()
-                    average_indices = torch.randperm(data_met.shape[dyn_dim])[:num_averages].tolist()
-        elif self.mode == 'deterministic':
-            assert average_indices is not None
-        else:
-            raise ValueError(f"Unknown mode: {self.mode}")
+        # Determine mode at runtime: if average_indices provided, use them (deterministic)
+        # Otherwise, sample randomly (if mode='random') or use all (if mode='deterministic' but no indices)
+        if average_indices is not None:
+            # Deterministic mode: use provided indices
+            pass  # Will apply indices below
+        elif self.mode == 'random' and has_dyn:
+            # Random mode: sample random averages
+            dyn_dim = data_met.dim_position('DIM_DYN')
+            min_a, max_a = self._get_limits(self.n_averages, data_met.shape[dyn_dim] - 1)
+            if min_a < max_a:
+                num_averages = torch.randint(min_a, max_a, (1,)).item()
+                average_indices = torch.randperm(data_met.shape[dyn_dim])[:num_averages].tolist()
+        elif self.mode == 'deterministic' and has_dyn:
+            # Deterministic mode but no indices provided: use all averages
+            dyn_dim = data_met.dim_position('DIM_DYN')
+            average_indices = list(range(data_met.shape[dyn_dim]))
 
         # apply sampling
         if has_dyn and average_indices is not None:

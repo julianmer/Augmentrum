@@ -3,8 +3,9 @@
   <h1 style="margin-top: 5px; margin-bottom: 5px;">Augmentrum</h1>
   <p style="margin-top: 0px;"><em>A Data Augmentation Package for MR Spectroscopy</em></p>
   
+  [![PyPI version](https://badge.fury.io/py/augmentrum.svg)](https://badge.fury.io/py/augmentrum)
   [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
-  [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+  [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
   [![ISMRM 2026](https://img.shields.io/badge/ISMRM-Abstract%20%2305685-lightgrey.svg)](https://submissions.mirasmart.com/ISMRM2026/Itinerary/PresentationDetail.aspx?evdid=1450)
 </div>
 
@@ -54,12 +55,14 @@ from augmentrum import Augmentrum
 data   # list of NIfTI-MRS files
 water   # list of corresponding water reference files (optional)
 
-# custom pipline example
+# custom pipeline example
 pipeline = [
     'coil_sampling',
     'average_sampling',
     'processing',
-    'noise_addition',
+    'line_broadening',
+    'baseline',
+    'noise',
 ]
 
 # initialize Augmentrum with data and optional water references
@@ -69,7 +72,7 @@ augmenter = Augmentrum(data, water=water, pipeline=pipeline)
 train_data = augmenter.get_dataloader(
     batch_size=16,
     shuffle=True,
-    backend='pytorch'  # or 'tensorflow', 'keras', 'jax'
+    backend='pytorch'  # or 'tensorflow', 'keras', 'jax', 'numpy'
 )
 ```
 

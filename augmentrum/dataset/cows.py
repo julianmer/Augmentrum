@@ -21,47 +21,70 @@ import numpy as np
 import scipy.io
 
 # own
-from augmentrum.dataset.base_dataset import BaseMRSDatasetLoader
+from augmentrum import Augmentrum
 
 
 #**************************************************************************************************#
-#                                          Class COWSData                                          #
+#                                       Function: COWSData                                         #
 #**************************************************************************************************#
 #                                                                                                  #
-#  The data module to load the COWS dataset connected to the Augmentrum package.                   #
+# Helper function to load the COWS dataset and create an Augmentrum instance.                      #
 #                                                                                                  #
 #**************************************************************************************************#
-class COWSData(BaseMRSDatasetLoader):
-    def __init__(self, data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
-                     n_coils=(1, None), n_averages=(1, None), pipelines=None, cache_det=True,
-                     sampling_mode=None, to_tensor=True, **kwargs):
-        if sampling_mode is None:
-            sampling_mode = {'train': 'random', 'val': 'deterministic', 'test': 'deterministic'}
+def COWSData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
+             n_coils=(1, None), n_averages=(1, None), pipelines=None,
+             modes=None, backend='pytorch', volatile=False, **kwargs):
+    """
+    Load COWS data and create an Augmentrum instance.
 
-        if 'location' in kwargs:
-            location = kwargs.pop('location')
-        else:
-            location = None
-        if 'water_sup' in kwargs:
-            water_sup = kwargs.pop('water_sup')
-        else:
-            water_sup = None
+    Args:
+        data_dir: Path to COWS data directory
+        batch_size: Batch size for dataloaders
+        seed: Random seed for reproducibility
+        val_frac: Validation fraction (default 0.1)
+        test_frac: Test fraction (default 0.1)
+        n_coils: Coil sampling range (min, max) or None
+        n_averages: Average sampling range (min, max) or None
+        pipelines: Custom pipelines dict or None for defaults
+        modes: Sampling modes dict or None for defaults
+        backend: Backend to use ('numpy', 'pytorch', etc.)
+        volatile: If True, skip provenance logging
+        **kwargs: Additional parameters (location, water_sup, etc.)
 
-        # load all data once
-        loader = COWSDataModule(data_dir=data_dir, location=location, water_sup=water_sup)
+    Returns:
+        Augmentrum instance with COWS data loaded
+    """
+    if modes is None:
+        modes = {'train': 'random', 'val': 'deterministic', 'test': 'deterministic'}
 
-        # data, water, mm, mm_water, names = loader.load_mats()
-        # data = [self.gen_nifti(fids=d['fid'][0][:, 0], bw=d['sw_h'][0].item(),
-        #                        cf=d['sf'][0].item(), tr=2000, te=20) for d in data]
-        # water = [self.gen_nifti(fids=w['fid'][0][:, 0], bw=w['sw_h'][0].item(),
-        #                        cf=w['sf'][0].item(), tr=2000, te=20) for w in water]
+    if 'location' in kwargs:
+        location = kwargs.pop('location')
+    else:
+        location = None
+    if 'water_sup' in kwargs:
+        water_sup = kwargs.pop('water_sup')
+    else:
+        water_sup = None
 
-        data, water, mm, mm_water, names = loader.load_twix()
+    # Load all data once
+    loader = COWSDataModule(data_dir=data_dir, location=location, water_sup=water_sup)
+    data, water, mm, mm_water, names = loader.load_twix()
 
-        super().__init__(data=data, water=water, batch_size=batch_size, seed=seed,
-                         val_frac=val_frac, test_frac=test_frac, n_coils=n_coils,
-                         n_averages=n_averages, pipelines=pipelines, cache_det=cache_det,
-                         sampling_mode=sampling_mode, to_tensor=to_tensor, **kwargs)
+    # Create and return Augmentrum instance
+    return Augmentrum(
+        data=data,
+        water=water,
+        split_fractions={'val': val_frac, 'test': test_frac},
+        pipelines=pipelines,
+        modes=modes,
+        backend=backend,
+        batch_size=batch_size,
+        seed=seed,
+        volatile=volatile,
+        n_coils=n_coils,
+        n_averages=n_averages,
+        **kwargs
+    )
 
     def gen_nifti(self, fids, bw, cf, tr=None, te=None):
         from fsl_mrs.core.nifti_mrs import gen_nifti_mrs

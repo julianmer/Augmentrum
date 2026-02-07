@@ -26,58 +26,88 @@ from spec2nii.Philips.philips_data_list import _read_list
 from torch.utils.data import DataLoader
 
 # own
-from augmentrum.dataset.base_dataset import BaseMRSDatasetLoader
+from augmentrum import Augmentrum
 from augmentrum.utils.philips import read_Philips_data
 
 
 #**************************************************************************************************#
-#                                       Class fMRSinPainData                                       #
+#                                    Function: fMRSinPainData                                      #
 #**************************************************************************************************#
 #                                                                                                  #
-#  The data module to load the fMRSinPain dataset connected to the Augmentrum package.             #
+# Helper function to load the fMRSinPain dataset and create an Augmentrum instance.                #
 #                                                                                                  #
 #**************************************************************************************************#
-class fMRSinPainData(BaseMRSDatasetLoader):
-    def __init__(self, data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
-                     n_coils=(1, None), n_averages=(1, None), pipelines=None, cache_det=True,
-                     sampling_mode=None, to_tensor=True, **kwargs):
+def fMRSinPainData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
+                   n_coils=(1, None), n_averages=(1, None), pipelines=None,
+                   modes=None, backend='pytorch', volatile=False, **kwargs):
+    """
+    Load fMRSinPain data and create an Augmentrum instance.
 
-        if sampling_mode is None:
-            sampling_mode = {'train': 'random', 'val': 'deterministic', 'test': 'deterministic'}
+    Args:
+        data_dir: Path to fMRSinPain data directory
+        batch_size: Batch size for dataloaders
+        seed: Random seed for reproducibility
+        val_frac: Validation fraction (default 0.1)
+        test_frac: Test fraction (default 0.1)
+        n_coils: Coil sampling range (min, max) or None
+        n_averages: Average sampling range (min, max) or None
+        pipelines: Custom pipelines dict or None for defaults
+        modes: Sampling modes dict or None for defaults
+        backend: Backend to use ('numpy', 'pytorch', etc.)
+        volatile: If True, skip provenance logging
+        **kwargs: Additional parameters for modules
 
-        # load all data once
-        loader = InVivoNSAModule(data_dir=data_dir, fMRS=False, coil_comb=True, verbose=0)
+    Returns:
+        Augmentrum instance with fMRSinPain data loaded
+    """
+    if modes is None:
+        modes = {'train': 'random', 'val': 'deterministic', 'test': 'deterministic'}
 
-        data = [self.gen_nifti(d, bw=2000, cf=127.794504, tr=4000, te=23.46100044)
-                for d in loader.data]
-        water = [self.gen_nifti(w, bw=2000, cf=127.794504, tr=4000, te=23.46100044)
-                 for w in loader.refs]
+    # Load all data once
+    loader = InVivoNSAModule(data_dir=data_dir, fMRS=False, coil_comb=True, verbose=0)
 
-        super().__init__(data=data, water=water, batch_size=batch_size, seed=seed,
-                         val_frac=val_frac, test_frac=test_frac, n_coils=n_coils,
-                         n_averages=n_averages, pipelines=pipelines, cache_det=cache_det,
-                         sampling_mode=sampling_mode, to_tensor=to_tensor, **kwargs)
-
-    def gen_nifti(self, fids, bw, cf, tr=None, te=None):
+    # Helper to convert to nifti
+    def gen_nifti(fids, bw, cf, tr=None, te=None):
         from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
-
-        # if len(fids.shape) == 2:   # add coil dim if missing
-        #     fids = fids[:, np.newaxis]
 
         fids = gen_nifti_mrs(data=fids.reshape((1, 1, 1,) + fids.shape),
                              dwelltime=1 / bw,
                              spec_freq=cf,
-                             nucleus='1H',
-                             dim_tags=['DIM_DYN', None, None],
-                             no_conj=True,
-                             )
-
-        # add header fields
+                             nucleus='1H')
         if tr is not None:
-            fids.add_hdr_field('RepetitionTime', tr)
+            fids.set_metadata('RepetitionTime', tr / 1000)
         if te is not None:
-            fids.add_hdr_field('EchoTime', te)
+            fids.set_metadata('EchoTime', te / 1000)
+
+        # Set dimension tags
+        if len(fids.shape) > 4:
+            fids.set_dim_tag(4, 'DIM_DYN')
+        if len(fids.shape) > 5:
+            fids.set_dim_tag(5, 'DIM_COIL')
+
         return fids
+
+    # Convert to nifti
+    data = [gen_nifti(d, bw=2000, cf=127.794504, tr=4000, te=23.46100044)
+            for d in loader.data]
+    water = [gen_nifti(w, bw=2000, cf=127.794504, tr=4000, te=23.46100044)
+             for w in loader.refs]
+
+    # Create and return Augmentrum instance
+    return Augmentrum(
+        data=data,
+        water=water,
+        split_fractions={'val': val_frac, 'test': test_frac},
+        pipelines=pipelines,
+        modes=modes,
+        backend=backend,
+        batch_size=batch_size,
+        seed=seed,
+        volatile=volatile,
+        n_coils=n_coils,
+        n_averages=n_averages,
+        **kwargs
+    )
 
 
 #**************************************************************************************************#

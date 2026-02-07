@@ -26,41 +26,70 @@ from fsl_mrs.utils.preproc import nifti_mrs_proc as proc
 from tqdm import tqdm
 
 # own
-from augmentrum.dataset.base_dataset import BaseMRSDatasetLoader
+from augmentrum import Augmentrum
 from augmentrum.processing.utils import (own_nifti_coil_combination,
                                          own_nifti_coil_combination_adaptive,
                                          resample_signal_fir, resample_signal_lp)
 
 
 #**************************************************************************************************#
-#                                        Class BrainBeatsData                                      #
+#                                     Function: BrainBeatsData                                     #
 #**************************************************************************************************#
 #                                                                                                  #
-# The data module to load the brain beats study data combined with Augmentrum.                     #
+# Helper function to load the Brain Beats study data and create an Augmentrum instance.            #
 #                                                                                                  #
 #**************************************************************************************************#
-class BrainBeatsData(BaseMRSDatasetLoader):
-    def __init__(self, data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
-                 n_coils=(1, None), n_averages=(1, None), pipelines=None, cache_det=True,
-                 sampling_mode=None, to_tensor=True, **kwargs):
+def BrainBeatsData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
+                   n_coils=(1, None), n_averages=(1, None), pipelines=None,
+                   modes=None, backend='pytorch', volatile=False, **kwargs):
+    """
+    Load BrainBeats data and create an Augmentrum instance.
 
-        if sampling_mode is None:
-            sampling_mode = {'train': 'random', 'val': 'deterministic', 'test': 'deterministic'}
+    Args:
+        data_dir: Path to BrainBeats data directory
+        batch_size: Batch size for dataloaders
+        seed: Random seed for reproducibility
+        val_frac: Validation fraction (default 0.1)
+        test_frac: Test fraction (default 0.1)
+        n_coils: Coil sampling range (min, max) or None
+        n_averages: Average sampling range (min, max) or None
+        pipelines: Custom pipelines dict or None for defaults
+        modes: Sampling modes dict or None for defaults
+        backend: Backend to use ('numpy', 'pytorch', etc.)
+        volatile: If True, skip provenance logging
+        **kwargs: Additional parameters for modules
 
-        # load all data once
-        loader = BrainBeatsDataModule()
-        data_dict = loader.load_all_niftis(data_dir)
+    Returns:
+        Augmentrum instance with BrainBeats data loaded
+    """
+    if modes is None:
+        modes = {'train': 'random', 'val': 'deterministic', 'test': 'deterministic'}
 
-        data, water = [], []
-        for subject_id, sub_data in data_dict.items():
-            for scan_id, scans in sub_data.items():
-                data.append(scans['metab'])
-                water.append(scans['wref'])
+    # Load all data once
+    loader = BrainBeatsDataModule()
+    data_dict = loader.load_all_niftis(data_dir)
 
-        super().__init__(data=data, water=water, batch_size=batch_size, seed=seed,
-                         val_frac=val_frac, test_frac=test_frac, n_coils=n_coils,
-                         n_averages=n_averages, pipelines=pipelines, cache_det=cache_det,
-                         sampling_mode=sampling_mode, to_tensor=to_tensor, **kwargs)
+    data, water = [], []
+    for subject_id, sub_data in data_dict.items():
+        for scan_id, scans in sub_data.items():
+            data.append(scans['metab'])
+            water.append(scans['wref'])
+
+    # Create and return Augmentrum instance
+    return Augmentrum(
+        data=data,
+        water=water,
+        split_fractions={'val': val_frac, 'test': test_frac},
+        pipelines=pipelines,
+        modes=modes,
+        backend=backend,
+        batch_size=batch_size,
+        seed=seed,
+        volatile=volatile,
+        n_coils=n_coils,
+        n_averages=n_averages,
+        **kwargs
+    )
 
 
 #**************************************************************************************************#
