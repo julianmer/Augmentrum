@@ -115,6 +115,58 @@ def create_random_generator(data: NIfTI_MRS_Plus,
         yield batch_data_list, batch_water_list
 
 
+def create_fixed_generator(data: NIfTI_MRS_Plus,
+                           water: Optional[NIfTI_MRS_Plus],
+                           pipeline,
+                           batch_size: int,
+                           shuffle: bool = False):
+    """
+    Create generator with fixed augmentation parameters (backend-agnostic).
+
+    Unlike deterministic mode (which creates all combinations), this simply
+    iterates over subjects and applies the pipeline with FIXED parameter values.
+
+    For example:
+      - mode='on-the-fly': n_coils=(1,8) → randomly picks 1-8 each time
+      - mode='fixed': n_coils=4 → always uses exactly 4 coils
+
+    Args:
+        data: NIfTI_MRS_Plus with subjects
+        water: Optional water reference
+        pipeline: Augmentation pipeline to apply (uses exact values from modules)
+        batch_size: Batch size
+        shuffle: Whether to shuffle subject order
+
+    Yields:
+        (batch_data, batch_water) tuples
+    """
+    import random
+
+    n_subjects = len(data)
+    indices = list(range(n_subjects))
+
+    if shuffle:
+        random.shuffle(indices)
+
+    # Yield batches of subjects
+    for i in range(0, n_subjects, batch_size):
+        batch_indices = indices[i:i + batch_size]
+        batch_data_list, batch_water_list = [], []
+
+        for idx in batch_indices:
+            # Get subject
+            subj_data = data[idx]
+            subj_water = water[idx] if water is not None else None
+
+            # Apply pipeline (modules will use their fixed parameter values)
+            aug_data, aug_water = pipeline(subj_data, subj_water)
+
+            batch_data_list.append(aug_data)
+            batch_water_list.append(aug_water)
+
+        yield batch_data_list, batch_water_list
+
+
 def create_deterministic_generator(data: NIfTI_MRS_Plus,
                                    water: Optional[NIfTI_MRS_Plus],
                                    pipeline,
@@ -124,6 +176,9 @@ def create_deterministic_generator(data: NIfTI_MRS_Plus,
                                    shuffle: bool = False):
     """
     Create deterministic generator over all combinations (backend-agnostic).
+
+    DEPRECATED: Use 'fixed' mode instead for simpler iteration.
+    This creates a combinatorial explosion of (subject × coils × averages).
 
     Args:
         data: NIfTI_MRS_Plus with subjects
@@ -253,14 +308,23 @@ def wrap_generator_for_framework(generator: Callable,
     Args:
         generator: Generator (iterator) yielding (data, water) batches
         backend: Target backend for data conversion
-        framework: 'pytorch', 'tensorflow', 'keras', 'jax', 'numpy'
+        framework: 'pytorch', 'tensorflow', 'keras', 'jax', 'numpy', None (raw)
 
     Returns:
         Framework-specific dataloader/dataset/generator
     """
     # Default framework from backend
     if framework is None:
-        framework = backend.name.lower()
+        backend_name = backend.name.lower()
+        # nifti_list backend should default to raw python iteration
+        if backend_name == 'nifti_list':
+            framework = 'python'
+        else:
+            framework = backend_name
+
+    # For nifti_list or raw python: return generator directly (no conversion)
+    if framework in ['python', 'nifti_list']:
+        return generator
 
     # For numpy/jax: return generator directly with backend conversion
     if framework in ['numpy', 'jax']:

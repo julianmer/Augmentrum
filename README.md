@@ -69,7 +69,7 @@ pipeline = [
 augmenter = Augmentrum(data, water=water, pipeline=pipeline)
 
 # get a dataloader for PyTorch with on-the-fly augmentation
-train_data = augmenter.get_dataloader(
+train_data = augmenter.dataloader(
     batch_size=16,
     shuffle=True,
     backend='pytorch'  # or 'tensorflow', 'keras', 'jax', 'numpy'

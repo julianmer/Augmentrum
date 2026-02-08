@@ -16,6 +16,8 @@ from typing import List, Dict, Any, Optional, Union
 from copy import deepcopy
 import warnings
 
+from augmentrum import __version__
+
 try:
     import torch
     TORCH_AVAILABLE = True
@@ -89,6 +91,11 @@ class NIfTI_MRS_Plus:
             metadata: Optional metadata dictionary
         """
         self.volatile = volatile
+
+        # Convert backend to enum if it's a string
+        if isinstance(backend, str):
+            backend = Backend[backend.upper()]
+
         self._backend = backend or Backend.NIFTI_LIST
 
         # Always store as list of NIfTI-MRS internally
@@ -232,6 +239,31 @@ class NIfTI_MRS_Plus:
             if 'common_provenance' not in self.metadata_common:
                 self.metadata_common['common_provenance'] = []
             self.metadata_common['common_provenance'].append(provenance)
+
+            # Also update the actual NIfTI-MRS header extension for all subjects
+            for nifti in self.nifti_list:
+                if hasattr(nifti, 'hdr_ext') and nifti.hdr_ext is not None:
+                    # Format for FSL-MRS compatibility
+                    processing_entry = {
+                        'Time': provenance['Timestamp'],
+                        'Program': 'Augmentrum',
+                        'Version': __version__,
+                        'Method': operation,
+                        'Details': str(details)
+                    }
+
+                    # Get existing ProcessingApplied list
+                    if 'ProcessingApplied' in nifti.hdr_ext:
+                        current_processing = nifti.hdr_ext['ProcessingApplied']
+                    else:
+                        current_processing = []
+
+                    # Append new entry
+                    current_processing.append(processing_entry)
+
+                    # Use add_hdr_field to properly update the header extension
+                    nifti.add_hdr_field('ProcessingApplied', current_processing)
+
         else:
             # Individual operations
             for idx in individual_idx:
@@ -239,6 +271,34 @@ class NIfTI_MRS_Plus:
                     if 'ProcessingProvenance' not in self.metadata_individual[idx]:
                         self.metadata_individual[idx]['ProcessingProvenance'] = []
                     self.metadata_individual[idx]['ProcessingProvenance'].append(provenance)
+
+                    # Also update the actual NIfTI-MRS header extension
+                    if idx < len(self.nifti_list):
+                        nifti = self.nifti_list[idx]
+                        if hasattr(nifti, 'hdr_ext') and nifti.hdr_ext is not None:
+                            try:
+                                processing_entry = {
+                                    'Time': provenance['Timestamp'],
+                                    'Program': 'Augmentrum',
+                                    'Version': '0.0.1',
+                                    'Method': operation,
+                                    'Details': str(details)
+                                }
+
+                                # Get existing ProcessingApplied list
+                                if 'ProcessingApplied' in nifti.hdr_ext:
+                                    current_processing = nifti.hdr_ext['ProcessingApplied']
+                                else:
+                                    current_processing = []
+
+                                # Append new entry
+                                current_processing.append(processing_entry)
+
+                                # Use add_hdr_field to properly update the header extension
+                                nifti.add_hdr_field('ProcessingApplied', current_processing)
+                            except (TypeError, AttributeError):
+                                # If header extension doesn't support modification, skip silently
+                                pass
 
     def copy(self) -> 'NIfTI_MRS_Plus':
         """Create a deep copy."""
@@ -405,19 +465,34 @@ class NIfTI_MRS_Plus:
         return None
 
     def __getitem__(self, idx):
-        """Get subset of subjects."""
+        """
+        Get subject(s) from the batch.
+
+        Args:
+            idx: Integer index or slice
+
+        Returns:
+            - If idx is int: Returns the NIFTI_MRS object directly
+            - If idx is slice: Returns a new NIfTI_MRS_Plus with subset of subjects
+
+        Examples:
+            >>> nifti_plus[0]  # Returns NIFTI_MRS object for first subject
+            >>> nifti_plus[0:5]  # Returns NIfTI_MRS_Plus with subjects 0-4
+        """
         if isinstance(idx, int):
-            idx = slice(idx, idx + 1)
+            # Single index - return the NIFTI_MRS object directly
+            return self.nifti_list[idx]
+        else:
+            # Slice - return new NIfTI_MRS_Plus with subset
+            new_nifti_list = self.nifti_list[idx]
+            new_individual = self.metadata_individual[idx] if not self.volatile else []
 
-        new_nifti_list = self.nifti_list[idx]
-        new_individual = self.metadata_individual[idx] if not self.volatile else []
-
-        return NIfTI_MRS_Plus(
-            nifti_list=new_nifti_list,
-            backend=self._backend,
-            volatile=self.volatile,
-            metadata={'common': self.metadata_common, 'individual': new_individual}
-        )
+            return NIfTI_MRS_Plus(
+                nifti_list=new_nifti_list,
+                backend=self._backend,
+                volatile=self.volatile,
+                metadata={'common': self.metadata_common, 'individual': new_individual}
+            )
 
     def __setitem__(self, idx, values):
         """

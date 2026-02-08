@@ -54,16 +54,44 @@ class CoilAverageSampler(BaseModule):
 
         Args:
             mode (str): 'random' or 'deterministic' sampling mode.
-            n_coils (tuple): Min/max number of coils to sample.
-            n_averages (tuple): Min/max number of averages to sample.
+            n_coils (tuple or int): Min/max number of coils to sample, or exact value.
+                                   Examples: (1, 8) = range, 4 = exactly 4
+            n_averages (tuple or int): Min/max number of averages to sample, or exact value.
             reweight (bool): Whether to reweight signals after sampling.
         """
         super().__init__(mode=mode, n_coils=n_coils, n_averages=n_averages, reweight=reweight)
 
         self.mode = mode
-        self.n_coils = n_coils
-        self.n_averages = n_averages
+
+        # Normalize to tuples: int → (value, value), tuple → tuple
+        self.n_coils = self._normalize_param(n_coils)
+        self.n_averages = self._normalize_param(n_averages)
         self.reweight = reweight
+
+    def _normalize_param(self, param):
+        """
+        Normalize parameter to tuple format.
+
+        Args:
+            param: Either tuple (min, max) or int/float (exact value)
+
+        Returns:
+            Tuple (min, max)
+
+        Examples:
+            4 → (4, 4)  # Exactly 4
+            (1, 8) → (1, 8)  # Range 1-8
+            None → (1, None)  # Default
+        """
+        if param is None:
+            return (1, None)
+        elif isinstance(param, (int, float)):
+            # Single value → exact value
+            return (int(param), int(param))
+        elif isinstance(param, tuple):
+            return param
+        else:
+            raise TypeError(f"Parameter must be int, float, or tuple, got {type(param)}")
 
     def __call__(self, data, water=None, **kwargs):
         """

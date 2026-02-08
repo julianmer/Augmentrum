@@ -177,8 +177,8 @@ class NIfTI_RawProcessor(BaseModule):
             data_wat = proc.truncate_or_pad(data_wat, -1, 'first') if data_wat is not None else None
 
         if self.remove_water:   # unsuppressed water removal
-            data_met = self.water_removal(data_met, data_wat,
-                                          method=self.water_removal_method, report=report)
+            data_met, data_wat = self.water_removal(data_met, data_wat,
+                                                    method=self.water_removal_method, report=report)
 
         if self.shift_ref:  # frequency shift to reference
             data_met, data_wat = self.shift_to_reference(data_met, data_wat,
@@ -328,7 +328,7 @@ class NIfTI_RawProcessor(BaseModule):
             MRS data with water peak removed (NiftiMRS object).
         """
         if method == 'fsl-mrs':
-            data_met = proc.remove_peaks(data_met, [-0.15, -0.15], limit_units='ppm',
+            data_met = proc.remove_peaks(data_met, [-0.15, 0.15], limit_units='ppm',
                                          report=report)  # remove residual water
         else:
             raise ValueError(f"Unknown water removal method: {method}")

@@ -72,6 +72,10 @@ def parse_args():
         'cache_det': args.cache_det,
         'sampling_mode': None,
         'to_tensor': False,
+        'location': 'PARIETAL',
+        'water_sup': 'VAPOR',
+        'conj': False,   # only for openneuro
+        'coil_method': 'fsl-mrs',
         'perturber_args': {
             'amp_mean': 0.0,
             'amp_var_low': 0.0, 'amp_var_high': 0.0,

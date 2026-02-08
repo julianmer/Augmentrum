@@ -75,6 +75,11 @@ class AugmentationPipeline:
             if isinstance(step, BaseModule):
                 current_backend = current_data.backend
 
+                # Ensure backend is a Backend enum
+                if isinstance(current_backend, str):
+                    from augmentrum.core.nifti_mrs_plus import Backend
+                    current_backend = Backend[current_backend.upper()]
+
                 if not step.supports_backend(current_backend):
                     # Need to convert to compatible backend
                     preferred_backend = step.get_preferred_backend()
