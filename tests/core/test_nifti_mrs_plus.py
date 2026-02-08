@@ -402,9 +402,9 @@ class TestNIfTIMRSPlusIndexing:
         """Test indexing with single integer."""
         subset = nifti_mrs_plus[0]
 
-        assert isinstance(subset, NIfTI_MRS_Plus)
-        assert len(subset) == 1
-        assert subset.backend == nifti_mrs_plus.backend
+        # Single index returns NIFTI_MRS object directly
+        assert hasattr(subset, 'dwelltime')  # Check it's a NIFTI_MRS object
+        assert hasattr(subset, 'shape')
 
     def test_getitem_slice(self, nifti_mrs_plus):
         """Test slicing."""
@@ -423,7 +423,7 @@ class TestNIfTIMRSPlusIndexing:
     def test_getitem_preserves_volatile(self, dummy_nifti_list):
         """Test that slicing preserves volatile setting."""
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, volatile=True)
-        subset = nifti_plus[0]
+        subset = nifti_plus[0:2]  # Use slice to get NIfTI_MRS_Plus
 
         assert subset.volatile == True
 
@@ -549,8 +549,8 @@ class TestNIfTIMRSPlusSetItem:
         """Test setting a single subject in NIFTI_LIST backend."""
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
-        # Get original first subject
-        original_first = nifti_plus[0].list()[0]
+        # Get original first subject (nifti_plus[0] returns NIFTI_MRS directly)
+        original_first = nifti_plus[0]
 
         # Replace first subject with dummy
         nifti_plus.nifti_list[0] = dummy_nifti_mrs
@@ -564,7 +564,7 @@ class TestNIfTIMRSPlusSetItem:
         nifti_plus = NIfTI_MRS_Plus(nifti_list=nifti_mrs_plus.list(), backend=Backend.NIFTI_LIST)
 
         # Get original data
-        original_data = nifti_plus[0].list()[0][:]
+        original_data = nifti_plus[0][:]
 
         # Create new values for specific timepoints
         new_values = np.ones((1, 1, 1, 100, 8, 16), dtype=np.complex128) * 999
@@ -573,7 +573,7 @@ class TestNIfTIMRSPlusSetItem:
         nifti_plus.nifti_list[0][:, :, :, 100:200, :, :] = new_values
 
         # Verify change
-        modified_data = nifti_plus[0].list()[0][:]
+        modified_data = nifti_plus[0][:]
         assert not np.allclose(modified_data[:, :, :, 100:200, :, :],
                                original_data[:, :, :, 100:200, :, :])
 

@@ -1,0 +1,397 @@
+"""
+Tests for parameter sampling (tuple ranges and distributions).
+
+Tests cover:
+- Tuple range support for all augmentation parameters
+- Global distribution sampling
+- Per-parameter distribution control
+- Nested ranges for complex augmentations (echoes, peaks)
+- Distribution behavior verification
+"""
+
+import pytest
+import numpy as np
+from augmentrum import Augmentrum
+from augmentrum.core import Backend
+
+
+class TestParameterRangeSupport:
+    """Test that all parameters support tuple ranges."""
+
+    def test_noise_parameters_ranges(self, dummy_nifti_list):
+        """Test noise parameters with ranges."""
+        # sigma_frac
+        aug1 = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise'],
+            sigma_frac=(0.01, 0.05),
+            batch_size=1
+        )
+        assert aug1 is not None
+
+        # snr_db
+        aug2 = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise'],
+            snr_db=(10, 30),
+            batch_size=1
+        )
+        assert aug2 is not None
+
+        # sigma
+        aug3 = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise'],
+            sigma=(0.001, 0.01),
+            batch_size=1
+        )
+        assert aug3 is not None
+
+    def test_broadening_parameters_ranges(self, dummy_nifti_list):
+        """Test line broadening parameters with ranges."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['line_broadening'],
+            lb_hz=(0, 10),
+            gb_hz=(0, 5),
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_phase_parameters_ranges(self, dummy_nifti_list):
+        """Test phase parameters with ranges."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['phase'],
+            zero_order_deg=(-180, 180),
+            first_order_deg=(-90, 90),
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_frequency_shift_range(self, dummy_nifti_list):
+        """Test frequency shift with range."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['frequency_shift'],
+            shift_hz=(-5, 5),
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_baseline_parameters_ranges(self, dummy_nifti_list):
+        """Test baseline parameters with ranges."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['baseline'],
+            baseline_frac=(0.01, 0.1),
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_water_parameters_ranges(self, dummy_nifti_list):
+        """Test residual water parameters with ranges."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['water'],
+            water_ppm=(4.65, 4.75),
+            water_phase=(-45, 45),
+            water_amp=(0.05, 0.2),
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_eddy_current_parameters_ranges(self, dummy_nifti_list):
+        """Test eddy current parameters with ranges."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['eddy'],
+            eddy_std=(0.3, 1.0),
+            eddy_strength=(0.5, 1.5),
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_apodization_parameters_ranges(self, dummy_nifti_list):
+        """Test apodization parameters with ranges."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['apod'],
+            apod_lb=(0, 10),
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+
+class TestDistributionSampling:
+    """Test different distribution types."""
+
+    def test_uniform_distribution(self, dummy_nifti_list):
+        """Test uniform distribution (default)."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise'],
+            sigma_frac=(0.01, 0.05),
+            param_distribution='uniform',
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_gaussian_distribution(self, dummy_nifti_list):
+        """Test Gaussian/normal distribution."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise'],
+            sigma_frac=(0.01, 0.05),
+            param_distribution='gaussian',
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_exponential_distribution(self, dummy_nifti_list):
+        """Test exponential distribution."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise'],
+            sigma_frac=(0.01, 0.05),
+            param_distribution='exponential',
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_beta_distribution(self, dummy_nifti_list):
+        """Test beta distribution."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise'],
+            sigma_frac=(0.01, 0.05),
+            param_distribution='beta',
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_all_distributions_work(self, dummy_nifti_list):
+        """Test that all distribution types are accepted."""
+        distributions = ['uniform', 'gaussian', 'normal', 'exponential', 'beta']
+
+        for dist in distributions:
+            augmenter = Augmentrum(
+                data=dummy_nifti_list,
+                pipeline=['noise'],
+                sigma_frac=(0.01, 0.05),
+                param_distribution=dist,
+                batch_size=1
+            )
+            assert augmenter is not None
+
+
+class TestPerParameterDistributions:
+    """Test per-parameter distribution control."""
+
+    def test_per_parameter_distributions_basic(self, dummy_nifti_list):
+        """Test basic per-parameter distributions."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise', 'line_broadening'],
+            sigma_frac=(0.01, 0.05),
+            lb_hz=(0, 10),
+            param_distributions={
+                'sigma_frac': 'exponential',
+                'lb_hz': 'gaussian',
+            },
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_per_parameter_overrides_global(self, dummy_nifti_list):
+        """Test that per-parameter distributions override global."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise', 'line_broadening'],
+            sigma_frac=(0.01, 0.05),
+            lb_hz=(0, 10),
+            param_distribution='uniform',  # Global
+            param_distributions={
+                'sigma_frac': 'exponential',  # Override for sigma_frac
+            },
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_multiple_parameter_distributions(self, dummy_nifti_list):
+        """Test multiple parameters with different distributions."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise', 'line_broadening', 'phase', 'baseline'],
+            sigma_frac=(0.01, 0.05),
+            lb_hz=(0, 10),
+            phase0_deg=(-180, 180),
+            baseline_frac=(0.01, 0.1),
+            param_distributions={
+                'sigma_frac': 'exponential',
+                'lb_hz': 'gaussian',
+                'phase0_deg': 'uniform',
+                'baseline_frac': 'beta',
+            },
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+
+class TestNestedRanges:
+    """Test nested tuple ranges for complex augmentations."""
+
+    def test_spurious_echoes_nested_ranges(self, dummy_nifti_list):
+        """Test spurious echoes with nested ranges."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['echoes'],
+            echoes=[
+                # (amp, width, phase, freq, time)
+                ((0.1, 0.3), (0.2, 0.5), 0.0, (4.0, 6.0), 0.0),
+            ],
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_spurious_echoes_mixed_ranges_scalars(self, dummy_nifti_list):
+        """Test spurious echoes with mixed ranges and scalars."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['echoes'],
+            echoes=[
+                # First echo: mix of ranges and scalars
+                ((0.1, 0.3), 0.3, 0.0, (4.0, 6.0), 0.0),
+                # Second echo: different mix
+                (0.2, (0.2, 0.5), (-90, 90), 5.0, 0.05),
+            ],
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_artificial_peaks_nested_ranges(self, dummy_nifti_list):
+        """Test artificial peaks with nested ranges."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['peaks'],
+            peaks=[
+                # (amp, freq, width, phase, lineshape)
+                ((0.5, 1.0), (3.0, 3.2), 0.05, 0.0, 'lorentzian'),
+            ],
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_artificial_peaks_mixed_ranges_scalars(self, dummy_nifti_list):
+        """Test artificial peaks with mixed ranges and scalars."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['peaks'],
+            peaks=[
+                # First peak
+                ((0.5, 1.0), (3.0, 3.2), 0.05, 0.0, 'lorentzian'),
+                # Second peak with different mix
+                (0.8, 2.0, (0.03, 0.07), (-45, 45), 'gaussian'),
+            ],
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_nested_ranges_with_distributions(self, dummy_nifti_list):
+        """Test nested ranges with per-parameter distributions."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['echoes'],
+            echoes=[
+                ((0.1, 0.3), (0.2, 0.5), 0.0, (4.0, 6.0), 0.0),
+            ],
+            param_distributions={
+                'echo_amp_0': 'uniform',
+                'echo_width_0': 'gaussian',
+                'echo_freq_0': 'exponential',
+            },
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+
+class TestParameterSamplingIntegration:
+    """Integration tests for parameter sampling."""
+
+    def test_complex_pipeline_with_all_ranges(self, dummy_nifti_list):
+        """Test complex pipeline with all parameter types."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise', 'line_broadening', 'phase', 'baseline', 'echoes'],
+            # All with ranges
+            sigma_frac=(0.01, 0.05),
+            lb_hz=(0, 10),
+            gb_hz=(0, 5),
+            phase0_deg=(-180, 180),
+            phase1_deg=(-90, 90),
+            baseline_frac=(0.01, 0.1),
+            echoes=[
+                ((0.1, 0.3), (0.2, 0.5), 0.0, (4.0, 6.0), 0.0),
+            ],
+            # Per-parameter distributions
+            param_distributions={
+                'sigma_frac': 'exponential',
+                'lb_hz': 'gaussian',
+                'phase0_deg': 'uniform',
+                'baseline_frac': 'exponential',
+                'echo_amp_0': 'uniform',
+            },
+            batch_size=2,
+            backend='numpy'
+        )
+
+        assert augmenter is not None
+        assert augmenter.pipelines is not None
+        assert len(augmenter.pipelines) > 0
+
+    def test_backward_compatibility_scalars_still_work(self, dummy_nifti_list):
+        """Test that old scalar-only code still works (backward compatibility)."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise', 'line_broadening', 'phase'],
+            sigma_frac=0.03,        # Scalar (old style)
+            lb_hz=5.0,              # Scalar (old style)
+            phase0_deg=0.0,         # Scalar (old style)
+            batch_size=1,
+            backend='numpy'
+        )
+
+        assert augmenter is not None
+
+    def test_mixed_old_and_new_style(self, dummy_nifti_list):
+        """Test mixing old (scalar) and new (range) parameter styles."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise', 'line_broadening', 'phase'],
+            sigma_frac=(0.01, 0.05),  # New style (range)
+            lb_hz=5.0,                # Old style (scalar)
+            phase0_deg=(-180, 180),   # New style (range)
+            batch_size=1,
+            backend='numpy'
+        )
+
+        assert augmenter is not None

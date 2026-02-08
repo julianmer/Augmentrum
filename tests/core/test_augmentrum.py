@@ -23,8 +23,8 @@ class TestAugmentrumCreation:
         augmenter = Augmentrum(data=dummy_nifti_list)
 
         assert augmenter is not None
-        assert augmenter.data is not None
-        assert len(augmenter.data) == len(dummy_nifti_list)
+        assert augmenter.splits['train'][0] is not None
+        assert len(augmenter.splits['train'][0]) == len(dummy_nifti_list)
 
     def test_create_with_data_and_water(self, dummy_nifti_list):
         """Test creating Augmentrum with water reference."""
@@ -33,22 +33,22 @@ class TestAugmentrumCreation:
             water=dummy_nifti_list[:2]
         )
 
-        assert augmenter.water is not None
-        assert len(augmenter.water) == 2
+        assert augmenter.splits['train'][1] is not None
+        assert len(augmenter.splits['train'][1]) == 2
 
     def test_create_with_default_pipeline(self, dummy_nifti_list):
         """Test default pipeline creation."""
         augmenter = Augmentrum(data=dummy_nifti_list)
 
-        assert augmenter.pipeline is not None
-        assert len(augmenter.pipeline.steps) > 0
+        assert augmenter.pipelines['train'] is not None
+        assert len(augmenter.pipelines['train'].steps) > 0
 
     def test_create_with_custom_pipeline_list(self, dummy_nifti_list):
         """Test custom pipeline with list of strings."""
         pipeline = ['coil_sampling', 'processing', 'noise']
         augmenter = Augmentrum(data=dummy_nifti_list, pipeline=pipeline)
 
-        assert len(augmenter.pipeline.steps) == len(pipeline)
+        assert len(augmenter.pipelines['train'].steps) == len(pipeline)
 
     def test_create_with_backend(self, dummy_nifti_list):
         """Test creating with specific backend."""
@@ -60,12 +60,15 @@ class TestAugmentrumCreation:
         """Test creating with custom split ratios."""
         augmenter = Augmentrum(
             data=dummy_nifti_list,
-            val_frac=0.2,
-            test_frac=0.1
+            split_fractions={'val': 0.2, 'test': 0.1}
         )
 
-        assert augmenter.val_frac == 0.2
-        assert augmenter.test_frac == 0.1
+        # Check that splits were created
+        assert 'train' in augmenter.splits
+        assert 'val' in augmenter.splits
+        assert 'test' in augmenter.splits
+        # Check that val split has data (approximately 20% of 5 = 1 subject)
+        assert len(augmenter.splits['val'][0]) >= 1
 
 
 class TestAugmentrumPipeline:
@@ -78,13 +81,114 @@ class TestAugmentrumPipeline:
             pipeline=['noise']
         )
 
-        assert len(augmenter.pipeline.steps) == 1
+        assert len(augmenter.pipelines['train'].steps) == 1
 
     def test_empty_pipeline(self, dummy_nifti_list):
         """Test empty pipeline."""
         augmenter = Augmentrum(data=dummy_nifti_list, pipeline=[])
 
-        assert len(augmenter.pipeline.steps) == 0
+        assert len(augmenter.pipelines['train'].steps) == 0
+
+
+class TestAugmentrumParameterRanges:
+    """Test tuple range support for parameters (NEW in v0.0.1)."""
+
+    def test_scalar_parameters(self, dummy_nifti_list):
+        """Test backward compatibility with scalar parameters."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise', 'line_broadening'],
+            sigma_frac=0.03,  # Scalar
+            lb_hz=5.0,        # Scalar
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_tuple_range_parameters(self, dummy_nifti_list):
+        """Test NEW tuple range support for augmentation parameters."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise', 'line_broadening', 'phase'],
+            sigma_frac=(0.01, 0.05),     # Tuple range
+            lb_hz=(0, 10),               # Tuple range
+            gb_hz=(0, 5),                # Tuple range
+            phase0_deg=(-180, 180),      # Tuple range
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_mixed_scalar_and_tuple(self, dummy_nifti_list):
+        """Test mixing scalar and tuple parameters."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise', 'line_broadening'],
+            sigma_frac=(0.01, 0.05),  # Tuple
+            lb_hz=5.0,                # Scalar
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_global_param_distribution(self, dummy_nifti_list):
+        """Test global distribution for all parameters."""
+        for dist in ['uniform', 'gaussian', 'exponential', 'beta']:
+            augmenter = Augmentrum(
+                data=dummy_nifti_list,
+                pipeline=['noise'],
+                sigma_frac=(0.01, 0.05),
+                param_distribution=dist,  # Global distribution
+                batch_size=1
+            )
+
+            assert augmenter is not None
+
+    def test_per_parameter_distributions(self, dummy_nifti_list):
+        """Test NEW per-parameter distribution control."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['noise', 'line_broadening', 'phase'],
+            sigma_frac=(0.01, 0.05),
+            lb_hz=(0, 10),
+            phase0_deg=(-180, 180),
+            param_distributions={
+                'sigma_frac': 'exponential',  # Different distribution per param
+                'lb_hz': 'gaussian',
+                'phase0_deg': 'uniform',
+            },
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_nested_ranges_spurious_echoes(self, dummy_nifti_list):
+        """Test NEW nested tuple ranges for spurious echoes."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['echoes'],
+            echoes=[
+                # Each element can be range or scalar
+                ((0.1, 0.3), (0.2, 0.5), 0.0, (4.0, 6.0), 0.0),
+            ],
+            batch_size=1
+        )
+
+        assert augmenter is not None
+
+    def test_nested_ranges_artificial_peaks(self, dummy_nifti_list):
+        """Test NEW nested tuple ranges for artificial peaks."""
+        augmenter = Augmentrum(
+            data=dummy_nifti_list,
+            pipeline=['peaks'],
+            peaks=[
+                # Each element can be range or scalar (except lineshape string)
+                ((0.5, 1.0), (3.0, 3.2), 0.05, 0.0, 'lorentzian'),
+            ],
+            batch_size=1
+        )
+
+        assert augmenter is not None
 
 
 class TestAugmentrumDataloaders:
@@ -93,28 +197,28 @@ class TestAugmentrumDataloaders:
     def test_get_dataloader_default(self, dummy_nifti_list):
         """Test getting dataloader with defaults."""
         augmenter = Augmentrum(data=dummy_nifti_list, batch_size=2)
-        loader = augmenter.get_dataloader()
+        loader = augmenter.train_dataloader()
 
         assert loader is not None
 
     def test_get_dataloader_with_batch_size(self, dummy_nifti_list):
         """Test getting dataloader with specific batch size."""
-        augmenter = Augmentrum(data=dummy_nifti_list)
-        loader = augmenter.get_dataloader(batch_size=2)
+        augmenter = Augmentrum(data=dummy_nifti_list, batch_size=2)
+        loader = augmenter.train_dataloader()
 
         assert loader is not None
 
     def test_get_dataloader_with_shuffle(self, dummy_nifti_list):
         """Test getting dataloader with shuffle."""
         augmenter = Augmentrum(data=dummy_nifti_list, batch_size=2)
-        loader = augmenter.get_dataloader(shuffle=True)
+        loader = augmenter.train_dataloader()
 
         assert loader is not None
 
     def test_get_dataloader_with_backend(self, dummy_nifti_list):
         """Test getting dataloader with specific backend."""
         augmenter = Augmentrum(data=dummy_nifti_list, batch_size=2)
-        loader = augmenter.get_dataloader(backend='numpy')
+        loader = augmenter.train_dataloader(framework='numpy')
 
         assert loader is not None
 
@@ -167,7 +271,7 @@ class TestAugmentrumIntegration:
     def test_with_single_subject(self, dummy_nifti_single_coil):
         """Test with single subject."""
         augmenter = Augmentrum(data=[dummy_nifti_single_coil], batch_size=1)
-        loader = augmenter.get_dataloader()
+        loader = augmenter.train_dataloader()
 
         assert loader is not None
 
@@ -178,7 +282,7 @@ class TestAugmentrumEdgeCases:
     def test_batch_size_larger_than_dataset(self, dummy_nifti_list):
         """Test batch size larger than dataset."""
         augmenter = Augmentrum(data=dummy_nifti_list, batch_size=100)
-        loader = augmenter.get_dataloader()
+        loader = augmenter.train_dataloader()
 
         assert loader is not None
 
@@ -190,8 +294,8 @@ class TestAugmentrumEdgeCases:
             water=dummy_nifti_list[:2]
         )
 
-        assert len(augmenter.data) == len(dummy_nifti_list)
-        assert len(augmenter.water) == 2
+        assert len(augmenter.splits['train'][0]) == len(dummy_nifti_list)
+        assert len(augmenter.splits['train'][1]) == 2
 
 
 class TestAugmentrumRepr:

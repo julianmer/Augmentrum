@@ -388,10 +388,10 @@ class TestCoilAverageSamplerProcessing:
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         # Original should have coil dimension
-        original_shape = nifti_plus[0].list()[0].shape
+        original_shape = nifti_plus[0].shape
 
         result_data, _ = sampler(nifti_plus, None)
-        new_shape = result_data[0].list()[0].shape
+        new_shape = result_data[0].shape
 
         # Coil dimension should be removed or averaged
         assert len(new_shape) <= len(original_shape)
@@ -401,7 +401,7 @@ class TestCoilAverageSamplerProcessing:
         sampler = CoilAverageSampler()
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
-        original_data = nifti_plus[0].list()[0][:].copy()
+        original_data = nifti_plus[0][:].copy()
         result_data, _ = sampler(nifti_plus, None)
 
         # Data should be different after averaging
@@ -414,7 +414,7 @@ class TestCoilAverageSamplerProcessing:
 
         result_data, _ = sampler(nifti_plus, None)
         # Result should still be complex
-        assert np.iscomplexobj(result_data[0].list()[0][:])
+        assert np.iscomplexobj(result_data[0][:])
 
     def test_process_all_subjects(self, dummy_nifti_list):
         """Test that all subjects are processed."""
