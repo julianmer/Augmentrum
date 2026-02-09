@@ -60,13 +60,21 @@ class AugmentationPipeline:
         Applies the augmentation steps in sequence to the data.
 
         Args:
-            data: Input MRS data as NIfTI_MRS_Plus object.
-            water: Optional water reference as NIfTI_MRS_Plus object.
+            data: Input MRS data as NIfTI_MRS_Plus object or NIFTI_MRS object.
+            water: Optional water reference as NIfTI_MRS_Plus object or NIFTI_MRS object.
             **kwargs: Additional arguments passed to each step.
 
         Returns:
             Tuple of (processed_data, processed_water)
         """
+        from fsl_mrs.core.nifti_mrs import NIFTI_MRS
+
+        # Auto-wrap single NIFTI_MRS objects to NIfTI_MRS_Plus
+        if isinstance(data, NIFTI_MRS):
+            data = NIfTI_MRS_Plus([data], volatile=True)
+        if isinstance(water, NIFTI_MRS):
+            water = NIfTI_MRS_Plus([water], volatile=True)
+
         current_data = data
         current_water = water
 

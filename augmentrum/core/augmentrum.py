@@ -4,6 +4,7 @@
 #                                                                                                  #
 # Authors: J. P. Merkofer (j.p.merkofer@tue.nl)                                                    #
 #          J. T. LaMaster (jlamaste@gmail.com)                                                     #
+#          K. C. Igwe (kci2104@columbia.edu)                                                       #
 #                                                                                                  #
 # Created: 2026-02-07                                                                              #
 #                                                                                                  #
@@ -12,6 +13,7 @@
 ####################################################################################################
 
 from typing import List, Optional, Union, Dict, Any
+from augmentrum import __version__
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 from augmentrum.core.pipeline import AugmentationPipeline
 
@@ -504,14 +506,15 @@ class Augmentrum:
 
         # Gaussian Noise
         elif name in ['noise', 'gaussian_noise']:
-            if 'snr_db' in kwargs:
+            if 'snr' in kwargs:
+                module_kwargs['snr'] = sample('snr', kwargs['snr'])
+            elif 'snr_db' in kwargs:
                 module_kwargs['snr_db'] = sample('snr_db', kwargs['snr_db'])
             elif 'sigma' in kwargs:
                 module_kwargs['sigma'] = sample('sigma', kwargs['sigma'])
             else:
                 sigma_frac = kwargs.get('sigma_frac', 0.02)
                 module_kwargs['sigma_frac'] = sample('sigma_frac', sigma_frac)
-
 
         # Line Broadening
         elif name in ['line_broadening', 'broadening']:
@@ -972,6 +975,236 @@ class Augmentrum:
             'min_time': min(times),
             'max_time': max(times),
         }
+
+    def export_batch(self, output_dir, format='nifti-mrs', metadata=None, split='train',
+                     n_batches=1, prefix='augmented', save_water=True):
+        """
+        Export augmented batches to disk in various formats.
+
+        This method enables efficient batch export of augmented datasets in formats
+        compatible with existing MRS software (FSL-MRS, Osprey, LCModel, etc.).
+
+        Currently supports:
+        - NIFTI-MRS: Individual NIFTI files (one per augmented spectrum) ✓
+        - HDF5: Single file with all metadata (data only, limited reconstruction) ✓
+
+        Planned future formats:
+        - LCModel RAW format
+        - Osprey-compatible structure
+
+        Args:
+            output_dir: Directory to save exported data
+            format: Output format ('nifti-mrs', 'hdf5')
+            metadata: Optional metadata dictionary to embed
+            split: Which data split to export ('train', 'val', 'test')
+            n_batches: Number of batches to export
+            prefix: Filename prefix (default: 'augmented')
+            save_water: Whether to save water reference if available
+
+        Returns:
+            Dictionary with saved file paths and export info
+
+        Example:
+            >>> info = augmenter.export_batch(
+            ...     'output/augmented_dataset',
+            ...     format='nifti-mrs',
+            ...     n_batches=10,
+            ...     prefix='aug'
+            ... )
+            >>> print(f"Saved {info['n_files']} NIFTI-MRS files")
+        """
+        from pathlib import Path
+        import numpy as np
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        format = format.lower()
+        if format not in ['nifti-mrs', 'hdf5']:
+            raise ValueError(f"Unsupported format: {format}. Use 'nifti-mrs' or 'hdf5'")
+
+        # Get dataloader for the split
+        if split == 'train':
+            dataloader = self.train_dataloader(framework='numpy')
+        elif split == 'val':
+            dataloader = self.val_dataloader(framework='numpy')
+        elif split == 'test':
+            dataloader = self.test_dataloader(framework='numpy')
+        else:
+            raise ValueError(f"Invalid split: {split}. Use 'train', 'val', or 'test'")
+
+        saved_files = []
+        saved_water_files = []
+        batch_count = 0
+        total_spectra = 0
+
+        print(f"Exporting {n_batches} batch(es) to {format.upper()} format...")
+
+        for batch_idx, (data_batch, water_batch) in enumerate(dataloader):
+            if batch_idx >= n_batches:
+                break
+
+            batch_count += 1
+
+            # Remove spatial dimensions if present
+            while data_batch.ndim > 2:
+                data_batch = np.squeeze(data_batch)
+
+            # Ensure 2D [batch, time]
+            if data_batch.ndim == 1:
+                data_batch = data_batch[np.newaxis, :]
+
+            n_spectra_in_batch = data_batch.shape[0]
+
+            if format == 'nifti-mrs':
+                # Save each spectrum as individual NIFTI-MRS file
+                # We need to reconstruct NIFTI_MRS objects from the augmented data
+
+                # Get reference NIFTI for metadata
+                ref_data, _ = self.splits[split]
+                ref_nifti = ref_data[0] if len(ref_data) > 0 else None
+
+                if ref_nifti is None:
+                    raise ValueError("No reference NIFTI-MRS data available for export")
+
+                # Import here to avoid circular dependency
+                from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+
+                for spec_idx in range(n_spectra_in_batch):
+                    spectrum = data_batch[spec_idx]
+
+                    # Ensure spectrum has proper dimensions for NIFTI-MRS (at least 4D: x, y, z, time)
+                    if spectrum.ndim == 1:
+                        # Add spatial dimensions: (1, 1, 1, time)
+                        spectrum = spectrum.reshape(1, 1, 1, -1)
+                    elif spectrum.ndim == 2:
+                        # Assume (coils, time) - add spatial: (1, 1, 1, time, coils)
+                        spectrum = spectrum.T.reshape(1, 1, 1, spectrum.shape[1], spectrum.shape[0])
+
+                    # Create new NIFTI_MRS object with augmented data using gen_nifti_mrs
+                    # Get parameters from reference
+                    dwelltime = ref_nifti.dwelltime if hasattr(ref_nifti, 'dwelltime') else 1/2000
+                    spec_freq = ref_nifti.spectrometer_frequency[0] if hasattr(ref_nifti, 'spectrometer_frequency') else 123.0
+
+                    # Create NIFTI_MRS with proper structure
+                    new_nifti = gen_nifti_mrs(spectrum, dwelltime, spec_freq)
+
+                    # Add provenance metadata using add_hdr_field
+                    from datetime import datetime
+                    processing_entry = {
+                        'Time': datetime.now().isoformat(),
+                        'Program': 'augmentrum',
+                        'Version': __version__,
+                        'Method': 'export_batch',
+                        'Details': {
+                            'split': split,
+                            'batch': batch_idx,
+                            'spectrum_in_batch': spec_idx
+                        }
+                    }
+
+                    # Add user metadata if provided
+                    if metadata:
+                        processing_entry['UserMetadata'] = metadata
+
+                    # Add to ProcessingApplied list
+                    new_nifti.add_hdr_field('ProcessingApplied', [processing_entry])
+
+                    # Save file
+                    global_idx = total_spectra + spec_idx
+                    filename = f"{prefix}_{global_idx:06d}.nii.gz"
+                    filepath = output_path / filename
+                    new_nifti.save(str(filepath))
+                    saved_files.append(str(filepath))
+
+                # Save water reference if available
+                if save_water and water_batch is not None:
+                    while water_batch.ndim > 2:
+                        water_batch = np.squeeze(water_batch)
+                    if water_batch.ndim == 1:
+                        water_batch = water_batch[np.newaxis, :]
+
+                    for spec_idx in range(water_batch.shape[0]):
+                        water_spectrum = water_batch[spec_idx]
+
+                        # Ensure proper dimensions
+                        if water_spectrum.ndim == 1:
+                            water_spectrum = water_spectrum.reshape(1, 1, 1, -1)
+                        elif water_spectrum.ndim == 2:
+                            water_spectrum = water_spectrum.T.reshape(1, 1, 1, water_spectrum.shape[1], water_spectrum.shape[0])
+
+                        # Create water NIFTI_MRS using gen_nifti_mrs
+                        dwelltime = ref_nifti.dwelltime if hasattr(ref_nifti, 'dwelltime') else 1/2000
+                        spec_freq = ref_nifti.spectrometer_frequency[0] if hasattr(ref_nifti, 'spectrometer_frequency') else 123.0
+
+                        water_nifti = gen_nifti_mrs(water_spectrum, dwelltime, spec_freq)
+
+                        # Add water-specific provenance
+                        from datetime import datetime
+                        water_processing = {
+                            'Time': datetime.now().isoformat(),
+                            'Program': 'augmentrum',
+                            'Version': __version__,
+                            'Method': 'export_batch',
+                            'DataType': 'water_reference',
+                            'Details': {
+                                'split': split,
+                                'batch': batch_idx,
+                                'spectrum_in_batch': spec_idx
+                            }
+                        }
+                        water_nifti.add_hdr_field('ProcessingApplied', [water_processing])
+
+                        global_idx = total_spectra + spec_idx
+                        water_filename = f"{prefix}_water_{global_idx:06d}.nii.gz"
+                        water_filepath = output_path / water_filename
+                        water_nifti.save(str(water_filepath))
+                        saved_water_files.append(str(water_filepath))
+
+            elif format == 'hdf5':
+                # Save batch to HDF5
+                import h5py
+
+                hdf5_path = output_path / f"{prefix}_batch_{batch_idx:04d}.h5"
+
+                with h5py.File(hdf5_path, 'w') as f:
+                    # Store data
+                    f.create_dataset('data', data=data_batch, compression='gzip')
+
+                    if water_batch is not None and save_water:
+                        f.create_dataset('water', data=water_batch, compression='gzip')
+
+                    # Store metadata
+                    f.attrs['augmentrum_version'] = __version__
+                    f.attrs['split'] = split
+                    f.attrs['batch_idx'] = batch_idx
+                    f.attrs['n_spectra'] = n_spectra_in_batch
+
+                    if metadata:
+                        import json
+                        f.attrs['user_metadata'] = json.dumps(metadata)
+
+                saved_files.append(str(hdf5_path))
+
+            total_spectra += n_spectra_in_batch
+            print(f"  Batch {batch_idx + 1}/{n_batches}: Saved {n_spectra_in_batch} spectra")
+
+        result = {
+            'format': format,
+            'output_dir': str(output_path),
+            'n_batches': batch_count,
+            'n_spectra': total_spectra,
+            'n_files': len(saved_files),
+            'files': saved_files
+        }
+
+        if saved_water_files:
+            result['n_water_files'] = len(saved_water_files)
+            result['water_files'] = saved_water_files
+
+        print(f"✓ Export complete: {total_spectra} spectra in {len(saved_files)} file(s)")
+
+        return result
 
     def __repr__(self):
         n_total = sum(len(v[0]) for v in self.splits.values())

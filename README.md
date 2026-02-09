@@ -27,11 +27,11 @@ From MRSI reconstruction and acquisition variability to spectral perturbations a
 ---
 
 ## Features
-- Modular augmentation across time, frequency, and k-space domains  
-- Physically valid transformations for realistic variability  
-- Native NIfTI-MRS I/O and metadata tracking  
-- Customizable pipelines with user-defined parameters  
-- On-the-fly augmentation for machine learning workflows  
+- Modular augmentation across time, frequency, and k-space domains
+- Physically valid transformations for realistic variability
+- Native NIfTI-MRS I/O and metadata tracking
+- Customizable pipelines with user-defined parameters
+- On-the-fly augmentation for machine learning workflows
 
 ---
 
@@ -55,25 +55,27 @@ from augmentrum import Augmentrum
 data   # list of NIfTI-MRS files
 water   # list of corresponding water reference files (optional)
 
-# custom pipeline example
-pipeline = [
-    'coil_sampling',
-    'average_sampling',
-    'processing',
-    'line_broadening',
-    'baseline',
-    'noise',
-]
-
 # initialize Augmentrum with data and optional water references
-augmenter = Augmentrum(data, water=water, pipeline=pipeline)
+augmenter = Augmentrum(
+    data=data, 
+    water=water, 
+    
+    # custom pipeline example
+    pipeline = [
+        'coil_sampling',
+        'average_sampling',
+        'processing',
+        'line_broadening',
+        'baseline',
+        'noise',
+    ],
+    
+    batch_size=16,
+    backend='pytorch',  # or 'tensorflow', 'keras', 'jax', 'numpy'
+)
 
 # get a dataloader for PyTorch with on-the-fly augmentation
-train_data = augmenter.dataloader(
-    batch_size=16,
-    shuffle=True,
-    backend='pytorch'  # or 'tensorflow', 'keras', 'jax', 'numpy'
-)
+train_data = augmenter.dataloader()
 ```
 
 ---

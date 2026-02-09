@@ -289,6 +289,17 @@ class CoilAverageSampler(BaseModule):
         """
         raise NotImplementedError("Reweighting not implemented yet.")
 
+    def _sample_snr_improvement(self, data, water):
+        """
+        Samples coils and averages to improve SNR.
+        TODO: implement SNR improvement sampling.
+
+        Args:
+            data: MRS data (NiftiMRS object).
+            water: Water reference MRS data (NiftiMRS object), optional.
+        """
+        raise NotImplementedError("SNR improvement sampling not implemented yet.")
+
     def _get_limits(self, n, n_max):
         """
         Computes valid min/max limits for sampling.
