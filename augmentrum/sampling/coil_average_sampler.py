@@ -308,6 +308,11 @@ class CoilAverageSampler(BaseModule):
             n (tuple): (min, max) tuple where each can be None.
             n_max (int): Maximum allowable value.
         """
+        # Handle None (use all available)
+        if n is None:
+            return n_max, n_max
+        
+        # Handle tuple
         if n[0] is None:
             min_n = n_max
         else:

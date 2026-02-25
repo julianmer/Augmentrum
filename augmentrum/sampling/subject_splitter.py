@@ -87,6 +87,14 @@ class SubjectSplitter:
                 water_list = self.water.to_nifti_list()
             else:
                 water_list = self.water if isinstance(self.water, list) else list(self.water)
+            
+            # Validate that water_list and data_list have the same length
+            if len(water_list) != len(data_list):
+                raise ValueError(
+                    f"Mismatch between data and water lists: "
+                    f"data has {len(data_list)} subjects but water has {len(water_list)} subjects. "
+                    f"They must have the same length."
+                )
         else:
             water_list = None
 

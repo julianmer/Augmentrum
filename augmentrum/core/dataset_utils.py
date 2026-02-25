@@ -23,6 +23,17 @@ from augmentrum.core import NIfTI_MRS_Plus, Backend
 from augmentrum.sampling.subject_splitter import SubjectSplitter
 
 
+__all__ = [
+    'create_random_generator',
+    'create_fixed_generator',
+    'create_deterministic_generator',
+    'create_deterministic_indices',
+    'convert_batch_to_backend',
+    'wrap_generator_for_framework',
+    'SubjectSplitter',
+]
+
+
 #**************************************************************************************************#
 #                                       Helper Functions                                           #
 #**************************************************************************************************#
@@ -81,7 +92,10 @@ def create_random_generator(data: NIfTI_MRS_Plus,
                             pipeline,
                             batch_size: int):
     """
-    Create infinite random sampling generator (backend-agnostic).
+s    Create infinite random sampling generator with batch-level processing.
+
+    For on-the-fly mode: Samples batch_size parameter values and passes
+    entire batch through pipeline for efficient processing.
 
     Args:
         data: NIfTI_MRS_Plus with subjects
@@ -90,29 +104,33 @@ def create_random_generator(data: NIfTI_MRS_Plus,
         batch_size: Batch size
 
     Yields:
-        (batch_data, batch_water) tuples
+        (batch_data, batch_water) tuples as NIfTI_MRS_Plus objects
     """
     import random
+    from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus
+
     n_subjects = len(data)
 
     while True:
-        batch_data_list, batch_water_list = [], []
+        # Sample batch_size subjects randomly
+        batch_indices = [random.randint(0, n_subjects - 1) for _ in range(batch_size)]
 
-        for _ in range(batch_size):
-            # Random subject
-            idx = random.randint(0, n_subjects - 1)
+        # Create batch as NIfTI_MRS_Plus (list of subjects)
+        batch_data_list = [data[idx] for idx in batch_indices]
+        batch_water_list = [water[idx] for idx in batch_indices] if water is not None else None
 
-            # Get single subject
-            subj_data = data[idx]
-            subj_water = water[idx] if water is not None else None
+        # Create NIfTI_MRS_Plus batches (using same backend as input data)
+        batch_data = NIfTI_MRS_Plus(batch_data_list, backend=data.backend, volatile=data.volatile)
+        batch_water = NIfTI_MRS_Plus(batch_water_list, backend=water.backend, volatile=water.volatile) if water is not None else None
 
-            # Apply pipeline (handles random coil/average sampling internally)
-            aug_data, aug_water = pipeline(subj_data, subj_water)
+        # Sample batch parameters (one value per sample in batch)
+        # Pipeline will handle parameter sampling and application
+        batch_params = pipeline.sample_batch_parameters(batch_size)
 
-            batch_data_list.append(aug_data)
-            batch_water_list.append(aug_water)
+        # Apply pipeline to ENTIRE BATCH at once (efficient!)
+        aug_batch_data, aug_batch_water = pipeline(batch_data, batch_water, batch_params=batch_params)
 
-        yield batch_data_list, batch_water_list
+        yield aug_batch_data, aug_batch_water
 
 
 def create_fixed_generator(data: NIfTI_MRS_Plus,
@@ -121,26 +139,27 @@ def create_fixed_generator(data: NIfTI_MRS_Plus,
                            batch_size: int,
                            shuffle: bool = False):
     """
-    Create generator with fixed augmentation parameters (backend-agnostic).
-
-    Unlike deterministic mode (which creates all combinations), this simply
-    iterates over subjects and applies the pipeline with FIXED parameter values.
-
-    For example:
-      - mode='on-the-fly': n_coils=(1,8) → randomly picks 1-8 each time
-      - mode='fixed': n_coils=4 → always uses exactly 4 coils
+    Create generator with fixed augmentation parameters and batch-level processing.
+    
+    For FIXED mode: Parameters are sampled ONCE at generator creation and reused.
+    This ensures CONSISTENT augmentations across all epochs (same params every time).
 
     Args:
         data: NIfTI_MRS_Plus with subjects
         water: Optional water reference
-        pipeline: Augmentation pipeline to apply (uses exact values from modules)
+        pipeline: Augmentation pipeline to apply
         batch_size: Batch size
         shuffle: Whether to shuffle subject order
 
     Yields:
-        (batch_data, batch_water) tuples
+        (batch_data, batch_water) tuples as NIfTI_MRS_Plus objects
     """
     import random
+    from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus
+
+    # Sample parameters ONCE for fixed mode
+    # These will be reused for ALL batches (consistency across epochs)
+    fixed_batch_params = pipeline.sample_batch_parameters(batch_size)
 
     n_subjects = len(data)
     indices = list(range(n_subjects))
@@ -151,20 +170,29 @@ def create_fixed_generator(data: NIfTI_MRS_Plus,
     # Yield batches of subjects
     for i in range(0, n_subjects, batch_size):
         batch_indices = indices[i:i + batch_size]
-        batch_data_list, batch_water_list = [], []
-
-        for idx in batch_indices:
-            # Get subject
-            subj_data = data[idx]
-            subj_water = water[idx] if water is not None else None
-
-            # Apply pipeline (modules will use their fixed parameter values)
-            aug_data, aug_water = pipeline(subj_data, subj_water)
-
-            batch_data_list.append(aug_data)
-            batch_water_list.append(aug_water)
-
-        yield batch_data_list, batch_water_list
+        
+        # Create batch as NIfTI_MRS_Plus (list of subjects)
+        # IMPORTANT: Copy the NIfTI-MRS objects to avoid in-place modification!
+        batch_data_list = [data[idx].copy() for idx in batch_indices]
+        batch_water_list = [water[idx].copy() for idx in batch_indices] if water is not None else None
+        
+        # Get actual batch size (might be smaller for last batch)
+        actual_batch_size = len(batch_data_list)
+        
+        # Create NIfTI_MRS_Plus batches
+        batch_data = NIfTI_MRS_Plus(batch_data_list, backend=data.backend, volatile=data.volatile)
+        batch_water = NIfTI_MRS_Plus(batch_water_list, backend=water.backend, volatile=water.volatile) if water is not None else None
+        
+        # Use fixed parameters (slice if last batch is smaller)
+        if actual_batch_size < batch_size:
+            batch_params = {k: v[:actual_batch_size] for k, v in fixed_batch_params.items()}
+        else:
+            batch_params = fixed_batch_params
+        
+        # Apply pipeline to ENTIRE BATCH at once with fixed parameters
+        aug_batch_data, aug_batch_water = pipeline(batch_data, batch_water, batch_params=batch_params)
+        
+        yield aug_batch_data, aug_batch_water
 
 
 def create_deterministic_generator(data: NIfTI_MRS_Plus,
@@ -322,9 +350,40 @@ def wrap_generator_for_framework(generator: Callable,
         else:
             framework = backend_name
 
-    # For nifti_list or raw python: return generator directly (no conversion)
+    # For nifti_list or raw python: unwrap NIfTI_MRS_Plus to raw NIFTI_MRS lists
     if framework in ['python', 'nifti_list']:
-        return generator
+        def unwrapped_gen():
+            for batch_data, batch_water in generator:
+                # Unwrap NIfTI_MRS_Plus objects to raw NIFTI_MRS lists
+                if isinstance(batch_data, list):
+                    # Batch is a list of NIfTI_MRS_Plus objects, unwrap each
+                    data_list = []
+                    for item in batch_data:
+                        if hasattr(item, 'list'):
+                            # It's a NIfTI_MRS_Plus, get the internal list
+                            data_list.extend(item.list())
+                        else:
+                            # Already a NIFTI_MRS object
+                            data_list.append(item)
+                    batch_data = data_list
+                elif hasattr(batch_data, 'list'):
+                    # Single NIfTI_MRS_Plus object
+                    batch_data = batch_data.list()
+
+                if batch_water is not None:
+                    if isinstance(batch_water, list):
+                        water_list = []
+                        for item in batch_water:
+                            if hasattr(item, 'list'):
+                                water_list.extend(item.list())
+                            else:
+                                water_list.append(item)
+                        batch_water = water_list
+                    elif hasattr(batch_water, 'list'):
+                        batch_water = batch_water.list()
+
+                yield batch_data, batch_water
+        return unwrapped_gen()
 
     # For numpy/jax: return generator directly with backend conversion
     if framework in ['numpy', 'jax']:
@@ -385,12 +444,3 @@ def wrap_generator_for_framework(generator: Callable,
     else:
         raise ValueError(f"Unknown framework: {framework}")
 
-
-__all__ = [
-    'create_random_generator',
-    'create_deterministic_generator',
-    'create_deterministic_indices',
-    'convert_batch_to_backend',
-    'wrap_generator_for_framework',
-    'SubjectSplitter',
-]

@@ -146,8 +146,11 @@ class NIfTI_MRS_Plus:
         self.n_subjects = len(self.nifti_list)
         self._shape = (self.n_subjects,) + self.nifti_list[0].shape if self.n_subjects > 0 else (0,)
 
-        # Cached batched data
-        self._batched_data: Optional[np.ndarray] = None
+        # Single cache for backend-specific tensor
+        # Stores tensor in the target backend (numpy/pytorch/etc), potentially on GPU
+        self._cached_tensor = None
+        self._cache_backend = None  # Which backend the cached tensor is in (relevant due to conversions)
+        self._cache_device = None   # Device info (for PyTorch)
 
     def _init_metadata(self, original_data: List[NIFTI_MRS], metadata: Optional[Dict] = None):
         """Initialize metadata from original NIfTI-MRS objects or provided dict."""
@@ -317,12 +320,22 @@ class NIfTI_MRS_Plus:
         Return batched tensor of shape [B, ...] where B = number of subjects.
         Caches the result for efficiency.
         """
-        if self._batched_data is None:
-            if len(self.nifti_list) == 0:
-                self._batched_data = np.array([])
-            else:
-                self._batched_data = np.stack([n[:] for n in self.nifti_list], axis=0)
-        return self._batched_data
+        # Check if we have a cached numpy array
+        if self._cached_tensor is not None and self._cache_backend == Backend.NUMPY:
+            return self._cached_tensor
+
+        # Convert from nifti_list
+        if len(self.nifti_list) == 0:
+            arr = np.array([])
+        else:
+            arr = np.stack([n[:] for n in self.nifti_list], axis=0)
+
+        # Cache it
+        self._cached_tensor = arr
+        self._cache_backend = Backend.NUMPY
+        self._cache_device = 'cpu'
+
+        return arr
 
     def list(self) -> List[NIFTI_MRS]:
         """
@@ -330,9 +343,18 @@ class NIfTI_MRS_Plus:
         """
         return self.nifti_list
 
+    def _invalidate_cache(self):
+        """Invalidate the cached tensor (called when data is modified)."""
+        self._cached_tensor = None
+        self._cache_backend = None
+        self._cache_device = None
+
     def get_data(self, backend: Optional[Backend] = None):
         """
         Get data in the specified backend format.
+
+        Efficiently caches tensors in the target backend (including GPU tensors).
+        Only converts when necessary.
 
         Args:
             backend: Desired backend (uses instance backend if None)
@@ -345,30 +367,98 @@ class NIfTI_MRS_Plus:
         if target == Backend.NIFTI_LIST:
             return self.nifti_list
 
-        # Use cached numpy array if available, otherwise compute it
+        # Check if we already have cached tensor in target backend
+        if self._cached_tensor is not None and self._cache_backend == target:
+            return self._cached_tensor
+
+        # Get numpy array as intermediate (cached)
         array = self.numpy()
 
+        # Convert to target backend
         if target == Backend.NUMPY:
-            return array
+            return array  # Already cached by numpy()
+
         elif target == Backend.PYTORCH:
             if not TORCH_AVAILABLE:
                 raise ImportError("PyTorch not available")
-            return torch.from_numpy(array)
+            tensor = torch.from_numpy(array)
+            # Cache it (on CPU for now, use .to() for GPU)
+            self._cached_tensor = tensor
+            self._cache_backend = Backend.PYTORCH
+            self._cache_device = 'cpu'
+            return tensor
+
         elif target == Backend.TENSORFLOW:
             if not TF_AVAILABLE:
                 raise ImportError("TensorFlow not available")
-            return tf.convert_to_tensor(array)
+            tensor = tf.convert_to_tensor(array)
+            self._cached_tensor = tensor
+            self._cache_backend = Backend.TENSORFLOW
+            self._cache_device = None  # TF handles devices internally
+            return tensor
+
         elif target == Backend.JAX:
             if not JAX_AVAILABLE:
                 raise ImportError("JAX not available")
-            return jnp.array(array)
+            tensor = jnp.array(array)
+            self._cached_tensor = tensor
+            self._cache_backend = Backend.JAX
+            self._cache_device = None  # JAX handles devices internally
+            return tensor
+
         elif target == Backend.KERAS:
             if not KERAS_AVAILABLE:
                 raise ImportError("Keras not available")
             import keras.ops as ops
-            return ops.convert_to_tensor(array)
+            tensor = ops.convert_to_tensor(array)
+            self._cached_tensor = tensor
+            self._cache_backend = Backend.KERAS
+            self._cache_device = None
+            return tensor
+
         else:
             raise ValueError(f"Unknown backend: {target}")
+
+    def to(self, device: str) -> 'NIfTI_MRS_Plus':
+        """
+        Move data to specified device (for PyTorch backend).
+
+        Args:
+            device: Device string ('cuda', 'cpu', 'cuda:0', etc.)
+
+        Returns:
+            New NIfTI_MRS_Plus with data on the specified device
+
+        Example:
+            >>> nifti_gpu = nifti_plus.to('cuda')
+            >>> nifti_cpu = nifti_gpu.to('cpu')
+        """
+        if self._backend != Backend.PYTORCH:
+            raise ValueError(f"`.to(device)` only works with PyTorch backend, current backend is {self._backend.value}")
+
+        if not TORCH_AVAILABLE:
+            raise ImportError("PyTorch not available")
+
+        # Get current tensor
+        tensor = self.get_data(Backend.PYTORCH)
+
+        # Move to device
+        tensor_on_device = tensor.to(device)
+
+        # Create new NIfTI_MRS_Plus (reuse nifti_list, new tensor cache)
+        new_obj = NIfTI_MRS_Plus(
+            nifti_list=self.nifti_list,  # Reuse same nifti objects
+            backend=Backend.PYTORCH,
+            volatile=self.volatile,
+            metadata={'common': self.metadata_common, 'individual': self.metadata_individual}
+        )
+
+        # Set the unified cache with GPU tensor
+        new_obj._cached_tensor = tensor_on_device
+        new_obj._cache_backend = Backend.PYTORCH
+        new_obj._cache_device = device
+
+        return new_obj
 
     def to_nifti_list(self) -> List[NIFTI_MRS]:
         """Return the internal list of NIfTI-MRS objects."""
@@ -387,7 +477,7 @@ class NIfTI_MRS_Plus:
     def set_dim_tag(self, index: int, tag: str):
         """
         Set dimension tag for all subjects.
-        Since all subjects must have same dim_tags, this updates all.
+        Since all subjects must have same dimTags, this updates all.
         """
         for nifti in self.nifti_list:
             nifti.set_dim_tag(index, tag)
@@ -538,7 +628,7 @@ class NIfTI_MRS_Plus:
                         nifti[idx] = values
 
             # Invalidate cache
-            self._batched_data = None
+            self._invalidate_cache()
 
         else:
             # Setting in array/tensor backends
@@ -556,9 +646,9 @@ class NIfTI_MRS_Plus:
             else:
                 values_np = np.asarray(values)
 
-            # Update cached array if it exists
-            if self._batched_data is not None:
-                self._batched_data[idx] = values_np
+            # Update cached tensor if it exists
+            if self._cached_tensor is not None:
+                self._cached_tensor[idx] = values_np
 
             # Update underlying NIFTI objects
             # For batched indexing like nifti_plus[0, :, :, :, 100:200]
@@ -597,6 +687,156 @@ class NIfTI_MRS_Plus:
     def __repr__(self) -> str:
         return (f"NIfTI_MRS_Plus(n_subjects={self.n_subjects}, shape={self.shape}, "
                 f"backend={self._backend.value}, volatile={self.volatile})")
+
+    # ===========================================================================================
+    # PLOTTING METHODS
+    # ===========================================================================================
+    
+    def plot(
+        self,
+        display_dim=None,
+        ppmlim=None,
+        plot_avg=False,
+        batch_index=None,
+        max_batch_display=6,
+        grid_layout=None,
+        legend=True,
+        figsize=None,
+        title=None,
+        mask=None
+    ):
+        """
+        Plot NIfTI_MRS_Plus spectra with batch-aware visualization.
+        
+        Mirrors the NIfTI-MRS plot() method but adds batch support:
+        - Single batch element: plots like NIfTI-MRS
+        - Multiple batch elements: grid or comparison plot
+        
+        Args:
+            display_dim: Dimension to display (if multiple dims exist in individual spectra)
+            ppmlim: Tuple of (min_ppm, max_ppm) for x-axis limits
+            plot_avg: If True, plot average spectrum across dimensions
+            batch_index: Which batch element to plot (None = plot multiple)
+            max_batch_display: Maximum number of batch elements to display (default: 6)
+            grid_layout: Tuple (rows, cols) for grid layout. Auto-calculated if None
+            legend: Whether to show legend
+            figsize: Figure size tuple (width, height)
+            title: Plot title
+            mask: Spatial mask (for MRSI data)
+            
+        Returns:
+            matplotlib figure object
+            
+        Examples:
+            >>> # Plot first spectrum (like NIfTI-MRS)
+            >>> nifti_plus.plot(batch_index=0)
+            
+            >>> # Plot first 4 spectra in grid
+            >>> nifti_plus.plot(max_batch_display=4)
+            
+            >>> # Plot with custom ppm range
+            >>> nifti_plus.plot(ppmlim=(0.5, 4.2))
+            
+            >>> # Plot specific batch element with custom settings
+            >>> nifti_plus.plot(batch_index=2, ppmlim=(1.0, 4.0), title="Augmented Spectrum")
+        """
+        from augmentrum.utils.plotting import vis_nifti_mrs_plus
+        
+        return vis_nifti_mrs_plus(
+            self,
+            display_dim=display_dim,
+            ppmlim=ppmlim,
+            plot_avg=plot_avg,
+            batch_index=batch_index,
+            max_batch_display=max_batch_display,
+            grid_layout=grid_layout,
+            legend=legend,
+            figsize=figsize,
+            title=title
+        )
+    
+    def plot_comparison(
+        self,
+        indices=None,
+        ppmlim=(0.2, 4.2),
+        labels=None,
+        title="Batch Comparison",
+        colors=None,
+        alpha=0.7,
+        figsize=(12, 5)
+    ):
+        """
+        Plot multiple batch spectra overlaid for comparison.
+        
+        Useful for comparing original vs augmented spectra.
+        
+        Args:
+            indices: List of batch indices to plot (None = first 6)
+            ppmlim: PPM range tuple (min, max)
+            labels: List of labels for each spectrum
+            title: Plot title
+            colors: List of colors (auto if None)
+            alpha: Transparency (0-1)
+            figsize: Figure size
+            
+        Returns:
+            matplotlib figure
+            
+        Example:
+            >>> nifti_plus.plot_comparison(indices=[0, 1, 2], 
+            ...                           labels=['Original', 'Aug 1', 'Aug 2'])
+        """
+        from augmentrum.utils.plotting import plot_batch_comparison
+        
+        return plot_batch_comparison(
+            self,
+            indices=indices,
+            ppmlim=ppmlim,
+            labels=labels,
+            title=title,
+            colors=colors,
+            alpha=alpha,
+            figsize=figsize
+        )
+    
+    def plot_grid(
+        self,
+        max_display=9,
+        ppmlim=(0.2, 4.2),
+        title="Batch Grid",
+        show_metabolites=False,
+        figsize=None
+    ):
+        """
+        Plot batch elements in a detailed grid layout.
+        
+        Args:
+            max_display: Maximum spectra to display (default: 9)
+            ppmlim: PPM range
+            title: Overall title
+            show_metabolites: Highlight common metabolite regions (NAA, Cr, Cho)
+            figsize: Figure size (auto if None)
+            
+        Returns:
+            matplotlib figure
+            
+        Example:
+            >>> nifti_plus.plot_grid(max_display=6, show_metabolites=True)
+        """
+        from augmentrum.utils.plotting import plot_batch_grid_detailed
+        
+        return plot_batch_grid_detailed(
+            self,
+            max_display=max_display,
+            ppmlim=ppmlim,
+            title=title,
+            show_metabolites=show_metabolites,
+            figsize=figsize
+        )
+
+    # ===========================================================================================
+    # EXPORT METHODS
+    # ===========================================================================================
 
     def save_nifti(self, output_dir: str, prefix: str = "augmented", zero_pad: int = 4):
         """

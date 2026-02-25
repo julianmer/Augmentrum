@@ -70,6 +70,7 @@ augmenter = Augmentrum(
         'noise',
     ],
     
+    # general settings
     batch_size=16,
     backend='pytorch',  # or 'tensorflow', 'keras', 'jax', 'numpy'
 )

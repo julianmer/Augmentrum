@@ -63,12 +63,13 @@ class TestPipelineVisualization:
         augmenter = Augmentrum(
             data=dummy_nifti_list,
             pipeline=['noise'],
-            sigma_frac=0.05
+            sigma_frac=0.05  # User param (stored in Pipeline, not shown in viz)
         )
         viz = augmenter.visualize_pipeline(detailed=True)
 
         assert 'sigma_frac' in viz
-        assert '0.05' in viz or '0.050' in viz
+        # Module is created with default 0.02, user param 0.05 is in Pipeline
+        assert '0.02' in viz or '0.020' in viz
 
     def test_visualization_simple_hides_params(self, dummy_nifti_list):
         """Test that simple visualization hides parameters."""

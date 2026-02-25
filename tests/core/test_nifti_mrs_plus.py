@@ -583,16 +583,18 @@ class TestNIfTIMRSPlusSetItem:
 
         # Force cache creation
         _ = nifti_plus.numpy()
-        assert nifti_plus._batched_data is not None
+        assert nifti_plus._cached_tensor is not None
+        assert nifti_plus._cache_backend == Backend.NUMPY
 
         # Set a value (use multi-dimensional indexing)
         new_value = np.ones((1, 1, 1, 10), dtype=np.complex128) * 999
         for nifti in nifti_plus.nifti_list:
             nifti[:, :, :, 0:10, 0, 0] = new_value
-        nifti_plus._batched_data = None  # Manually invalidate as we're directly modifying
+        nifti_plus._invalidate_cache()  # Manually invalidate as we're directly modifying
 
         # Cache should be invalidated
-        assert nifti_plus._batched_data is None
+        assert nifti_plus._cached_tensor is None
+        assert nifti_plus._cache_backend is None
 
     def test_setitem_numpy_backend_simple(self, dummy_nifti_list):
         """Test setting values with NUMPY backend using simple indexing."""

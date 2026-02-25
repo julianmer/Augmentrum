@@ -42,6 +42,9 @@ from augmentrum.augmentation.apodization import Apodization
 from augmentrum.augmentation.phase_frequency import PhaseShift, FrequencyShift
 
 
+__all__ = ['Augmentrum']
+
+
 class Augmentrum:
     """
     Main Augmentrum class - backend-agnostic MRS data augmentation.
@@ -185,6 +188,9 @@ class Augmentrum:
         split_fractions: Optional[Dict[str, float]] = None,  # e.g., {'val': 0.1, 'test': 0.1}
         seed: int = 42,
 
+        # Pre-processing (applied once and cached)
+        pre_pipeline: Optional[Union[List, AugmentationPipeline, Dict[str, Union[List, AugmentationPipeline]]]] = None,  # Fixed preprocessing
+
         # Augmentation
         pipeline: Optional[Union[List, AugmentationPipeline]] = None,  # Single pipeline
         pipelines: Optional[Dict[str, Union[List, AugmentationPipeline]]] = None,  # Per-split pipelines
@@ -196,6 +202,7 @@ class Augmentrum:
         # General
         batch_size: int = 16,
         backend: Union[str, Backend] = 'pytorch',
+        device: Optional[str] = None,  # 'cuda', 'cpu', or None (auto-detect)
         volatile: bool = False,
 
         **kwargs  # Module-specific parameters
@@ -208,6 +215,13 @@ class Augmentrum:
             water: Optional water references
             split_fractions: Dict like {'val': 0.1, 'test': 0.1}, train gets rest
             seed: Random seed for splitting
+            pre_pipeline: Fixed preprocessing applied ONCE and cached. Can be:
+                         - List of module names: ['coil_sampling', 'processing'] (same for all splits)
+                         - AugmentationPipeline object (same for all splits)
+                         - Dict mapping split names to pipelines (different per split):
+                           {'train': ['coil_sampling', 'processing'], 'val': ['processing'], 'test': None}
+                         These steps run before the main pipeline and results are stored.
+                         Useful for expensive operations that don't need randomization.
             pipeline: Single pipeline for all splits (list of module names or AugmentationPipeline)
             pipelines: Dict mapping split names to pipelines (overrides 'pipeline')
             mode: Single mode for all splits:
@@ -216,6 +230,8 @@ class Augmentrum:
             modes: Dict mapping split names to modes (overrides 'mode')
             batch_size: Batch size
             backend: 'pytorch', 'numpy', 'tensorflow', 'keras', 'jax', or Backend enum
+            device: Device for PyTorch backend ('cuda', 'cpu', etc.). Note: Use .to() method
+                    on batches for GPU support instead of this parameter.
             volatile: Skip metadata updates for speed
             **kwargs: Module-specific parameters, including:
                 ALL PARAMETERS support both tuple ranges and exact values:
@@ -256,7 +272,7 @@ class Augmentrum:
                 PROCESSING OPTIONS:
                   - coil_method: 'fsl-mrs', 'adaptive'
                   - baseline_mode: 'random_walk', 'bspline', 'polynomial'
-                  - ... (see _get_module_kwargs for full list)
+                  - ...
         """
         # Convert backend
         if isinstance(backend, str):
@@ -265,6 +281,7 @@ class Augmentrum:
             self.backend = backend
 
         self.batch_size = batch_size
+        self.device = device  # Store device ('cuda', 'cpu', or None)
         self.volatile = volatile
         self.kwargs = kwargs
 
@@ -292,6 +309,9 @@ class Augmentrum:
                 'val': (empty_data, None),
                 'test': (empty_data, None)
             }
+
+        # Handle pre-pipeline (applied once and cached)
+        self._create_pre_pipeline(pre_pipeline)
 
         # Handle pipelines
         self._create_pipelines(pipeline, pipelines)
@@ -329,6 +349,116 @@ class Augmentrum:
             water_plus = NIfTI_MRS_Plus(nifti_list=water_list, backend=self.backend, volatile=self.volatile) if water_list else None
             self.splits[split_name] = (data_plus, water_plus)
 
+    def _create_pre_pipeline(self, pre_pipeline):
+        """
+        Create and apply pre-pipeline (fixed preprocessing that runs once and is cached).
+
+        The pre-pipeline is applied to all data ONCE during initialization, and the results
+        are cached. This is useful for expensive operations that don't need randomization,
+        like coil combination, eddy current correction, etc.
+
+        Supports per-split pre-pipelines for different preprocessing strategies per split.
+
+        Args:
+            pre_pipeline: Can be:
+                         - None: No pre-pipeline
+                         - List of module names: same pre-pipeline for all splits
+                         - AugmentationPipeline object: same for all splits
+                         - Dict mapping split names to pipelines: different per split
+        """
+        if pre_pipeline is None:
+            self.pre_pipeline = None
+            self.pre_pipelines = None
+            self.preprocessed_splits = None
+            return
+
+        # Check if it's a dict (per-split pre-pipelines)
+        if isinstance(pre_pipeline, dict):
+            # Per-split pre-pipelines
+            self.pre_pipelines = {}
+
+            for split_name in self.splits.keys():
+                split_pre_pipeline = pre_pipeline.get(split_name, None)
+
+                if split_pre_pipeline is None:
+                    self.pre_pipelines[split_name] = None
+                elif isinstance(split_pre_pipeline, AugmentationPipeline):
+                    self.pre_pipelines[split_name] = split_pre_pipeline
+                else:
+                    # Build from list of module names
+                    self.pre_pipelines[split_name] = self._build_pipeline_from_list(split_pre_pipeline)
+
+            self.pre_pipeline = None  # Not used when per-split
+
+        else:
+            # Single pre-pipeline for all splits
+            if isinstance(pre_pipeline, AugmentationPipeline):
+                self.pre_pipeline = pre_pipeline
+            else:
+                self.pre_pipeline = self._build_pipeline_from_list(pre_pipeline)
+
+            # Create dict for all splits
+            self.pre_pipelines = {split_name: self.pre_pipeline for split_name in self.splits.keys()}
+
+        print(f"Applying pre-pipeline to all data (this happens ONCE)...")
+
+        # Apply pre-pipeline to each split and cache results
+        self.preprocessed_splits = {}
+
+        for split_name, (data, water) in self.splits.items():
+            split_pre_pipeline = self.pre_pipelines[split_name]
+
+            if split_pre_pipeline is None:
+                # No pre-pipeline for this split
+                print(f"  {split_name} split: No pre-pipeline")
+                self.preprocessed_splits[split_name] = (data, water)
+                continue
+
+            if len(data) == 0:  # Empty split
+                self.preprocessed_splits[split_name] = (data, water)
+                continue
+
+            print(f"  Processing {split_name} split ({len(data)} subjects)...")
+            print(f"    Pre-pipeline: {[m.__class__.__name__ for m in split_pre_pipeline.steps]}")
+
+            # Process each subject through pre-pipeline
+            processed_data_list = []
+            processed_water_list = [] if water is not None else None
+
+            for i in range(len(data)):
+                subj_data = data[i]
+                subj_water = water[i] if water is not None else None
+
+                # Apply pre-pipeline
+                proc_data, proc_water = split_pre_pipeline(subj_data, subj_water)
+
+                processed_data_list.append(proc_data.list()[0])
+                if processed_water_list is not None and proc_water is not None:
+                    processed_water_list.append(proc_water.list()[0])
+
+            # Wrap processed data in target backend
+            # NIfTI_MRS_Plus will handle conversion automatically
+            processed_data = NIfTI_MRS_Plus(
+                nifti_list=processed_data_list,
+                backend=self.backend,  # Use target backend directly
+                volatile=self.volatile
+            )
+            processed_water = None
+            if processed_water_list:
+                processed_water = NIfTI_MRS_Plus(
+                    nifti_list=processed_water_list,
+                    backend=self.backend,
+                    volatile=self.volatile
+                )
+
+            # Store preprocessed data
+            self.preprocessed_splits[split_name] = (processed_data, processed_water)
+
+        print(f"✓ Pre-pipeline applied and cached!")
+
+        # Replace splits with preprocessed versions
+        self.splits = self.preprocessed_splits
+
     def _create_pipelines(self, pipeline, pipelines):
         """Create augmentation pipelines for each split."""
         self.pipelines = {}
@@ -365,274 +495,35 @@ class Augmentrum:
 
     def _build_pipeline_from_list(self, module_names: List[str]) -> AugmentationPipeline:
         """Build pipeline from list of module name strings."""
+        # Create modules with minimal default params
+        # Pipeline will override these with user_kwargs during sampling
         modules = []
+        
+        # Default parameters for modules that require them at init
+        # TODO: Maybe solve at module level instead
+        DEFAULT_PARAMS = {
+            'noise': {'sigma_frac': 0.02},
+            'gaussian_noise': {'sigma_frac': 0.02},
+        }
+        
         for name in module_names:
             if name not in self.AVAILABLE_MODULES:
                 raise ValueError(f"Unknown module '{name}'. Available: {list(self.AVAILABLE_MODULES.keys())}")
-
+            
             module_class = self.AVAILABLE_MODULES[name]
+            
+            # Get default params for this module type (if any)
+            default_params = DEFAULT_PARAMS.get(name, {})
+            
+            # Create module with defaults - Pipeline will handle user params
+            modules.append(module_class(**default_params))
 
-            # Get smart module-specific kwargs
-            module_kwargs = self._get_module_kwargs(name, self.kwargs)
-
-            # Create module instance
-            modules.append(module_class(**module_kwargs))
-
-        return AugmentationPipeline(modules)
-
-    def _sample_from_range(self, param, distribution: str = 'uniform'):
-        """
-        Sample a scalar value from a parameter (range or scalar).
-
-        Args:
-            param: Either scalar (float/int) or tuple (min, max) for range
-            distribution: 'uniform', 'gaussian', 'normal', 'exponential', 'beta'
-                         (only used if param is a tuple)
-
-        Returns:
-            Scalar value
-
-        Examples:
-            _sample_from_range(0.03) → 0.03
-            _sample_from_range((0.01, 0.05), 'uniform') → random 0.01-0.05 (uniform)
-            _sample_from_range((0.01, 0.05), 'gaussian') → random ~mean=0.03, std based on range
-        """
-        import numpy as np
-
-        # If already scalar, return as-is
-        if isinstance(param, (int, float)):
-            return float(param)
-
-        # If None, return None
-        if param is None:
-            return None
-
-        # If tuple, sample based on distribution
-        if isinstance(param, tuple) and len(param) == 2:
-            min_val, max_val = param
-
-            if min_val is None and max_val is None:
-                return None
-            if min_val is None:
-                min_val = 0.0
-            if max_val is None:
-                max_val = min_val * 2.0  # Arbitrary default
-
-            # Sample based on distribution
-            if distribution == 'uniform':
-                return np.random.uniform(min_val, max_val)
-
-            elif distribution in ['gaussian', 'normal']:
-                # Gaussian centered at midpoint, std = range/6 (99.7% within range)
-                mean = (min_val + max_val) / 2.0
-                std = (max_val - min_val) / 6.0
-                value = np.random.normal(mean, std)
-                # Clip to range
-                return np.clip(value, min_val, max_val)
-
-            elif distribution == 'exponential':
-                # Exponential biased toward min_val
-                scale = (max_val - min_val) / 3.0
-                value = min_val + np.random.exponential(scale)
-                return np.clip(value, min_val, max_val)
-
-            elif distribution == 'beta':
-                # Beta distribution (slightly biased to center)
-                alpha, beta = 2.0, 2.0
-                value = np.random.beta(alpha, beta)
-                return min_val + value * (max_val - min_val)
-
-            else:
-                # Default to uniform
-                return np.random.uniform(min_val, max_val)
-
-        # If single-element tuple
-        if isinstance(param, tuple) and len(param) == 1:
-            return float(param[0])
-
-        # Otherwise return as-is
-        return param
-
-    def _get_module_kwargs(self, name: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Get module-specific kwargs with smart defaults.
-        Changes range parameters (tuples) to scalars by sampling.
-
-        Args:
-            name: Module name
-            kwargs: User-provided kwargs
-
-        Returns:
-            Dictionary of module-specific parameters (all scalars)
-        """
-        module_kwargs = {}
-
-        # Get sampling distribution
-        global_distribution = kwargs.get('param_distribution', 'uniform')
-        per_param_distributions = kwargs.get('param_distributions', {})
-
-        def sample(param_name, param_value):
-            """Helper to sample with correct distribution for this parameter."""
-            dist = per_param_distributions.get(param_name, global_distribution)
-            return self._sample_from_range(param_value, dist)
-
-        # Processing (NIfTI_RawProcessor)
-        if name == 'processing':
-            # Extract all processing-related parameters
-            module_kwargs['conj'] = kwargs.get('conj', True)
-            module_kwargs['coil'] = kwargs.get('coil', True)
-            module_kwargs['align'] = kwargs.get('align', True)
-            module_kwargs['remove_outliers'] = kwargs.get('remove_outliers', True)
-            module_kwargs['average'] = kwargs.get('average', True)
-            module_kwargs['ecc'] = kwargs.get('ecc', True)
-            module_kwargs['truncate'] = kwargs.get('truncate', False)
-            module_kwargs['remove_water'] = kwargs.get('remove_water', False)
-            module_kwargs['shift_ref'] = kwargs.get('shift_ref', True)
-            module_kwargs['phase_correct'] = kwargs.get('phase_correct', True)
-            module_kwargs['coil_method'] = kwargs.get('coil_method', 'fsl-mrs')
-            module_kwargs['registration_method'] = kwargs.get('registration_method', 'fsl-mrs')
-            module_kwargs['remove_method'] = kwargs.get('remove_method', 'fsl-mrs')
-            module_kwargs['average_method'] = kwargs.get('average_method', 'fsl-mrs')
-            module_kwargs['ecc_method'] = kwargs.get('ecc_method', 'own')
-            module_kwargs['water_removal_method'] = kwargs.get('water_removal_method', 'fsl-mrs')
-            module_kwargs['shift_ref_method'] = kwargs.get('shift_ref_method', 'fsl-mrs')
-            module_kwargs['phase_correct_method'] = kwargs.get('phase_correct_method', 'fsl-mrs')
-
-        # Coil/Average Sampling
-        elif name in ['coil_sampling', 'average_sampling']:
-            module_kwargs['mode'] = kwargs.get('mode', 'random')
-            module_kwargs['n_coils'] = kwargs.get('n_coils', (1, None))
-            module_kwargs['n_averages'] = kwargs.get('n_averages', (1, None))
-
-        # Gaussian Noise
-        elif name in ['noise', 'gaussian_noise']:
-            if 'snr' in kwargs:
-                module_kwargs['snr'] = sample('snr', kwargs['snr'])
-            elif 'snr_db' in kwargs:
-                module_kwargs['snr_db'] = sample('snr_db', kwargs['snr_db'])
-            elif 'sigma' in kwargs:
-                module_kwargs['sigma'] = sample('sigma', kwargs['sigma'])
-            else:
-                sigma_frac = kwargs.get('sigma_frac', 0.02)
-                module_kwargs['sigma_frac'] = sample('sigma_frac', sigma_frac)
-
-        # Line Broadening
-        elif name in ['line_broadening', 'broadening']:
-            lb_hz = kwargs.get('lb_hz', 3.0)
-            gb_hz = kwargs.get('gb_hz', 2.0)
-            module_kwargs['lb_hz'] = sample('lb_hz', lb_hz)
-            module_kwargs['gb_hz'] = sample('gb_hz', gb_hz)
-            module_kwargs['mode'] = kwargs.get('broadening_mode', 'voigt')
-
-        # Baseline Augmentation
-        elif name == 'baseline':
-            module_kwargs['mode'] = kwargs.get('baseline_mode', 'random_walk')
-            baseline_frac = kwargs.get('baseline_frac', 0.05)
-            module_kwargs['baseline_frac'] = sample('baseline_frac', baseline_frac)
-            module_kwargs['smooth_pts'] = kwargs.get('smooth_pts', 151)
-        elif name == 'baseline_random_walk':
-            module_kwargs['mode'] = 'random_walk'
-            baseline_frac = kwargs.get('baseline_frac', 0.05)
-            module_kwargs['baseline_frac'] = sample('baseline_frac', baseline_frac)
-        elif name == 'baseline_bspline':
-            module_kwargs['mode'] = 'bspline'
-            module_kwargs['knots_per_ppm'] = kwargs.get('knots_per_ppm', 12)
-        elif name == 'baseline_polynomial':
-            module_kwargs['mode'] = 'polynomial'
-            module_kwargs['order'] = kwargs.get('poly_order', 3)
-
-        # Phase Shift
-        elif name in ['phase', 'phase_shift']:
-            zero_order = kwargs.get('zero_order_deg', 0.0)
-            first_order = kwargs.get('first_order_deg', 0.0)
-            module_kwargs['zero_order_deg'] = sample('zero_order_deg', zero_order)
-            module_kwargs['first_order_deg'] = sample('first_order_deg', first_order)
-
-        # Frequency Shift
-        elif name == 'frequency_shift':
-            shift_hz = kwargs.get('shift_hz', 0.0)
-            module_kwargs['shift_hz'] = sample('shift_hz', shift_hz)
-
-        # Residual Water
-        elif name in ['residual_water', 'water']:
-            center_ppm = kwargs.get('water_ppm', 4.7)
-            phase_deg = kwargs.get('water_phase', 0.0)
-            amplitude = kwargs.get('water_amp', 0.1)
-            module_kwargs['center_ppm'] = sample('water_ppm', center_ppm)
-            module_kwargs['phase_deg'] = sample('water_phase', phase_deg)
-            module_kwargs['amplitude_scale'] = sample('water_amp', amplitude)
-
-        # Spurious Echoes
-        elif name in ['spurious_echoes', 'echoes']:
-            if 'echoes' in kwargs:
-                # Allow each element to be a range or scalar
-                # Format: [(amp, width, phase, freq, time), ...]
-                # Each element can be: scalar or (min, max) tuple
-                echoes_spec = kwargs['echoes']
-                normalized_echoes = []
-
-                for echo_params in echoes_spec:
-                    # Each echo_params is a tuple of (amp, width, phase, freq, time)
-                    # Each element can be scalar or (min, max)
-                    normalized_params = []
-                    param_names = ['echo_amp', 'echo_width', 'echo_phase', 'echo_freq', 'echo_time']
-
-                    for i, param in enumerate(echo_params):
-                        param_name = f"{param_names[i]}_{len(normalized_echoes)}"
-                        normalized_params.append(sample(param_name, param))
-
-                    normalized_echoes.append(tuple(normalized_params))
-
-                module_kwargs['echoes'] = normalized_echoes
-            else:
-                # Default: single echo with ranges
-                module_kwargs['echoes'] = [(0.1, 0.2, 0.0, 5.0, 0.0)]
-
-        # Artificial Peaks
-        elif name in ['artificial_peaks', 'peaks']:
-            if 'peaks' in kwargs:
-                # Allow each element to be a range or scalar
-                # Format: [(amp, freq, width, phase, lineshape), ...]
-                # Each element can be: scalar or (min, max) tuple
-                peaks_spec = kwargs['peaks']
-                normalized_peaks = []
-
-                for peak_params in peaks_spec:
-                    # Each peak_params is a tuple of (amp, freq, width, phase, lineshape)
-                    # lineshape is typically a string, others can be ranges
-                    normalized_params = []
-                    param_names = ['peak_amp', 'peak_freq', 'peak_width', 'peak_phase', 'peak_lineshape']
-
-                    for i, param in enumerate(peak_params):
-                        param_name = f"{param_names[i]}_{len(normalized_peaks)}"
-                        # Don't sample if it's a string (lineshape)
-                        if isinstance(param, str):
-                            normalized_params.append(param)
-                        else:
-                            normalized_params.append(sample(param_name, param))
-
-                    normalized_peaks.append(tuple(normalized_params))
-
-                module_kwargs['peaks'] = normalized_peaks
-
-        # Eddy Current
-        elif name in ['eddy_current', 'eddy']:
-            module_kwargs['mode'] = kwargs.get('eddy_mode', 'synthetic')
-            std_rad = kwargs.get('eddy_std', 0.6)
-            strength = kwargs.get('eddy_strength', 1.0)
-            module_kwargs['std_rad'] = sample('eddy_std', std_rad)
-            module_kwargs['strength'] = sample('eddy_strength', strength)
-
-        # Apodization
-        elif name in ['apodization', 'apod']:
-            module_kwargs['mode'] = kwargs.get('apod_mode', 'exponential')
-            if module_kwargs['mode'] == 'exponential':
-                lb_hz = kwargs.get('apod_lb', 3.0)
-                module_kwargs['lb_hz'] = sample('apod_lb', lb_hz)
-            else:
-                module_kwargs['n_pts'] = kwargs.get('apod_npts', 1024)
-
-        return module_kwargs
+        # Pass ALL user kwargs to Pipeline - it handles parameter extraction and sampling
+        return AugmentationPipeline(
+            modules, 
+            module_names=module_names,
+            user_kwargs=self.kwargs
+        )
 
     def _create_modes(self, mode, modes):
         """Create augmentation modes for each split."""
@@ -1217,6 +1108,3 @@ class Augmentrum:
         n_total = sum(len(v[0]) for v in self.splits.values())
         splits_detail = ", ".join([f"{k}:{len(v[0])}" for k, v in self.splits.items()])
         return f"Augmentrum({n_total} subjects | {splits_detail} | {self.backend.name})"
-
-
-__all__ = ['Augmentrum']
