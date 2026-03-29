@@ -82,12 +82,19 @@ class TestNIfTIMRSPlusShape:
         assert 'DIM_DYN' in dim_tags
 
     def test_dim_tags_consistency(self, dummy_nifti_list):
-        """Test that all subjects must have same dim_tags."""
+        """Test that mismatched dim_tags emit a warning (not a hard error).
+
+        NIFTI_LIST backend processes subjects individually, so non-uniform
+        dim_tags is valid at construction time.  A RuntimeWarning is issued
+        to alert the user; tensor backends will fail later if stacking is
+        attempted.
+        """
         # Modify one nifti to have different dim_tags
         dummy_nifti_list[2].set_dim_tag(4, 'DIM_EDIT')
 
-        with pytest.raises(ValueError, match="same dim_tags"):
-            NIfTI_MRS_Plus(nifti_list=dummy_nifti_list)
+        with pytest.warns(UserWarning, match="non-uniform dim_tags"):
+            nplus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list)
+        assert nplus.n_subjects == len(dummy_nifti_list)
 
     def test_len(self, nifti_mrs_plus):
         """Test __len__ returns number of subjects."""

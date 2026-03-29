@@ -12,6 +12,8 @@ from augmentrum.augmentation.eddy_current import EddyCurrent
 from augmentrum.augmentation.apodization import Apodization
 from augmentrum.augmentation.phase_frequency import PhaseShift, FrequencyShift
 from augmentrum.augmentation.amplitude_scaling import AmplitudeScaling
+from augmentrum.augmentation.spatial_augmentations import SpatialAugmentations
+from augmentrum.augmentation.zero_fill import ZeroFill
 
 __all__ = [
     'GaussianNoise',
@@ -25,4 +27,6 @@ __all__ = [
     'PhaseShift',
     'FrequencyShift',
     'AmplitudeScaling',
+    'SpatialAugmentations',
+    'ZeroFill',
 ]

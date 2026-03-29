@@ -22,6 +22,7 @@ from fsl_mrs.core import NIFTI_MRS
 
 from augmentrum.core.base_module import BaseModule
 from augmentrum.core.nifti_mrs_plus import Backend
+from augmentrum.utils.tensor_ops import match_backend
 
 
 ####################################################################################################
@@ -137,10 +138,10 @@ class AmplitudeScaling(BaseModule):
 
     def process_tensor(
         self,
-        data: np.ndarray,
-        water: Optional[np.ndarray] = None,
+        data,
+        water=None,
         **kwargs
-    ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    ) -> Tuple:
         """
         Process tensor data.
 
@@ -160,7 +161,7 @@ class AmplitudeScaling(BaseModule):
         scales = scales.reshape(scale_shape)
 
         # Apply scaling
-        data_scaled = data * scales
+        data_scaled = data * match_backend(scales, data)
 
         return data_scaled, water
 

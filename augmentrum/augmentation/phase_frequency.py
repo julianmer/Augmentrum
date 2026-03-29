@@ -11,11 +11,12 @@
 #                                                                                                  #
 ####################################################################################################
 
+import math
 import numpy as np
 from typing import Optional, List
+
 from augmentrum.core.base_module import BaseModule
-from augmentrum.core.nifti_mrs_plus import Backend
-from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
+from augmentrum.utils.tensor_ops import fft, ifft, fftshift, ifftshift, match_backend
 
 
 class PhaseShift(BaseModule):
@@ -85,81 +86,73 @@ class PhaseShift(BaseModule):
 
         return processed_data, water_list
 
-    def _apply_phase(self, fid: np.ndarray, sw_hz: float) -> np.ndarray:
+    def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
         """
-        Apply phase shifts to FID data.
+        Apply phase shift to tensor/array data (**any backend**).
+
+        Uses ``keras.ops`` — works with NumPy, PyTorch, JAX, or TensorFlow.
+        Gradients are preserved.
 
         Args:
-            fid: Input FID data
-            sw_hz: Spectral width in Hz
+            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            water_array: Optional water reference tensor (unchanged)
+            backend: Backend enum (unused — ops dispatch automatically)
+            **kwargs: Must contain ``'sw_hz'`` (spectral width in Hz)
 
         Returns:
-            Phase-shifted FID
+            Tuple of (processed_data, water_array)
         """
-        # Work with original shape
-        original_shape = fid.shape
-        fid_flat = fid.reshape(-1, fid.shape[-1])
-        result = np.zeros_like(fid_flat)
+        sw_hz = kwargs.get('sw_hz', 1.0)
+        result = self._apply_phase(data_array, sw_hz)
+        return result, water_array
 
-        # Process each FID
-        for i in range(fid_flat.shape[0]):
-            fid_1d = fid_flat[i]
+    def _apply_phase(self, fid, sw_hz: float):
+        """
+        Apply phase shifts to FID data (any backend tensor).
 
-            # Apply zero-order phase
-            if self.zero_order_deg != 0.0:
-                fid_1d = self._zero_order_phase(fid_1d, self.zero_order_deg)
+        Zero-order phase is a scalar complex multiplication (fully vectorised).
+        First-order phase requires FFT → ramp → IFFT (uses tensor_ops).
+        """
+        # Zero-order: fully vectorised scalar multiply
+        if self.zero_order_deg != 0.0:
+            phi = math.radians(self.zero_order_deg)
+            # complex scalar * any-backend tensor — works everywhere
+            phase_factor = np.exp(-1j * phi)
+            fid = fid * match_backend(np.array(phase_factor), fid)
 
-            # Apply first-order phase
-            if self.first_order_deg != 0.0:
-                fid_1d = self._first_order_phase(fid_1d, self.first_order_deg)
+        # First-order: needs spectral domain
+        if self.first_order_deg != 0.0:
+            fid = self._first_order_phase(fid, self.first_order_deg)
 
-            result[i] = fid_1d
-
-        # Reshape back to original shape
-        return result.reshape(original_shape)
+        return fid
 
     @staticmethod
-    def _zero_order_phase(fid: np.ndarray, phase_deg: float) -> np.ndarray:
-        """
-        Apply zero-order phase shift.
-
-        Args:
-            fid: Input FID
-            phase_deg: Phase in degrees
-
-        Returns:
-            Phase-shifted FID
-        """
-        phi_rad = np.deg2rad(phase_deg)
-        rotation_factor = np.exp(-1j * phi_rad)
-        return fid * rotation_factor
+    def _zero_order_phase(fid, phase_deg: float):
+        """Apply zero-order phase shift (any backend tensor)."""
+        phi_rad = math.radians(phase_deg)
+        factor = np.array(np.exp(-1j * phi_rad))
+        return fid * match_backend(factor, fid)
 
     @staticmethod
-    def _first_order_phase(fid: np.ndarray, phc1_deg: float) -> np.ndarray:
+    def _first_order_phase(fid, phc1_deg: float):
         """
-        Apply first-order phase shift.
+        Apply first-order phase shift (any backend tensor).
 
-        Applies linear phase ramp across spectrum.
-        Pivot is at left edge.
-
-        Args:
-            fid: Input FID
-            phc1_deg: First-order phase in degrees
-
-        Returns:
-            Phase-shifted FID
+        Uses backend-agnostic FFT from tensor_ops.
+        The linear phase ramp is a numpy array; multiplication with the
+        spectrum tensor auto-promotes to the correct backend.
         """
-        # FFT to spectrum
-        spec = np.fft.fftshift(np.fft.ifft(fid))
-        N = spec.size
+        # FFT to spectrum (backend-agnostic)
+        spec = fftshift(ifft(fid))
+        N = fid.shape[-1]
 
-        # Linear ramp from 0 to 1 (left-edge pivot)
-        u = np.linspace(0.0, 1.0, N)
-        phi_deg = phc1_deg * u
-        spec_ph = spec * np.exp(1j * np.deg2rad(phi_deg))
+        # Linear ramp (numpy — no gradients needed for coordinates)
+        u = np.linspace(0.0, 1.0, N, dtype=np.float64)
+        ramp_shape = [1] * (len(fid.shape) - 1) + [N]
+        ramp = np.exp(1j * np.deg2rad(phc1_deg * u)).reshape(ramp_shape)
 
-        # Back to FID
-        return np.fft.fft(np.fft.ifftshift(spec_ph))
+        # Apply ramp and back to FID (backend-agnostic)
+        return fft(ifftshift(spec * match_backend(ramp, spec)))
 
 
 class FrequencyShift(BaseModule):
@@ -221,32 +214,46 @@ class FrequencyShift(BaseModule):
 
         return processed_data, water_list
 
-    def _apply_shift(self, fid: np.ndarray, sw_hz: float) -> np.ndarray:
+    def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
         """
-        Apply frequency shift to FID data.
+        Apply frequency shift to tensor/array data (**any backend**).
+
+        Uses ``keras.ops`` — works with NumPy, PyTorch, JAX, or TensorFlow.
 
         Args:
-            fid: Input FID data
-            sw_hz: Spectral width in Hz
+            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            water_array: Optional water reference tensor (unchanged)
+            backend: Backend enum (unused — ops dispatch automatically)
+            **kwargs: Must contain ``'sw_hz'`` (spectral width in Hz)
 
         Returns:
-            Frequency-shifted FID
+            Tuple of (processed_data, water_array)
+        """
+        sw_hz = kwargs.get('sw_hz')
+        if sw_hz is None:
+            raise ValueError("FrequencyShift.process_tensor requires 'sw_hz' in kwargs")
+
+        result = self._apply_shift(data_array, sw_hz)
+        return result, water_array
+
+    def _apply_shift(self, fid, sw_hz: float):
+        """
+        Apply frequency shift to FID data (any backend tensor).
+
+        The shift phasor is a numpy array; multiplication with the FID tensor
+        auto-promotes to the correct backend.
         """
         if self.shift_hz == 0.0:
             return fid
 
-        # Work with original shape
-        original_shape = fid.shape
-        N = original_shape[-1]
+        N = fid.shape[-1]
 
-        # Time axis for last dimension
-        t = np.arange(N, dtype=float) / float(sw_hz)
+        # Time axis (numpy — no gradients needed for coordinates)
+        t = np.arange(N, dtype=np.float64) / float(sw_hz)
+        t = t.reshape([1] * (len(fid.shape) - 1) + [N])
 
-        # Reshape t to broadcast correctly
-        t_shape = tuple([1] * (fid.ndim - 1) + [N])
-        t = t.reshape(t_shape)
+        # Shift phasor (numpy complex)
+        shift_factor = np.exp(1j * 2.0 * math.pi * float(self.shift_hz) * t)
 
-        # Apply frequency shift: multiply by exp(+i*2π*delta_f*t)
-        shift_factor = np.exp(1j * 2.0 * np.pi * float(self.shift_hz) * t)
-
-        return fid * shift_factor
+        # Multiply: convert phasor to same backend, preserves gradients
+        return fid * match_backend(shift_factor, fid)

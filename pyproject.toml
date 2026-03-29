@@ -95,4 +95,6 @@ markers = [
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",
+    "ignore::RuntimeWarning",
+    "ignore::UserWarning",
 ]

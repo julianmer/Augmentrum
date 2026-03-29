@@ -134,8 +134,6 @@ class TestApodizationCreation:
 class TestTruncationApodization:
     """Test truncation apodization."""
 
-    @pytest.mark.skip(reason="Truncation changes shape and can't be assigned back to NIfTI in-place")
-    @pytest.mark.skip(reason="Truncation changes shape and can't be assigned back to NIfTI in-place")
     def test_truncate_changes_shape(self, dummy_nifti_list):
         """Test truncation changes the shape correctly."""
         # Note: dummy data has shape (..., 2048, 8, 16) where last dim is DYN
@@ -151,7 +149,6 @@ class TestTruncationApodization:
         assert new_shape[-1] < original_shape[-1]
         assert new_shape[-1] == 8
 
-    @pytest.mark.skip(reason="Truncation changes shape and can't be assigned back to NIfTI in-place")
     def test_truncate_with_frac(self, dummy_nifti_list):
         """Test truncation with fraction of points."""
         apod = Apodization(mode='truncate', frac_pts=0.5)

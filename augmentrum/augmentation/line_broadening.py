@@ -11,11 +11,12 @@
 #                                                                                                  #
 ####################################################################################################
 
+import math
 import numpy as np
 from typing import Optional, List
+
 from augmentrum.core.base_module import BaseModule
-from augmentrum.core.nifti_mrs_plus import Backend
-from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
+from augmentrum.utils.tensor_ops import match_backend
 
 
 class LineBroadening(BaseModule):
@@ -23,7 +24,10 @@ class LineBroadening(BaseModule):
     Apply line broadening to MRS data.
 
     Supports Lorentzian (exponential), Gaussian, and Voigt (combined) broadening.
-    Works with any backend - operates in time domain on FID data.
+
+    **Backend-agnostic** (zea pattern): all ``process_tensor`` operations use
+    ``keras.ops`` so they work transparently with NumPy arrays, PyTorch tensors,
+    JAX arrays, and TensorFlow tensors without losing gradients.
 
     Parameters
     ----------
@@ -94,88 +98,82 @@ class LineBroadening(BaseModule):
 
         return processed_data, water_list
 
-    @staticmethod
-    def _apply_lorentzian(fid: np.ndarray, sw_hz: float, lb_hz: float) -> np.ndarray:
+    def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
         """
-        Apply Lorentzian (exponential) line broadening.
+        Apply line broadening to tensor/array data (**any backend**).
+
+        Uses ``keras.ops`` — works identically with NumPy, PyTorch, JAX, or
+        TensorFlow tensors.  Gradients are preserved for differentiable
+        training pipelines.
 
         Args:
-            fid: Input FID data
-            sw_hz: Spectral width in Hz
-            lb_hz: Lorentzian FWHM in Hz
+            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            water_array: Optional water reference tensor (unchanged)
+            backend: Backend enum (unused — ops dispatch automatically)
+            **kwargs: Must contain ``'sw_hz'`` (spectral width in Hz)
 
         Returns:
-            Broadened FID
+            Tuple of (processed_data, water_array)
         """
+        sw_hz = kwargs.get('sw_hz')
+        if sw_hz is None:
+            raise ValueError("LineBroadening.process_tensor requires 'sw_hz' in kwargs")
+
+        if self.mode == 'lorentzian':
+            result = self._apply_lorentzian(data_array, sw_hz, self.lb_hz)
+        elif self.mode == 'gaussian':
+            result = self._apply_gaussian(data_array, sw_hz, self.gb_hz)
+        else:  # voigt
+            result = self._apply_voigt(data_array, sw_hz, self.lb_hz, self.gb_hz)
+
+        return result, water_array
+
+    # ------------------------------------------------------------------
+    # Envelope helpers — fully backend-agnostic via keras.ops
+    #
+    # The time axis `t` is a plain numpy array (no gradients needed for
+    # coordinates).  The envelope is also numpy.  The final multiplication
+    # `fid * envelope` is handled by the framework's own __mul__, which
+    # auto-promotes the numpy envelope to the correct backend and keeps
+    # the fid tensor on its original device / graph.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_time_envelope(fid, sw_hz, lb_hz, gb_hz):
+        """Build the broadening envelope (numpy) shaped for broadcasting."""
+        N = fid.shape[-1]
+        t = np.arange(N, dtype=np.float64) / float(sw_hz)
+
+        # Reshape t for broadcasting: (1, 1, ..., N)
+        t = t.reshape([1] * (len(fid.shape) - 1) + [N])
+
+        env = np.ones_like(t)
+        if lb_hz > 0:
+            env *= np.exp(-math.pi * lb_hz * t)
+        if gb_hz > 0:
+            env *= np.exp(-((math.pi * gb_hz * t) ** 2) / (4 * math.log(2)))
+        return env
+
+    @staticmethod
+    def _apply_lorentzian(fid, sw_hz, lb_hz):
+        """Apply Lorentzian (exponential) line broadening."""
         if lb_hz <= 0:
             return fid
-
-        # Get time points for the last dimension (FID points)
-        N = fid.shape[-1]
-        t = np.arange(N) / sw_hz
-
-        # Reshape t to broadcast correctly
-        t_shape = tuple([1] * (fid.ndim - 1) + [N])
-        t = t.reshape(t_shape)
-
-        # Apply exponential decay
-        envelope = np.exp(-np.pi * lb_hz * t)
-        return fid * envelope
+        envelope = LineBroadening._make_time_envelope(fid, sw_hz, lb_hz, 0.0)
+        return fid * match_backend(envelope, fid)
 
     @staticmethod
-    def _apply_gaussian(fid: np.ndarray, sw_hz: float, gb_hz: float) -> np.ndarray:
-        """
-        Apply Gaussian line broadening.
-
-        Args:
-            fid: Input FID data
-            sw_hz: Spectral width in Hz
-            gb_hz: Gaussian FWHM in Hz
-
-        Returns:
-            Broadened FID
-        """
+    def _apply_gaussian(fid, sw_hz, gb_hz):
+        """Apply Gaussian line broadening."""
         if gb_hz <= 0:
             return fid
-
-        # Get time points for the last dimension
-        N = fid.shape[-1]
-        t = np.arange(N) / sw_hz
-
-        # Reshape t to broadcast correctly
-        t_shape = tuple([1] * (fid.ndim - 1) + [N])
-        t = t.reshape(t_shape)
-
-        # Apply Gaussian decay
-        envelope = np.exp(-((np.pi * gb_hz * t) ** 2) / (4 * np.log(2)))
-        return fid * envelope
+        envelope = LineBroadening._make_time_envelope(fid, sw_hz, 0.0, gb_hz)
+        return fid * match_backend(envelope, fid)
 
     @staticmethod
-    def _apply_voigt(fid: np.ndarray, sw_hz: float, lb_hz: float, gb_hz: float) -> np.ndarray:
-        """
-        Apply Voigt (Lorentzian × Gaussian) line broadening.
-
-        Args:
-            fid: Input FID data
-            sw_hz: Spectral width in Hz
-            lb_hz: Lorentzian FWHM in Hz
-            gb_hz: Gaussian FWHM in Hz
-
-        Returns:
-            Broadened FID
-        """
+    def _apply_voigt(fid, sw_hz, lb_hz, gb_hz):
+        """Apply Voigt (Lorentzian × Gaussian) line broadening."""
         if lb_hz <= 0 and gb_hz <= 0:
             return fid
-
-        # Get time points for the last dimension
-        N = fid.shape[-1]
-        t = np.arange(N) / sw_hz
-
-        # Reshape t to broadcast correctly
-        t_shape = tuple([1] * (fid.ndim - 1) + [N])
-        t = t.reshape(t_shape)
-
-        # Apply combined envelope
-        envelope = (np.exp(-np.pi * lb_hz * t) *
-                   np.exp(-((np.pi * gb_hz * t) ** 2) / (4 * np.log(2))))
-        return fid * envelope
+        envelope = LineBroadening._make_time_envelope(fid, sw_hz, lb_hz, gb_hz)
+        return fid * match_backend(envelope, fid)

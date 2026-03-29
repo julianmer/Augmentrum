@@ -81,6 +81,43 @@ train_data = augmenter.dataloader()
 
 ---
 
+## Module Reference & Backend Support
+
+Every module is called as `module(nifti_plus, water)`.  When a backend is not
+natively supported, the base class automatically routes the call through the
+NIfTI-list path and returns the result in the original backend format —
+no manual conversion needed.
+
+| Module | Modes / Methods                                         | NIfTI | NumPy | PyTorch | TensorFlow | JAX | Keras |
+|:---|:--------------------------------------------------------|:-----:|:---:|:---:|:---:|:---:|:---:|
+| `AmplitudeScaling` | uniform, normal                                         |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `Apodization` | exponential, truncate †                                 |   ✓   | ✓† | ✓† | ✓† | ✓† | ✓† |
+| `ArtificialPeaks` | Lorentzian, Gaussian, Voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `BaselineAugmentation` | random_walk, bspline, polynomial                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `CoilAverageSampler` | random, deterministic                                   |   ✓   | ~ | ~ | ~ | ~ | ~ |
+| `EddyCurrent` | synthetic, water                                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `FrequencyShift` | —                                                       |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `GaussianNoise` | sigma, sigma_frac, snr, snr_db                          |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `KspaceReconstructor` | NUFFT + density compensation                            |   —   | — | ✓ | — | — | — |
+| `LineBroadening` | lorentzian, gaussian, voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `NIfTI_RawProcessor` | coil combination, alignment, averaging, ECC, phase/freq |   ✓   | ~ | ~ | ~ | ~ | ~ |
+| `PhaseShift` | zero_order, first_order                                 |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `ResidualWater` | —                                                       |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `SpatialAugmentations` | 2-D / 3-D affine, flip, zoom, shear                     |  ✓ ‡  | ✓ ‡ | ✓ | ~ | ~ | ~ |
+| `SpuriousEchoes` | replica, hybrid                                         |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `ZeroFill` | pad FID to target length                                |   ✓   | ✓† | ✓† | ✓† | ✓† | ✓† |
+
+**✓** native — data tensor stays in the target framework throughout.  
+**~** automatic — the base class routes the call through the NIfTI-list path; the result is returned in the original backend format. Functional, but not natively differentiable.  
+**—** not supported / not applicable.
+
+> **†** `Apodization[truncate]` and `ZeroFill` both change `N_PTS`. Because `target_pts` / `n_pts` is a module-level scalar, the **same length is applied uniformly to every batch member** — the output is still a uniform tensor. On non-NIfTI backends the base class detects the shape change, rebuilds each NIfTI_MRS object at the new length, and emits a `RuntimeWarning`.
+
+> **‡** `SpatialAugmentations` uses `F.grid_sample` (PyTorch) internally; NIfTI-list and NumPy inputs are converted to PyTorch for processing and converted back. TensorFlow, JAX, and Keras are handled by the base-class automatic routing (~).
+
+
+---
+
 ## Contact
 
 For questions, issues, or collaborations:

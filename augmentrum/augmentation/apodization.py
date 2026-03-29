@@ -14,8 +14,9 @@
 import numpy as np
 from typing import Optional, List
 from augmentrum.core.base_module import BaseModule
-from augmentrum.core.nifti_mrs_plus import Backend
 from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
+from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+from augmentrum.utils.tensor_ops import match_backend
 
 
 class Apodization(BaseModule):
@@ -108,10 +109,93 @@ class Apodization(BaseModule):
                 fid_apod = self._apply_exponential(fid, sw_hz)
 
             # Update NIFTI_MRS data
-            nifti[:] = fid_apod
+            if fid_apod.shape[-1] != fid.shape[-1]:
+                # Shape changed (truncation) — must build a new NIFTI_MRS object
+                spec_freq = nifti.spectrometer_frequency[0]
+                nucleus = nifti.nucleus[0] if nifti.nucleus else '1H'
+                dim_tags = list(nifti.dim_tags) if hasattr(nifti, 'dim_tags') else [None, None, None]
+                affine = nifti.getAffine('voxel', 'world') if hasattr(nifti, 'getAffine') else None
+
+                new_nifti = gen_nifti_mrs(
+                    data=fid_apod,
+                    dwelltime=nifti.dwelltime,
+                    spec_freq=spec_freq,
+                    nucleus=nucleus,
+                    dim_tags=dim_tags,
+                    affine=affine,
+                )
+                # Copy across any extra header fields
+                if hasattr(nifti, 'hdr_ext'):
+                    for key in nifti.hdr_ext:
+                        if key not in ('SpectrometerFrequency', 'ResonantNucleus',
+                                       'dim_5', 'dim_6', 'dim_7'):
+                            try:
+                                new_nifti.add_hdr_field(key, nifti.hdr_ext[key])
+                            except Exception:
+                                pass
+                nifti = new_nifti
+            else:
+                nifti[:] = fid_apod
             processed_data.append(nifti)
 
         return processed_data, water_list
+
+    def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
+        """
+        Apply apodization to tensor/array data (**any backend**).
+
+        **Truncation mode**: slices the last axis with ``data[..., :n_keep]``
+        — works natively in NumPy, PyTorch, JAX, and TensorFlow without any
+        conversion.
+
+        **Exponential mode**: the decay envelope is a numpy array (no data
+        dependency) multiplied via ``data * match_backend(envelope, data)``
+        — fully backend-native multiply, gradients preserved.
+
+        Args:
+            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            water_array: Optional water reference (unchanged)
+            backend: Backend enum (unused)
+            **kwargs: ``'sw_hz'`` required for exponential mode
+
+        Returns:
+            Tuple of (processed_data, water_array)
+        """
+        if self.mode == 'truncate':
+            N = data_array.shape[-1]
+            if self.n_pts is not None:
+                n_keep = int(np.clip(self.n_pts, 1, N))
+            elif self.frac_pts is not None:
+                if not (0 < self.frac_pts <= 1):
+                    raise ValueError("frac_pts must be in range (0, 1]")
+                n_keep = int(np.ceil(self.frac_pts * N))
+            else:
+                raise ValueError("Must provide n_pts or frac_pts for truncation mode")
+            # Native slice — valid in numpy, torch, jax, tf
+            return data_array[..., :n_keep], water_array
+
+        else:  # exponential
+            sw_hz = kwargs.get('sw_hz')
+            if sw_hz is None:
+                raise ValueError("Apodization.process_tensor requires 'sw_hz' for exponential mode")
+
+            if self.auto_lb:
+                if self.target_pts is None:
+                    raise ValueError("Must provide target_pts when auto_lb=True")
+                lb = self._calc_lb(None, sw_hz, self.target_pts, self.target_damp)
+            elif self.lb_hz is not None:
+                lb = self.lb_hz
+            else:
+                raise ValueError("Must provide lb_hz or set auto_lb=True for exponential mode")
+
+            N = data_array.shape[-1]
+            t = np.arange(N, dtype=np.float64) / float(sw_hz)
+            t_shape = [1] * (len(data_array.shape) - 1) + [N]
+            t = t.reshape(t_shape)
+
+            envelope = np.exp(-np.pi * float(lb) * t)
+            # Backend-native multiply (envelope is data-independent numpy array)
+            return data_array * match_backend(envelope, data_array), water_array
 
     def _apply_truncation(self, fid: np.ndarray) -> np.ndarray:
         """
@@ -175,7 +259,7 @@ class Apodization(BaseModule):
         return fid * envelope
 
     @staticmethod
-    def _calc_lb(fid: np.ndarray, sw_hz: float, desired_npts: int, target_damp: float = 0.01) -> float:
+    def _calc_lb(fid, sw_hz: float, desired_npts: int, target_damp: float = 0.01) -> float:
         """
         Calculate Lorentzian broadening to achieve target damping.
 

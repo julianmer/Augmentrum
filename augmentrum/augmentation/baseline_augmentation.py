@@ -16,7 +16,9 @@ import numpy as np
 from typing import Optional, List, Tuple
 from scipy.signal import convolve
 from scipy.interpolate import BSpline
+
 from augmentrum.core.base_module import BaseModule
+from augmentrum.utils.tensor_ops import to_numpy, match_backend
 
 
 # ============================================================================
@@ -148,17 +150,22 @@ def auto_baseline_windows(ppm, margin_ppm=0.5):
 
 
 def calculate_ppm_and_mask(fid, sw_hz, sf_hz, ref_ppm, ppm_windows):
-    """Internal function to transform FID, calculate PPM axis, and create the baseline mask."""
+    """Internal function to transform FID, calculate PPM axis, and create the baseline mask.
+
+    Note: ``sf_hz`` is the Larmor frequency in **MHz** (matching NIfTI-MRS convention).
+    It is converted to Hz internally for the ppm calculation, exactly as in the legacy
+    ``augment_mrs.py`` implementation.
+    """
     spec = np.fft.fftshift(np.fft.ifft(fid))
     N = spec.size
 
-    # Larmor frequency in Hz (sf_hz is usually in MHz, hence 1e6)
+    # Larmor frequency in Hz (sf_hz is passed in MHz, hence *1e6)
     sf_hz_abs = sf_hz * 1e6
 
     # Calculate frequency offset (in Hz), centered at 0
     freq_offset_hz = np.fft.fftshift(np.fft.fftfreq(N, d=1.0/sw_hz))
 
-    # Calculate ppm axis: ref_ppm - (f - f_ref) / sf_hz
+    # Calculate ppm axis: ref_ppm - (f - f_ref) / sf_hz_abs
     ppm = ref_ppm - freq_offset_hz / sf_hz_abs
     ppm = np.asarray(ppm)
 
@@ -315,6 +322,49 @@ class BaselineAugmentation(BaseModule):
 
         return processed_data, water_list
 
+    def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
+        """
+        Add baseline to tensor/array data (**any backend**).
+
+        Baseline generation uses NumPy/SciPy (non-differentiable), but the
+        final addition is backend-agnostic: ``data_tensor + numpy_baseline``
+        auto-promotes to the correct backend and preserves gradients.
+
+        Args:
+            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            water_array: Optional water reference tensor (unchanged)
+            backend: Backend enum (unused — ops dispatch automatically)
+            **kwargs: Must contain ``'sw_hz'`` and ``'sf_mhz'``
+
+        Returns:
+            Tuple of (processed_data, water_array)
+        """
+        sw_hz = kwargs.get('sw_hz')
+        sf_mhz = kwargs.get('sf_mhz')
+        if sw_hz is None or sf_mhz is None:
+            raise ValueError("BaselineAugmentation.process_tensor requires 'sw_hz' and 'sf_mhz' in kwargs")
+
+        # Pull data to numpy ONLY for baseline generation (scipy-dependent)
+        data_np = to_numpy(data_array)
+        original_shape = data_np.shape
+        batch_size = original_shape[0]
+
+        # Generate baselines on numpy (non-differentiable, uses scipy)
+        baseline_np = np.zeros_like(data_np)
+        for b in range(batch_size):
+            fid = data_np[b]
+            if self.mode == 'random_walk':
+                augmented = self._add_random_walk_baseline(fid, sw_hz, sf_mhz)
+            elif self.mode == 'bspline':
+                augmented = self._add_bspline_baseline(fid, sw_hz, sf_mhz)
+            elif self.mode == 'polynomial':
+                augmented = self._add_polynomial_baseline(fid, sw_hz, sf_mhz)
+            baseline_np[b] = augmented - fid   # isolate the baseline additive term
+
+        # Add baseline to original tensor (backend-agnostic addition)
+        # convert to same backend, preserves gradients
+        return data_array + match_backend(baseline_np, data_array), water_array
+
     def _add_random_walk_baseline(self, fid: np.ndarray, sw_hz: float, sf_mhz: float,
                                    ref_ppm: float = 4.7) -> np.ndarray:
         """Add random walk baseline with Hilbert transform for complex baseline (from baseline_augmentation_BROKEN.py)."""
@@ -445,7 +495,12 @@ class BaselineAugmentation(BaseModule):
 
     def _add_polynomial_baseline(self, fid: np.ndarray, sw_hz: float, sf_mhz: float,
                                   ref_ppm: float = 4.7) -> np.ndarray:
-        """Add polynomial baseline to FID (uses exact code from augment_mrs.py baseline_add_poly)."""
+        """Add polynomial baseline to FID (matches legacy baseline_add_poly exactly).
+
+        Fits a polynomial to the actual spectrum values at baseline-region points,
+        then adds the resulting smooth polynomial curve to the full spectrum.
+        This reproduces the behaviour of augment_mrs.py ``baseline_add_poly``.
+        """
         original_shape = fid.shape
         N = original_shape[-1]
         fid_2d = fid.reshape(-1, N)
@@ -460,16 +515,10 @@ class BaselineAugmentation(BaseModule):
             idx = np.flatnonzero(mask_baseline)
             x = np.arange(N_pts)
 
-            # Instead of random noise, we generate a synthetic baseline
-            # by fitting polynomial to random values at baseline points
-            rng = np.random.default_rng(self.seed)
-            noise_scale = self.baseline_frac * np.max(np.abs(np.real(spec)))
-            noise_real = rng.normal(0, noise_scale, len(idx))
-            noise_imag = rng.normal(0, noise_scale, len(idx))
-
-            # Fit polynomial to the noisy baseline points
-            cr = np.polyfit(idx, noise_real, self.order)
-            ci = np.polyfit(idx, noise_imag, self.order)
+            # Fit polynomial to the actual spectrum values at baseline points
+            # (exact match to legacy baseline_add_poly)
+            cr = np.polyfit(idx, np.real(spec)[idx], self.order)
+            ci = np.polyfit(idx, np.imag(spec)[idx], self.order)
             fit = np.polyval(cr, x) + 1j * np.polyval(ci, x)
 
             # Add baseline to spectrum and convert back using fft (spectrum→FID, MRS convention)

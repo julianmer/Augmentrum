@@ -40,6 +40,7 @@ from augmentrum.augmentation.artificial_peaks import ArtificialPeaks
 from augmentrum.augmentation.eddy_current import EddyCurrent
 from augmentrum.augmentation.apodization import Apodization
 from augmentrum.augmentation.phase_frequency import PhaseShift, FrequencyShift
+from augmentrum.augmentation.spatial_augmentations import SpatialAugmentations
 
 
 __all__ = ['Augmentrum']
@@ -177,6 +178,10 @@ class Augmentrum:
         'eddy': EddyCurrent,
         'apodization': Apodization,
         'apod': Apodization,
+
+        # Spatial
+        'spatial': SpatialAugmentations,
+        'spatial_augmentations': SpatialAugmentations,
     }
 
     def __init__(
@@ -698,6 +703,7 @@ class Augmentrum:
             'ArtificialPeaks': '⛰️',
             'EddyCurrent': '🌀',
             'Apodization': '✂️',
+            'SpatialAugmentations': '🗺️',
         }
         return emoji_map.get(name, '🔧')
 
@@ -713,7 +719,9 @@ class Augmentrum:
             'water_amp', 'water_width',
             'n_echoes', 'echo_time',
             'n_peaks', 'peak_shift',
-            'eddy_std', 'apod_lb'
+            'eddy_std', 'apod_lb',
+            'dim', 'prob', 'min_coils', 'max_coils',
+            'max_z_angle_deg', 'zoom_min', 'zoom_max', 'shear_max',
         ]
 
         params = []

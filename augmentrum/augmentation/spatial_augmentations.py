@@ -3,6 +3,7 @@
 ####################################################################################################
 #                                                                                                  #
 # Authors: J. T. LaMaster (john.t.lamaster@gmail.com)                                              #
+#          J. P. Merkofer (j.p.merkofer@tue.nl)                                                    #
 #                                                                                                  #
 # Created: 2025-11-28                                                                              #
 #                                                                                                  #
@@ -109,11 +110,15 @@ def build_affine_3d_from_components(R: torch.Tensor,
                                     t_xyz: Tuple[float, float, float],
                                     flip_x: bool, flip_y: bool, flip_z: bool) -> torch.Tensor:
     """
-    R: 3x3 rotation matrix (torch)
-    scale_xyz: (sx, sy, sz)
-    shear_mat: 3x3 shear matrix (diagonal should be 1)
-    t_xyz: translations normalized
-    flips: convert to negative scale when True
+    Build a 3x4 affine matrix that maps normalized output coords to normalized input coords.
+
+    Args:
+        R: 3x3 rotation matrix (torch)
+        scale_xyz: (sx, sy, sz)
+        shear_mat: 3x3 shear matrix (diagonal should be 1)
+        t_xyz: translations normalized
+        flips: convert to negative scale when True
+
     returns 3x4 affine
     """
     sx, sy, sz = scale_xyz
@@ -133,79 +138,135 @@ def build_affine_3d_from_components(R: torch.Tensor,
 # ----------------------
 class SpatialAugmentations(BaseModule):
 
-    SUPPORTED_BACKENDS = [Backend.NIFTI_LIST, Backend.NUMPY, Backend.PYTORCH,
-                         Backend.TENSORFLOW, Backend.JAX, Backend.KERAS]
-    
+    # NIfTI_LIST and NUMPY inputs are converted to PyTorch internally.
+    # TensorFlow, JAX, and Keras are NOT natively supported — the base-module
+    # fallback will route them through the NIfTI-list path (implicit conversion).
+    SUPPORTED_BACKENDS = [Backend.NIFTI_LIST, Backend.NUMPY, Backend.PYTORCH]
+
     def __init__(self,
                  dim: int = 3,
                  prob: float = 0.5,
                  device: Optional[torch.device] = None,
+                 # data-pipeline ranges (sampleable as flat kwargs from Augmentrum)
+                 translation_frac: float = 0.10,
+                 max_z_angle_deg: float = 30.0,
+                 max_random_angle_deg: float = 359.0,
+                 zoom_min: float = 0.9,
+                 zoom_max: float = 1.1,
+                 shear_max: float = 0.15,
+                 scale_min: float = 0.9,
+                 scale_max: float = 1.1,
+                 translation_prob: float = 0.1,
+                 # csm-pipeline overrides (if None, fall back to the data-pipeline value)
+                 csm_max_z_angle_deg: Optional[float] = 359.0,
+                 # coil subsampling
+                 min_coils: int = 6,
+                 max_coils: Optional[int] = None,
+                 # additional bulk-override dicts (still supported for convenience)
                  data_ranges: Optional[Dict[str, Any]] = None,
                  csm_ranges: Optional[Dict[str, Any]] = None,
-                 min_coils: int = 6,
-                 max_coils: Optional[int] = None):
+                 pipeline: str = 'data'):
         """
         dim: 2 or 3
         prob: Bernoulli probability to activate each augmentation
         device: torch device
-        data_ranges: augmentation ranges for data pipeline (spectroscopy data)
-        csm_ranges: augmentation ranges for CSM pipeline (coil sensitivity maps)
+        translation_frac: max translation as fraction of axis length
+        max_z_angle_deg: max z-axis rotation for the data pipeline (degrees)
+        max_random_angle_deg: max random rotation angle (degrees)
+        zoom_min, zoom_max: bounds of the zoom factor range
+        shear_max: max shear magnitude
+        scale_min, scale_max: bounds of the anisotropic scale factor range
+        translation_prob: probability of applying translation (independent of prob)
+        csm_max_z_angle_deg: max z-axis rotation for the CSM pipeline (degrees).
+                             Defaults to 359 (unrestricted). Set to None to mirror
+                             max_z_angle_deg.
         min_coils, max_coils: integer range of coils to keep when coil subsampling is active
-        
+        data_ranges: optional dict to bulk-override any data-pipeline range key
+        csm_ranges: optional dict to bulk-override any csm-pipeline range key
+        pipeline: default pipeline to use ('data' or 'csm')
+
         Pipeline-specific ranges allow different augmentation constraints:
         - Data pipeline: typically has restricted z-axis rotation
         - CSM pipeline: allows unrestricted rotation (full 360°)
+
+        Every scalar parameter can be passed as a (min, max) tuple to Augmentrum
+        for per-batch sampling in on-the-fly mode — e.g. zoom_min=(0.85, 0.95)
+        means the lower zoom bound is sampled uniformly from [0.85, 0.95] each batch.
         """
-        super().__init__()
+        super().__init__(dim=dim, prob=prob, min_coils=min_coils,
+                         max_coils=max_coils, pipeline=pipeline)
         assert dim in (2, 3)
         self.dim = dim
         self.prob = float(prob)
         self.device = device or torch.device('cpu')
-        
-        # Default ranges for data pipeline (restricted rotation)
-        default_data_ranges = {
-            'translation_frac': 0.10,        # fraction of axis length
-            'max_z_angle_deg': 30.0,         # restricted z-axis rotation
-            'max_random_angle_deg': 359.0,
-            'zoom_range': (0.9, 1.1),
-            'shear_max': 0.15,
-            'scale_range': (0.9, 1.1),
-            'translation_prob': 0.1,
-        }
-        
-        # Default ranges for CSM pipeline (unrestricted rotation)
-        default_csm_ranges = {
-            'translation_frac': 0.10,
-            'max_z_angle_deg': 359.0,        # unrestricted z-axis rotation
-            'max_random_angle_deg': 359.0,
-            'zoom_range': (0.9, 1.1),
-            'shear_max': 0.15,
-            'scale_range': (0.9, 1.1),
-            'translation_prob': 0.1,
-        }
-        
-        # Update with user-provided ranges
-        if data_ranges:
-            default_data_ranges.update(data_ranges)
-        if csm_ranges:
-            default_csm_ranges.update(csm_ranges)
-            
-        self.data_ranges = default_data_ranges
-        self.csm_ranges = default_csm_ranges
-        
+        self.pipeline = pipeline
+
+        # Every attribute here is a plain scalar.  The pipeline can sample each one
+        # independently — e.g. zoom_min=(0.85, 0.95) → sampled to 0.91 per-batch.
+        self.translation_frac = translation_frac
+        self.max_z_angle_deg = max_z_angle_deg
+        self.max_random_angle_deg = max_random_angle_deg
+        self.zoom_min = zoom_min
+        self.zoom_max = zoom_max
+        self.shear_max = shear_max
+        self.scale_min = scale_min
+        self.scale_max = scale_max
+        self.translation_prob = translation_prob
+        self.csm_max_z_angle_deg = csm_max_z_angle_deg if csm_max_z_angle_deg is not None else max_z_angle_deg
+
         self.min_coils = int(min_coils) if min_coils is not None else None
         self.max_coils = int(max_coils) if max_coils is not None else None
+
+        # Bulk overrides merged in last so explicit kwargs always win
+        self._extra_data_ranges = data_ranges or {}
+        self._extra_csm_ranges = csm_ranges or {}
+
+        # Populated after each forward pass — available for logging / reproducibility
+        self.aug_specs_: Optional[List[Dict[str, Any]]] = None
+
+    # ----------------------
+    # Range dict builders
+    # ----------------------
+    @property
+    def data_ranges(self) -> Dict[str, Any]:
+        """Live view of data-pipeline ranges, rebuilt from the flat scalar attributes."""
+        ranges = {
+            'translation_frac': self.translation_frac,
+            'max_z_angle_deg': self.max_z_angle_deg,
+            'max_random_angle_deg': self.max_random_angle_deg,
+            'zoom_range': (self.zoom_min, self.zoom_max),
+            'shear_max': self.shear_max,
+            'scale_range': (self.scale_min, self.scale_max),
+            'translation_prob': self.translation_prob,
+        }
+        ranges.update(self._extra_data_ranges)
+        return ranges
+
+    @property
+    def csm_ranges(self) -> Dict[str, Any]:
+        """Live view of CSM-pipeline ranges, rebuilt from the flat scalar attributes."""
+        ranges = {
+            'translation_frac': self.translation_frac,
+            'max_z_angle_deg': self.csm_max_z_angle_deg,
+            'max_random_angle_deg': self.max_random_angle_deg,
+            'zoom_range': (self.zoom_min, self.zoom_max),
+            'shear_max': self.shear_max,
+            'scale_range': (self.scale_min, self.scale_max),
+            'translation_prob': self.translation_prob,
+        }
+        ranges.update(self._extra_csm_ranges)
+        return ranges
 
     # ----------------------
     # Sampling augmentations per-sample
     # ----------------------
-    def sample_augmentations(self, batch_size: int, 
+    def sample_augmentations(self, batch_size: int,
                            pipeline: str = 'data',
                            rng: Optional[torch.Generator] = None) -> List[Dict[str, Any]]:
         """
         Returns a list of augmentation specification dicts (one per sample).
         Each dict contains booleans 'do_*' keys and corresponding parameter keys.
-        
+
         Args:
             batch_size: Number of samples to generate augmentations for
             pipeline: 'data' or 'csm' - determines which range configuration to use
@@ -214,7 +275,7 @@ class SpatialAugmentations(BaseModule):
         ranges = self.csm_ranges if pipeline == 'csm' else self.data_ranges
         rng = rng or torch.default_generator
         info_list = []
-        
+
         for _ in range(batch_size):
             def bern():
                 return (torch.rand(1, generator=rng).item() < self.prob)
@@ -331,7 +392,7 @@ class SpatialAugmentations(BaseModule):
     # ----------------------
     # Affine composition
     # ----------------------
-    def _compose_affines_for_batch(self, aug_spec_list: List[Dict[str, Any]], 
+    def _compose_affines_for_batch(self, aug_spec_list: List[Dict[str, Any]],
                                    data_shape: torch.Size) -> torch.Tensor:
         """
         Build affine matrices for an entire batch given augmentation specs.
@@ -446,26 +507,26 @@ class SpatialAugmentations(BaseModule):
     # ----------------------
     # Public apply function
     # ----------------------
-    def apply(self, x: torch.Tensor, 
+    def apply(self, x: torch.Tensor,
              pipeline: str = 'data',
              aug_spec_list: Optional[List[Dict[str, Any]]] = None,
              coils_axis: int = 1) -> Tuple[torch.Tensor, List[Dict[str, Any]]]:
         """
         Apply augmentations to input batch x.
-        
+
         Args:
             x: Input tensor [bS, channels, X, Y, Z] for 3D or [bS, channels, X, Y] for 2D
             pipeline: 'data' or 'csm' - determines augmentation ranges if sampling new augs
             aug_spec_list: Optional pre-specified augment list (length bS). If None, will sample.
             coils_axis: Axis along which coils are stored (for coil subsampling)
-            
+
         Returns:
             (x_aug, aug_info_list): Augmented tensor and list of augmentation specifications
         """
         assert x.dim() in (4, 5), "Input must be 4D (2D images) or 5D (3D images)."
         batch_size = x.shape[0]
         is_csm = (pipeline == 'csm')
-        
+
         if aug_spec_list is None:
             aug_spec_list = self.sample_augmentations(batch_size, pipeline=pipeline)
 
@@ -499,7 +560,7 @@ class SpatialAugmentations(BaseModule):
     def _nifti_to_tensor(self, nifti_list: List[NIfTI_MRS_Plus]) -> torch.Tensor:
         """
         Convert list of NIfTI_MRS_Plus objects to tensor format.
-        
+
         Returns:
             torch.Tensor: Shape [batch_size, channels, ...spatial dims]
         """
@@ -507,63 +568,160 @@ class SpatialAugmentations(BaseModule):
         for nifti in nifti_list:
             # Extract data from NIFTI object
             data = nifti[:]  # Assuming this returns the data array
-            
+
             # Convert to torch tensor
             if isinstance(data, np.ndarray):
                 tensor = torch.from_numpy(data)
             else:
                 tensor = data
-                
+
             # Ensure proper dtype
             if torch.is_complex(tensor):
                 tensor = tensor.to(dtype=torch.complex64)
             else:
                 tensor = tensor.to(dtype=torch.float32)
-                
+
             tensors.append(tensor)
-        
+
         # Stack into batch
         batch_tensor = torch.stack(tensors, dim=0)
         return batch_tensor.to(self.device)
-    
-    def _tensor_to_nifti(self, tensor: torch.Tensor, 
+
+    def _tensor_to_nifti(self, tensor: torch.Tensor,
                         original_nifti_list: List[NIfTI_MRS_Plus]) -> List[NIfTI_MRS_Plus]:
         """
         Convert tensor back to list of NIfTI_MRS_Plus objects.
-        
+
         Args:
             tensor: Augmented data tensor
             original_nifti_list: Original NIFTI objects to preserve metadata
-            
+
         Returns:
             List of new NIfTI_MRS_Plus objects with augmented data
         """
         result_list = []
-        
+
         # Handle case where tensor is actually a list (due to varying coil counts)
         if isinstance(tensor, list):
             tensor_list = tensor
         else:
             # Split batch dimension
             tensor_list = [tensor[i] for i in range(tensor.shape[0])]
-        
+
         for i, (data_tensor, original_nifti) in enumerate(zip(tensor_list, original_nifti_list)):
             # Remove batch dimension if present
             if data_tensor.dim() > len(original_nifti.shape):
                 data_tensor = data_tensor.squeeze(0)
-            
+
             # Convert to numpy
             if data_tensor.is_cuda:
                 data_tensor = data_tensor.cpu()
             data_array = data_tensor.numpy()
-            
+
             # Create new NIFTI object with augmented data
             nifti_new = original_nifti.copy()
             nifti_new[:] = data_array
-            
+
             result_list.append(nifti_new)
-        
+
         return result_list
+
+    # ----------------------
+    # BaseModule interface
+    # ----------------------
+    def process_nifti_list(self,
+                          data_list: List[NIfTI_MRS_Plus],
+                          water_list: Optional[List[NIfTI_MRS_Plus]] = None,
+                          **kwargs) -> Tuple[List[NIfTI_MRS_Plus], Optional[List[NIfTI_MRS_Plus]]]:
+        """
+        Process list of NIFTI_MRS objects with spatial augmentations.
+
+        Args:
+            data_list: List of NIFTI_MRS objects
+            water_list: Optional list of water reference NIFTI_MRS objects (passed through unchanged)
+            **kwargs: pipeline, aug_spec_list forwarded to apply()
+
+        Returns:
+            Tuple of (augmented_data_list, water_list_unchanged)
+            Augmentation specs are stored in self.aug_specs_ after each call.
+        """
+        pipeline = kwargs.get('pipeline', self.pipeline)
+        aug_spec_list = kwargs.get('aug_spec_list', None)
+
+        # Convert NIFTI to tensor
+        data_tensor = self._nifti_to_tensor(data_list)
+
+        # Apply augmentations
+        data_aug_tensor, aug_list = self.apply(
+            data_tensor,
+            pipeline=pipeline,
+            aug_spec_list=aug_spec_list,
+            coils_axis=1
+        )
+
+        self.aug_specs_ = aug_list  # store for provenance / reproducibility
+
+        # Convert back to NIFTI
+        augmented_data_list = self._tensor_to_nifti(data_aug_tensor, data_list)
+
+        # Water references unchanged
+        return augmented_data_list, water_list
+
+    def process_tensor(self,
+                      data_array,
+                      water_array=None,
+                      backend: Backend = Backend.NUMPY,
+                      **kwargs) -> Tuple:
+        """
+        Process tensor data with spatial augmentations.
+
+        Args:
+            data_array: Input tensor or array (batch, channels, ...spatial dims)
+            water_array: Optional water reference (passed through unchanged)
+            backend: Backend enum (unused, kept for BaseModule signature compatibility)
+            **kwargs: pipeline, aug_spec_list forwarded to apply()
+
+        Returns:
+            Tuple of (augmented_data, water_unchanged)
+            Augmentation specs are stored in self.aug_specs_ after each call.
+        """
+        pipeline = kwargs.get('pipeline', self.pipeline)
+        aug_spec_list = kwargs.get('aug_spec_list', None)
+
+        # Convert to torch tensor if needed
+        return_numpy = False
+        if isinstance(data_array, np.ndarray):
+            return_numpy = True
+            data_array = torch.from_numpy(data_array)
+
+        # Ensure proper dtype
+        if torch.is_complex(data_array):
+            data_array = data_array.to(dtype=torch.complex64)
+        else:
+            data_array = data_array.to(dtype=torch.float32)
+
+        # Move to device
+        data_array = data_array.to(self.device)
+
+        # Apply augmentations
+        data_aug, aug_list = self.apply(
+            data_array,
+            pipeline=pipeline,
+            aug_spec_list=aug_spec_list,
+            coils_axis=1
+        )
+
+        self.aug_specs_ = aug_list  # store for provenance / reproducibility
+
+        # Convert back to numpy if needed
+        if return_numpy:
+            if isinstance(data_aug, list):
+                # Handle list of tensors (variable coil counts)
+                data_aug = [d.cpu().numpy() for d in data_aug]
+            else:
+                data_aug = data_aug.cpu().numpy()
+
+        return data_aug, water_array
 
     # ----------------------
     # Pipeline routing
@@ -578,7 +736,7 @@ class SpatialAugmentations(BaseModule):
         """
         Route data through appropriate pipelines based on data type.
         Automatically detects whether data is NIFTI_MRS or tensor/array format.
-        
+
         Args:
             data_list: Spectroscopy data (NIFTI list or tensor/array)
             water_list: Optional water reference (NIFTI list or tensor/array)
@@ -586,169 +744,46 @@ class SpatialAugmentations(BaseModule):
             data_aug_list: Optional pre-computed augmentations for data
             csm_aug_list: Optional pre-computed augmentations for CSMs
             **kwargs: Additional arguments passed to processing methods
-            
+
         Returns:
             Dictionary containing processed data and augmentation lists:
             {
                 'data': processed data,
                 'water': processed water,
                 'csm': processed CSM,
-                'data_augmentations': augmentation list for data,
-                'csm_augmentations': augmentation list for CSMs
+                'data_augmentations': augmentation specs used for data,
+                'csm_augmentations': augmentation specs used for CSMs
             }
         """
         results = {}
-        
+
+        def _is_nifti_list(x):
+            return isinstance(x, list) and len(x) > 0 and isinstance(x[0], NIfTI_MRS_Plus)
+
         # Process data pipeline
         if data_list is not None:
-            if isinstance(data_list, list) and len(data_list) > 0 and isinstance(data_list[0], NIfTI_MRS_Plus):
-                # NIFTI format
-                data_proc, water_proc, data_augs = self.process_nifti_list(
-                    data_list=data_list,
-                    water_list=water_list,
-                    pipeline='data',
-                    aug_spec_list=data_aug_list,
-                    **kwargs
-                )
-                results['data'] = data_proc
-                results['water'] = water_proc
-                results['data_augmentations'] = data_augs
+            if _is_nifti_list(data_list):
+                data_proc, water_proc = self.process_nifti_list(
+                    data_list, water_list, pipeline='data', aug_spec_list=data_aug_list, **kwargs)
             else:
-                # Tensor/array format
-                data_proc, water_proc, data_augs = self.process_tensor(
-                    data=data_list,
-                    water=water_list,
-                    pipeline='data',
-                    aug_spec_list=data_aug_list,
-                    **kwargs
-                )
-                results['data'] = data_proc
-                results['water'] = water_proc
-                results['data_augmentations'] = data_augs
-        
+                data_proc, water_proc = self.process_tensor(
+                    data_list, water_list, pipeline='data', aug_spec_list=data_aug_list, **kwargs)
+            results['data'] = data_proc
+            results['water'] = water_proc
+            results['data_augmentations'] = self.aug_specs_
+
         # Process CSM pipeline
         if csm_list is not None:
-            if isinstance(csm_list, list) and len(csm_list) > 0 and isinstance(csm_list[0], NIfTI_MRS_Plus):
-                # NIFTI format
-                csm_proc, _, csm_augs = self.process_nifti_list(
-                    data_list=csm_list,
-                    water_list=None,
-                    pipeline='csm',
-                    aug_spec_list=csm_aug_list,
-                    **kwargs
-                )
-                results['csm'] = csm_proc
-                results['csm_augmentations'] = csm_augs
+            if _is_nifti_list(csm_list):
+                csm_proc, _ = self.process_nifti_list(
+                    csm_list, None, pipeline='csm', aug_spec_list=csm_aug_list, **kwargs)
             else:
-                # Tensor/array format
-                csm_proc, _, csm_augs = self.process_tensor(
-                    data=csm_list,
-                    water=None,
-                    pipeline='csm',
-                    aug_spec_list=csm_aug_list,
-                    **kwargs
-                )
-                results['csm'] = csm_proc
-                results['csm_augmentations'] = csm_augs
-        
+                csm_proc, _ = self.process_tensor(
+                    csm_list, None, pipeline='csm', aug_spec_list=csm_aug_list, **kwargs)
+            results['csm'] = csm_proc
+            results['csm_augmentations'] = self.aug_specs_
+
         return results
-
-    # ----------------------
-    # NIFTI processing
-    # ----------------------
-    def process_nifti_list(self,
-                          data_list: List[NIfTI_MRS_Plus],
-                          water_list: Optional[List[NIfTI_MRS_Plus]] = None,
-                          pipeline: str = 'data',
-                          aug_spec_list: Optional[List[Dict[str, Any]]] = None,
-                          **kwargs) -> Tuple[List[NIfTI_MRS_Plus], Optional[List[NIfTI_MRS_Plus]], List[Dict[str, Any]]]:
-        """
-        Process list of NIFTI_MRS objects with spatial augmentations.
-
-        Args:
-            data_list: List of NIFTI_MRS objects
-            water_list: Optional list of water reference NIFTI_MRS objects
-            pipeline: 'data' or 'csm' - determines augmentation ranges
-            aug_spec_list: Optional pre-specified augmentations. If None, will sample new ones.
-            **kwargs: Additional arguments
-
-        Returns:
-            Tuple of (augmented_data_list, water_list_unchanged, augmentation_list)
-        """
-        # Convert NIFTI to tensor
-        data_tensor = self._nifti_to_tensor(data_list)
-        
-        # Apply augmentations
-        data_aug_tensor, aug_list = self.apply(
-            data_tensor, 
-            pipeline=pipeline,
-            aug_spec_list=aug_spec_list,
-            coils_axis=1
-        )
-        
-        # Convert back to NIFTI
-        augmented_data_list = self._tensor_to_nifti(data_aug_tensor, data_list)
-        
-        # Water references unchanged (or process separately if needed)
-        return augmented_data_list, water_list, aug_list
-
-    # ----------------------
-    # Tensor processing
-    # ----------------------
-    def process_tensor(self,
-                      data: Union[torch.Tensor, np.ndarray],
-                      water: Optional[Union[torch.Tensor, np.ndarray]] = None,
-                      pipeline: str = 'data',
-                      aug_spec_list: Optional[List[Dict[str, Any]]] = None,
-                      **kwargs) -> Tuple[Union[torch.Tensor, np.ndarray], 
-                                        Optional[Union[torch.Tensor, np.ndarray]], 
-                                        List[Dict[str, Any]]]:
-        """
-        Process tensor data with spatial augmentations.
-
-        Args:
-            data: Input tensor (batch, channels, ...spatial dims)
-            water: Optional water reference tensor
-            pipeline: 'data' or 'csm' - determines augmentation ranges
-            aug_spec_list: Optional pre-specified augmentations. If None, will sample new ones.
-            **kwargs: Additional arguments
-
-        Returns:
-            Tuple of (augmented_data, water_unchanged, augmentation_list)
-        """
-        # Convert to torch tensor if needed
-        return_numpy = False
-        if isinstance(data, np.ndarray):
-            return_numpy = True
-            data = torch.from_numpy(data)
-        
-        # Ensure proper dtype
-        if torch.is_complex(data):
-            data = data.to(dtype=torch.complex64)
-        else:
-            data = data.to(dtype=torch.float32)
-        
-        # Move to device
-        data = data.to(self.device)
-        
-        # Apply augmentations
-        data_aug, aug_list = self.apply(
-            data,
-            pipeline=pipeline,
-            aug_spec_list=aug_spec_list,
-            coils_axis=1
-        )
-        
-        # Convert back to numpy if needed
-        if return_numpy:
-            if isinstance(data_aug, list):
-                # Handle list of tensors (variable coil counts)
-                data_aug = [d.cpu().numpy() for d in data_aug]
-            else:
-                data_aug = data_aug.cpu().numpy()
-        
-        # Water unchanged
-        return data_aug, water, aug_list
 
 
 # ----------------------
@@ -761,13 +796,13 @@ if __name__ == "__main__":
     print("=" * 80)
     print("Testing SpatialAugmentations with dual pipelines")
     print("=" * 80)
-    
+
     # Test 1: 2D data with data pipeline (restricted rotation)
     print("\n1. Testing 2D data pipeline (restricted rotation):")
     bS = 2
     img2d = torch.randn(bS, 1, 64, 64, dtype=torch.float32, device=device) \
             + 1j * torch.randn(bS, 1, 64, 64, dtype=torch.float32, device=device)
-    
+
     aug = SpatialAugmentations(dim=2, prob=0.6, device=device, min_coils=6, max_coils=12)
     x2d_aug, info2d = aug.apply(img2d, pipeline='data')
     print(f"   Shape: {x2d_aug.shape}")
@@ -779,14 +814,14 @@ if __name__ == "__main__":
     bS = 1
     csm3d = torch.randn(bS, 8, 16, 64, 64, dtype=torch.float32, device=device) \
             + 1j * torch.randn(bS, 8, 16, 64, 64, dtype=torch.float32, device=device)
-    
+
     aug3d = SpatialAugmentations(dim=3, prob=0.7, device=device, min_coils=6, max_coils=8)
     csm3d_aug, info3d = aug3d.apply(csm3d, pipeline='csm')
     print(f"   Result type: {type(csm3d_aug)}")
     print(f"   Z-rotation (unrestricted): {info3d[0]['z_angle_deg']:.2f}°")
     print(f"   Coil subsampling: {info3d[0]['do_coil_sub']}, keep={info3d[0]['coil_keep']}")
     print(f"   Pipeline: {info3d[0]['pipeline']}")
-    
+
     # Test 3: Pre-specified augmentations
     print("\n3. Testing with pre-specified augmentations:")
     aug_specs = aug.sample_augmentations(batch_size=2, pipeline='data')
@@ -795,19 +830,19 @@ if __name__ == "__main__":
     x2d_aug_2, info2d_2 = aug.apply(img2d_2, pipeline='data', aug_spec_list=aug_specs)
     print(f"   Applied pre-specified augmentations")
     print(f"   Augmentations match: {aug_specs[0] == info2d_2[0]}")
-    
+
     # Test 4: process_tensor
     print("\n4. Testing process_tensor:")
     data_np = np.random.randn(2, 1, 32, 32, 32).astype(np.float32)
-    data_proc, _, augs = aug3d.process_tensor(data_np, pipeline='data')
+    data_proc, _ = aug3d.process_tensor(data_np, pipeline='data')
     print(f"   Input type: {type(data_np)}, Output type: {type(data_proc)}")
-    print(f"   Returned {len(augs)} augmentation specs")
-    
+    print(f"   Augmentation specs stored: {len(aug3d.aug_specs_)}")
+
     # Test 5: route_pipeline
     print("\n5. Testing route_pipeline with automatic type detection:")
     data_tensor = torch.randn(2, 1, 32, 32, 32, dtype=torch.float32)
     csm_tensor = torch.randn(2, 8, 32, 32, 32, dtype=torch.complex64)
-    
+
     results = aug3d.route_pipeline(
         data_list=data_tensor,
         csm_list=csm_tensor
@@ -818,7 +853,7 @@ if __name__ == "__main__":
     print(f"   CSM augmentations: {len(results['csm_augmentations'])} specs")
     print(f"   Data pipeline: {results['data_augmentations'][0]['pipeline']}")
     print(f"   CSM pipeline: {results['csm_augmentations'][0]['pipeline']}")
-    
+
     print("\n" + "=" * 80)
     print("All tests completed successfully!")
     print("=" * 80)

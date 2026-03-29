@@ -17,6 +17,7 @@ import numpy as np
 from typing import Optional, List
 from augmentrum.core.base_module import BaseModule
 from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
+from augmentrum.utils.tensor_ops import fft, ifft, fftshift, ifftshift, to_numpy, match_backend
 
 
 # ============================================================================
@@ -156,6 +157,62 @@ class ResidualWater(BaseModule):
 
         return processed_data, water_list
 
+    def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
+        """
+        Add residual water peaks to tensor/array data (**any backend**).
+
+        FFT/IFFT are done **natively** via ``tensor_ops``.  Water peak shapes
+        and amplitude scaling are computed in NumPy per-FID, then promoted
+        to the target backend via ``match_backend``.
+
+        Args:
+            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            water_array: Optional water reference (unchanged)
+            backend: Backend enum (unused)
+            **kwargs: Must contain ``'sw_hz'`` and ``'sf_mhz'``
+
+        Returns:
+            Tuple of (processed_data, water_array)
+        """
+        sw_hz = kwargs.get('sw_hz')
+        sf_mhz = kwargs.get('sf_mhz')
+        if sw_hz is None or sf_mhz is None:
+            raise ValueError("ResidualWater.process_tensor requires 'sw_hz' and 'sf_mhz' in kwargs")
+
+        N = data_array.shape[-1]
+        n_batch = int(np.prod(data_array.shape[:-1]))
+        ref_ppm = 4.7
+
+        # 1. Spectrum (backend-native FFT)
+        spec = fftshift(ifft(data_array))
+
+        # 2. ppm axis (numpy)
+        dt = 1.0 / float(sw_hz)
+        freq_hz = np.fft.fftshift(np.fft.fftfreq(N, d=dt))
+        ppm = ref_ppm - freq_hz / float(sf_mhz)
+
+        # 3. Compute additive water contribution per FID (numpy)
+        spec_np = to_numpy(spec).reshape(n_batch, N)
+        water_add_np = np.zeros((n_batch, N), dtype=np.complex128)
+
+        for i in range(n_batch):
+            spec_with = add_residual_water(
+                spec_np[i], ppm,
+                center_ppm=self.center_ppm,
+                peaks=self.peaks,
+                phase_deg=self.phase_deg,
+                amplitude_scale=self.amplitude_scale,
+            )
+            water_add_np[i] = spec_with - spec_np[i]
+
+        water_add_np = water_add_np.reshape(data_array.shape)
+
+        # 4. Add water in spectral domain (backend-native)
+        spec_aug = spec + match_backend(water_add_np, spec)
+
+        # 5. Back to FID (backend-native IFFT)
+        return fft(ifftshift(spec_aug)), water_array
+
     def _add_water_to_fid(self, fid: np.ndarray, sw_hz: float, sf_mhz: float,
                           ref_ppm: float = 4.7) -> np.ndarray:
         """
@@ -188,7 +245,7 @@ class ResidualWater(BaseModule):
             # 2) Create ppm axis
             dt = 1.0 / float(sw_hz)
             freq_hz = np.fft.fftshift(np.fft.fftfreq(N, d=dt))
-            ppm = ref_ppm - freq_hz / (sf_mhz * 1e6)
+            ppm = ref_ppm - freq_hz / sf_mhz
 
             # 3) Add water peaks in frequency domain
             spec_with_water = add_residual_water(

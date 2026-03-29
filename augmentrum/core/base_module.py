@@ -85,10 +85,17 @@ class BaseModule(ABC):
                 return self._process_via_tensor(data, water, backend, **kwargs)
             elif has_forward:
                 return self._process_via_forward(data, water, **kwargs)
+            elif has_process_nifti_list:
+                # Fallback: use NIfTI list processing even for tensor backends
+                return self._process_via_nifti_list(data, water, **kwargs)
 
         # Fallback to forward if nothing else works
         if has_forward:
             return self._process_via_forward(data, water, **kwargs)
+
+        # Last resort: try nifti list
+        if has_process_nifti_list:
+            return self._process_via_nifti_list(data, water, **kwargs)
 
         raise NotImplementedError(
             f"{self.__class__.__name__} must implement at least one of: "
@@ -136,25 +143,129 @@ class BaseModule(ABC):
 
     def _process_via_tensor(self, data: NIfTI_MRS_Plus, water: Optional[NIfTI_MRS_Plus],
                            backend: Backend, **kwargs) -> Tuple[NIfTI_MRS_Plus, Optional[NIfTI_MRS_Plus]]:
-        """Process using tensor method."""
-        # Get data in backend format
+        """Process using tensor method.
+
+        Following the zea pattern, data is passed to ``process_tensor()`` in its
+        **native backend format** (NumPy / PyTorch / JAX / TensorFlow) so that
+        gradients and device placement are preserved.  The write-back into
+        NIFTI_MRS storage always goes through NumPy (unavoidable since NIfTI is
+        a NumPy-backed format).
+
+        Performance tiers
+        -----------------
+        1. **Fast** — same N_PTS in and out (all augmentations except truncate/zerofill):
+           one vectorised tensor op, then ``nifti[:] = sample`` in-place.  Zero extra
+           allocations.
+
+        2. **Medium** — N_PTS changes (e.g. truncation, zero-fill): tensor slice/pad is
+           still vectorised, but write-back must rebuild each NIfTI_MRS object
+           (O(B) constructor calls).  A ``RuntimeWarning`` is emitted.
+
+        3. **Slow (~ routing)** — module only implements ``process_nifti_list``:
+           falls back to the NIfTI-list path, processes each subject individually.
+           This is what sampling modules (CoilAverageSampler, NIfTI_RawProcessor)
+           always use because they change DIM_COIL / DIM_DYN, not just values.
+
+        Rule of thumb: keep **N_PTS and all extra dimensions uniform** across the
+        whole batch for tier-1 speed everywhere.
+        """
+        from augmentrum.utils.tensor_ops import to_numpy
+
+        # Inject spectral metadata so modules can use sw_hz / sf_mhz without
+        # requiring FSL-MRS objects.
+        # Primary source: metadata_common (populated when volatile=False).
+        # Fallback: read directly from nifti_list[0] (works even in volatile mode).
+        if 'sw_hz' not in kwargs:
+            dwell = data.metadata_common.get('dwelltime')
+            if dwell is None and data.n_subjects > 0:
+                try:
+                    dwell = data.nifti_list[0].dwelltime
+                except Exception:
+                    pass
+            if dwell is not None:
+                kwargs['sw_hz'] = 1.0 / dwell
+
+        if 'sf_mhz' not in kwargs:
+            sf = data.metadata_common.get('spectrometer_frequency')
+            if sf is None and data.n_subjects > 0:
+                try:
+                    sf = data.nifti_list[0].spectrometer_frequency
+                except Exception:
+                    pass
+            if sf is not None:
+                kwargs['sf_mhz'] = sf[0] if hasattr(sf, '__getitem__') else sf
+
+        # ── Get data in native backend format (not forced to numpy!) ──
         data_array = data.get_data(backend)
         water_array = water.get_data(backend) if water is not None else None
 
-        # Process
+        # ── Process (receives native tensors — preserves gradients) ──
         processed_data, processed_water = self.process_tensor(
             data_array, water_array, backend=backend, **kwargs
         )
 
+        # ── Write back into NIfTI_MRS list (must go through numpy) ──
+        nifti_list_out = data.list()
+        if processed_data is not None:
+            processed_np = to_numpy(processed_data)
+            # Detect N_PTS change (e.g. truncation, zero-fill)
+            in_npts = data_array.shape[-1] if hasattr(data_array, 'shape') else None
+            out_npts = processed_np.shape[-1] if processed_np is not None else None
+            if in_npts is not None and out_npts is not None and out_npts != in_npts:
+                import warnings
+                warnings.warn(
+                    f"{self.__class__.__name__}: N_PTS changed {in_npts} → {out_npts} "
+                    f"(same for all {processed_np.shape[0]} batch members — module params "
+                    f"are uniform by design). "
+                    f"NIfTI objects will be rebuilt with the new length. "
+                    f"This is correct but ~slower than the normal in-place write-back path. "
+                    f"For maximum throughput, keep N_PTS the same throughout the pipeline "
+                    f"(e.g. prefer Apodization[exponential] over Apodization[truncate] "
+                    f"when batching on a tensor backend).",
+                    stacklevel=3,
+                )
+            for i, nifti in enumerate(nifti_list_out):
+                if i < processed_np.shape[0]:
+                    sample_np = processed_np[i]
+                    if sample_np.shape == nifti[:].shape:
+                        nifti[:] = sample_np
+                    else:
+                        # N_PTS changed — rebuild this NIfTI_MRS object from scratch
+                        from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+                        try:
+                            affine = nifti.getAffine('voxel', 'world')
+                        except Exception:
+                            affine = None
+                        nucleus = (nifti.nucleus[0]
+                                   if hasattr(nifti, 'nucleus') and nifti.nucleus else '1H')
+                        dim_tags = (list(nifti.dim_tags)
+                                    if hasattr(nifti, 'dim_tags') else [None, None, None])
+                        new_nifti = gen_nifti_mrs(
+                            data=sample_np,
+                            dwelltime=nifti.dwelltime,
+                            spec_freq=nifti.spectrometer_frequency[0],
+                            nucleus=nucleus,
+                            dim_tags=dim_tags,
+                            affine=affine,
+                        )
+                        # Copy extra header fields
+                        if hasattr(nifti, 'hdr_ext'):
+                            for key in nifti.hdr_ext:
+                                if key not in ('SpectrometerFrequency', 'ResonantNucleus',
+                                               'dim_5', 'dim_6', 'dim_7'):
+                                    try:
+                                        new_nifti.add_hdr_field(key, nifti.hdr_ext[key])
+                                    except Exception:
+                                        pass
+                        nifti_list_out[i] = new_nifti
+
         # Log provenance
         operation_name = self.__class__.__name__
         operation_details = {'method': 'process_tensor', 'backend': backend.value,
-                           'params': self.params, **kwargs}
+                           'params': self.params}
 
-        # For tensor processing, we need to reconstruct NIfTI_MRS_Plus
-        # For now, keep same nifti_list but note processing was done
         data_out = NIfTI_MRS_Plus(
-            nifti_list=data.list(),  # Keep original list structure
+            nifti_list=nifti_list_out,
             backend=backend,
             volatile=data.volatile
         )
@@ -164,8 +275,44 @@ class BaseModule(ABC):
 
         water_out = None
         if water is not None:
+            water_list_out = water.list()
+            if processed_water is not None:
+                processed_water_np = to_numpy(processed_water)
+                for i, nifti in enumerate(water_list_out):
+                    if i < processed_water_np.shape[0]:
+                        sample_np = processed_water_np[i]
+                        if sample_np.shape == nifti[:].shape:
+                            nifti[:] = sample_np
+                        else:
+                            from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+                            try:
+                                affine = nifti.getAffine('voxel', 'world')
+                            except Exception:
+                                affine = None
+                            nucleus = (nifti.nucleus[0]
+                                       if hasattr(nifti, 'nucleus') and nifti.nucleus else '1H')
+                            dim_tags = (list(nifti.dim_tags)
+                                        if hasattr(nifti, 'dim_tags') else [None, None, None])
+                            new_nifti = gen_nifti_mrs(
+                                data=sample_np,
+                                dwelltime=nifti.dwelltime,
+                                spec_freq=nifti.spectrometer_frequency[0],
+                                nucleus=nucleus,
+                                dim_tags=dim_tags,
+                                affine=affine,
+                            )
+                            if hasattr(nifti, 'hdr_ext'):
+                                for key in nifti.hdr_ext:
+                                    if key not in ('SpectrometerFrequency', 'ResonantNucleus',
+                                                   'dim_5', 'dim_6', 'dim_7'):
+                                        try:
+                                            new_nifti.add_hdr_field(key, nifti.hdr_ext[key])
+                                        except Exception:
+                                            pass
+                            water_list_out[i] = new_nifti
+
             water_out = NIfTI_MRS_Plus(
-                nifti_list=water.list(),
+                nifti_list=water_list_out,
                 backend=backend,
                 volatile=water.volatile
             )

@@ -1,5 +1,5 @@
 ####################################################################################################
-#                                        base_dataset.py                                           #
+#                                       dataset_utils.py                                           #
 ####################################################################################################
 #                                                                                                  #
 # Authors: J. P. Merkofer (j.p.merkofer@tue.nl)                                                    #
@@ -7,7 +7,6 @@
 # Created: 2026-02-07                                                                              #
 #                                                                                                  #
 # Purpose: Backend-agnostic dataset utilities for Augmentrum.                                      #
-#          All main functionality moved to Augmentrum class.                                       #
 #                                                                                                  #
 ####################################################################################################
 
@@ -15,6 +14,7 @@
 #*************#
 #   imports   #
 #*************#
+import random
 import numpy as np
 from typing import List, Optional, Tuple, Dict, Callable, Union
 
@@ -87,50 +87,57 @@ def _get_limits(n: Tuple, n_max: int) -> Tuple[int, int]:
 #                                    Backend-Agnostic Generators                                   #
 #**************************************************************************************************#
 
+def _make_batch(data, water, indices, copy=False):
+    """
+    Build a (batch_data, batch_water) NIfTI_MRS_Plus pair from subject indices.
+
+    Args:
+        data:    NIfTI_MRS_Plus pool of subjects.
+        water:   Optional NIfTI_MRS_Plus pool of water references.
+        indices: List of integer subject indices for this batch.
+        copy:    If True, copy each NIfTI-MRS object (use for fixed mode
+                 where the same objects are yielded multiple times).
+
+    Returns:
+        (batch_data, batch_water) as NIfTI_MRS_Plus objects.
+    """
+    from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus
+
+    get = (lambda idx: data[idx].copy()) if copy else (lambda idx: data[idx])
+    batch_data = NIfTI_MRS_Plus(
+        [get(i) for i in indices], backend=data.backend, volatile=data.volatile,
+    )
+
+    batch_water = None
+    if water is not None:
+        get_w = (lambda idx: water[idx].copy()) if copy else (lambda idx: water[idx])
+        batch_water = NIfTI_MRS_Plus(
+            [get_w(i) for i in indices], backend=water.backend, volatile=water.volatile,
+        )
+
+    return batch_data, batch_water
+
+
 def create_random_generator(data: NIfTI_MRS_Plus,
                             water: Optional[NIfTI_MRS_Plus],
                             pipeline,
                             batch_size: int):
     """
-s    Create infinite random sampling generator with batch-level processing.
+    Infinite random-sampling generator (on-the-fly mode).
 
-    For on-the-fly mode: Samples batch_size parameter values and passes
-    entire batch through pipeline for efficient processing.
-
-    Args:
-        data: NIfTI_MRS_Plus with subjects
-        water: Optional water reference
-        pipeline: Augmentation pipeline to apply
-        batch_size: Batch size
+    Each iteration: pick *batch_size* random subjects, sample fresh
+    augmentation parameters, apply the pipeline, yield the batch.
 
     Yields:
-        (batch_data, batch_water) tuples as NIfTI_MRS_Plus objects
+        (batch_data, batch_water) — NIfTI_MRS_Plus objects.
     """
-    import random
-    from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus
-
     n_subjects = len(data)
 
     while True:
-        # Sample batch_size subjects randomly
-        batch_indices = [random.randint(0, n_subjects - 1) for _ in range(batch_size)]
-
-        # Create batch as NIfTI_MRS_Plus (list of subjects)
-        batch_data_list = [data[idx] for idx in batch_indices]
-        batch_water_list = [water[idx] for idx in batch_indices] if water is not None else None
-
-        # Create NIfTI_MRS_Plus batches (using same backend as input data)
-        batch_data = NIfTI_MRS_Plus(batch_data_list, backend=data.backend, volatile=data.volatile)
-        batch_water = NIfTI_MRS_Plus(batch_water_list, backend=water.backend, volatile=water.volatile) if water is not None else None
-
-        # Sample batch parameters (one value per sample in batch)
-        # Pipeline will handle parameter sampling and application
+        indices = [random.randint(0, n_subjects - 1) for _ in range(batch_size)]
+        batch_data, batch_water = _make_batch(data, water, indices)
         batch_params = pipeline.sample_batch_parameters(batch_size)
-
-        # Apply pipeline to ENTIRE BATCH at once (efficient!)
-        aug_batch_data, aug_batch_water = pipeline(batch_data, batch_water, batch_params=batch_params)
-
-        yield aug_batch_data, aug_batch_water
+        yield pipeline(batch_data, batch_water, batch_params=batch_params)
 
 
 def create_fixed_generator(data: NIfTI_MRS_Plus,
@@ -139,60 +146,25 @@ def create_fixed_generator(data: NIfTI_MRS_Plus,
                            batch_size: int,
                            shuffle: bool = False):
     """
-    Create generator with fixed augmentation parameters and batch-level processing.
-    
-    For FIXED mode: Parameters are sampled ONCE at generator creation and reused.
-    This ensures CONSISTENT augmentations across all epochs (same params every time).
+    Single-pass generator with fixed augmentation parameters.
 
-    Args:
-        data: NIfTI_MRS_Plus with subjects
-        water: Optional water reference
-        pipeline: Augmentation pipeline to apply
-        batch_size: Batch size
-        shuffle: Whether to shuffle subject order
+    Parameters are sampled **once** at creation and reused for every batch,
+    giving consistent results across epochs.
 
     Yields:
-        (batch_data, batch_water) tuples as NIfTI_MRS_Plus objects
+        (batch_data, batch_water) — NIfTI_MRS_Plus objects.
     """
-    import random
-    from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus
-
-    # Sample parameters ONCE for fixed mode
-    # These will be reused for ALL batches (consistency across epochs)
-    fixed_batch_params = pipeline.sample_batch_parameters(batch_size)
+    fixed_params = pipeline.sample_batch_parameters(batch_size)
 
     n_subjects = len(data)
     indices = list(range(n_subjects))
-
     if shuffle:
         random.shuffle(indices)
 
-    # Yield batches of subjects
-    for i in range(0, n_subjects, batch_size):
-        batch_indices = indices[i:i + batch_size]
-        
-        # Create batch as NIfTI_MRS_Plus (list of subjects)
-        # IMPORTANT: Copy the NIfTI-MRS objects to avoid in-place modification!
-        batch_data_list = [data[idx].copy() for idx in batch_indices]
-        batch_water_list = [water[idx].copy() for idx in batch_indices] if water is not None else None
-        
-        # Get actual batch size (might be smaller for last batch)
-        actual_batch_size = len(batch_data_list)
-        
-        # Create NIfTI_MRS_Plus batches
-        batch_data = NIfTI_MRS_Plus(batch_data_list, backend=data.backend, volatile=data.volatile)
-        batch_water = NIfTI_MRS_Plus(batch_water_list, backend=water.backend, volatile=water.volatile) if water is not None else None
-        
-        # Use fixed parameters (slice if last batch is smaller)
-        if actual_batch_size < batch_size:
-            batch_params = {k: v[:actual_batch_size] for k, v in fixed_batch_params.items()}
-        else:
-            batch_params = fixed_batch_params
-        
-        # Apply pipeline to ENTIRE BATCH at once with fixed parameters
-        aug_batch_data, aug_batch_water = pipeline(batch_data, batch_water, batch_params=batch_params)
-        
-        yield aug_batch_data, aug_batch_water
+    for start in range(0, n_subjects, batch_size):
+        batch_idx = indices[start : start + batch_size]
+        batch_data, batch_water = _make_batch(data, water, batch_idx, copy=True)
+        yield pipeline(batch_data, batch_water, batch_params=fixed_params)
 
 
 def create_deterministic_generator(data: NIfTI_MRS_Plus,
@@ -443,4 +415,3 @@ def wrap_generator_for_framework(generator: Callable,
 
     else:
         raise ValueError(f"Unknown framework: {framework}")
-

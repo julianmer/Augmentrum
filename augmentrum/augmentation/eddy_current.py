@@ -17,6 +17,7 @@ from scipy.signal import butter, filtfilt
 from augmentrum.core.base_module import BaseModule
 from augmentrum.core.nifti_mrs_plus import Backend
 from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
+from augmentrum.utils.tensor_ops import to_numpy, match_backend
 
 
 class EddyCurrent(BaseModule):
@@ -62,7 +63,7 @@ class EddyCurrent(BaseModule):
     >>> result_data, result_water = ec(nifti_plus, water_plus)
     """
 
-    SUPPORTED_BACKENDS = []  # Supports all backends
+    SUPPORTED_BACKENDS = []  # Supports all backends via process_tensor
 
     def __init__(self, mode: str = 'synthetic',
                  std_rad: float = 0.6, lp_cut_hz: float = 25.0,
@@ -118,6 +119,53 @@ class EddyCurrent(BaseModule):
             processed_data.append(nifti)
 
         return processed_data, water_list
+
+    def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
+        """
+        Add eddy current distortion to tensor/array data (**any backend**).
+
+        The phase trajectory is generated in NumPy (uses SciPy butter filter),
+        then applied as a complex phasor multiplication which stays in the
+        native backend — ``data * match_backend(phasor, data)``.
+
+        Args:
+            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            water_array: Optional water reference tensor
+            backend: Backend enum (unused)
+            **kwargs: Must contain ``'sw_hz'`` (spectral width in Hz)
+
+        Returns:
+            Tuple of (processed_data, water_array)
+        """
+        sw_hz = kwargs.get('sw_hz')
+        if sw_hz is None:
+            raise ValueError("EddyCurrent.process_tensor requires 'sw_hz' in kwargs")
+
+        if self.mode == 'water' and water_array is None:
+            raise ValueError("Water reference required for 'water' mode eddy current")
+
+        original_shape = data_array.shape
+        N = original_shape[-1]
+        n_batch = int(np.prod(original_shape[:-1]))
+
+        # Build per-FID complex phasors in NumPy (scipy-backed, data-independent for synthetic)
+        phasors_np = np.ones((n_batch, N), dtype=np.complex128)
+
+        if self.mode == 'water':
+            water_np = to_numpy(water_array).reshape(-1, N)
+            for i in range(n_batch):
+                w1d = water_np[min(i, water_np.shape[0] - 1)]
+                phi = self._ec_phase_from_water(w1d, sw_hz)
+                phasors_np[i] = np.exp(1j * self.strength * phi)
+        else:  # synthetic — no data dependency
+            for i in range(n_batch):
+                phi = self._synth_ec_phase(N, sw_hz)
+                phasors_np[i] = np.exp(1j * self.strength * phi)
+
+        phasors_np = phasors_np.reshape(original_shape)
+
+        # Apply phasor: backend-native multiply (preserves gradients for data)
+        return data_array * match_backend(phasors_np, data_array), water_array
 
     def _add_eddy_current(self, fid: np.ndarray, sw_hz: float, water_fid: Optional[np.ndarray] = None) -> np.ndarray:
         """

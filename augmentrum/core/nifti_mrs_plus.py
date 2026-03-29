@@ -114,13 +114,24 @@ class NIfTI_MRS_Plus:
                 error_msg = f"Data must be a list of NIFTI_MRS objects or NIfTI_MRS_Plus, got list of {type(first).__name__}"
                 raise ValueError(error_msg)
 
-            # Validate that all subjects have the same dim_tags
+            # Warn (not error) if subjects have different dim_tags.
+            # NIFTI_LIST backend processes subjects individually so mixed
+            # dim_tags is valid there.  Tensor backends will fail later in
+            # numpy() with a clear "non-uniform shapes" message if stacking
+            # is attempted.
             first_dim_tags = first.dim_tags if hasattr(first, 'dim_tags') else None
             for i, nifti_obj in enumerate(nifti_list[1:], 1):
                 obj_dim_tags = nifti_obj.dim_tags if hasattr(nifti_obj, 'dim_tags') else None
                 if obj_dim_tags != first_dim_tags:
-                    raise ValueError(f"All NIfTI-MRS objects must have the same dim_tags. "
-                                     f"Subject 0 has {first_dim_tags}, but subject {i} has {obj_dim_tags}")
+                    import warnings
+                    warnings.warn(
+                        f"NIfTI_MRS_Plus: subjects have non-uniform dim_tags "
+                        f"(subject 0: {first_dim_tags}, subject {i}: {obj_dim_tags}). "
+                        f"This is fine for Backend.NIFTI_LIST (subjects processed "
+                        f"individually), but will fail if you switch to a tensor backend.",
+                        stacklevel=2,
+                    )
+                    break  # one warning is enough
 
             self.nifti_list = nifti_list
             if not volatile:
@@ -319,6 +330,13 @@ class NIfTI_MRS_Plus:
         """
         Return batched tensor of shape [B, ...] where B = number of subjects.
         Caches the result for efficiency.
+
+        .. note::
+            All subjects **must** have the same shape (same N_PTS and same
+            extra dimensions).  If subjects have non-uniform shapes (e.g. after
+            truncation to different lengths, or different numbers of coils/
+            averages), this will raise a clear ``ValueError``.  Use
+            ``Backend.NIFTI_LIST`` to process subjects individually in that case.
         """
         # Check if we have a cached numpy array
         if self._cached_tensor is not None and self._cache_backend == Backend.NUMPY:
@@ -328,7 +346,30 @@ class NIfTI_MRS_Plus:
         if len(self.nifti_list) == 0:
             arr = np.array([])
         else:
-            arr = np.stack([n[:] for n in self.nifti_list], axis=0)
+            try:
+                arr = np.stack([n[:] for n in self.nifti_list], axis=0)
+            except ValueError:
+                shapes = [n[:].shape for n in self.nifti_list]
+                unique = list(dict.fromkeys(shapes))   # preserve order, drop dupes
+                raise ValueError(
+                    f"NIfTI_MRS_Plus: cannot stack {len(self.nifti_list)} subjects into a "
+                    f"single tensor — subjects have non-uniform shapes: {unique}.\n"
+                    f"\n"
+                    f"  Tensor backends (NumPy / PyTorch / TF / JAX / Keras) require every "
+                    f"batch member to have identical shape.\n"
+                    f"\n"
+                    f"  Common causes:\n"
+                    f"    • Apodization(mode='truncate') called with a different n_pts than the "
+                    f"      batch was built with.\n"
+                    f"    • CoilAverageSampler / NIfTI_RawProcessor sampled a different number "
+                    f"      of coils or averages per subject.\n"
+                    f"\n"
+                    f"  Solutions:\n"
+                    f"    • Keep N_PTS and all extra dimensions uniform across the batch "
+                    f"      (fastest — single vectorised tensor op, in-place write-back).\n"
+                    f"    • Or use Backend.NIFTI_LIST, which processes each subject "
+                    f"      independently and handles any shape (slower, no batching)."
+                ) from None
 
         # Cache it
         self._cached_tensor = arr

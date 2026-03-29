@@ -36,17 +36,13 @@ class CoilAverageSampler(BaseModule):
     """
     Samples coils and averages from raw MRS data.
 
-    Supports all backends by using NIfTI-MRS metadata to identify dimensions,
-    then efficiently sampling from the underlying data (whether NIFTI objects or tensors).
-
-    For non-NIFTI_LIST backends, automatically converts to NIFTI_LIST for dimension
-    inspection, performs sampling, then converts back to original backend.
-
-    This ensures compatibility with all backends while maintaining efficiency.
+    Uses FSL-MRS `split` on NIfTI-MRS objects, so this module operates
+    natively on the NIFTI_LIST backend.  For any other backend the base
+    class automatically routes the call through process_nifti_list and
+    returns the result in the original backend format.
     """
 
-    SUPPORTED_BACKENDS = [Backend.NIFTI_LIST, Backend.NUMPY, Backend.PYTORCH,
-                         Backend.TENSORFLOW, Backend.KERAS, Backend.JAX]
+    SUPPORTED_BACKENDS = [Backend.NIFTI_LIST]
 
     def __init__(self, mode='random', n_coils=(1, None), n_averages=(1, None), reweight=False):
         """
@@ -93,58 +89,6 @@ class CoilAverageSampler(BaseModule):
         else:
             raise TypeError(f"Parameter must be int, float, or tuple, got {type(param)}")
 
-    def __call__(self, data, water=None, **kwargs):
-        """
-        Process data with automatic backend conversion.
-
-        If backend is not NIFTI_LIST, automatically converts to NIFTI_LIST,
-        processes (using NIfTI-MRS metadata for dimension info), then converts back.
-
-        This allows efficient processing while maintaining backend compatibility.
-        """
-        from augmentrum.core import NIfTI_MRS_Plus
-
-        if not isinstance(data, NIfTI_MRS_Plus):
-            # Plain list - wrap it
-            data = NIfTI_MRS_Plus(nifti_list=data, backend=Backend.NIFTI_LIST)
-
-        # Store original backend
-        original_backend = data.backend
-        original_volatile = data.volatile
-
-        # Convert to NIFTI_LIST if needed (for dimension inspection)
-        if original_backend != Backend.NIFTI_LIST:
-            # Convert to NIFTI_LIST for processing
-            data = NIfTI_MRS_Plus(
-                nifti_list=data.to_nifti_list(),
-                backend=Backend.NIFTI_LIST,
-                volatile=original_volatile
-            )
-            if water is not None:
-                water = NIfTI_MRS_Plus(
-                    nifti_list=water.to_nifti_list(),
-                    backend=Backend.NIFTI_LIST,
-                    volatile=original_volatile
-                )
-
-        # Process using parent class method (calls process_nifti_list)
-        result_data, result_water = super().__call__(data, water, **kwargs)
-
-        # Convert back to original backend if needed
-        if original_backend != Backend.NIFTI_LIST:
-            result_data = NIfTI_MRS_Plus(
-                nifti_list=result_data.to_nifti_list(),
-                backend=original_backend,
-                volatile=original_volatile
-            )
-            if result_water is not None:
-                result_water = NIfTI_MRS_Plus(
-                    nifti_list=result_water.to_nifti_list(),
-                    backend=original_backend,
-                    volatile=original_volatile
-                )
-
-        return result_data, result_water
 
     def process_nifti_list(self, data_list, water_list=None, coil_indices=None, average_indices=None, **kwargs):
         """
@@ -212,10 +156,11 @@ class CoilAverageSampler(BaseModule):
         elif self.mode == 'random' and has_coil:
             # Random mode: sample random coils
             coil_dim = data_met.dim_position('DIM_COIL')
-            min_c, max_c = self._get_limits(self.n_coils, data_met.shape[coil_dim] - 1)
+            n_total  = data_met.shape[coil_dim]          # actual coil count
+            min_c, max_c = self._get_limits(self.n_coils, n_total)
             if min_c < max_c:
-                num_coils = torch.randint(min_c, max_c, (1,)).item()
-                coil_indices = torch.randperm(data_met.shape[coil_dim])[:num_coils].tolist()
+                num_coils   = torch.randint(min_c, max_c, (1,)).item()
+                coil_indices = torch.randperm(n_total)[:num_coils].tolist()
         elif self.mode == 'deterministic' and has_coil:
             # Deterministic mode but no indices provided: use all coils
             coil_dim = data_met.dim_position('DIM_COIL')
@@ -257,10 +202,11 @@ class CoilAverageSampler(BaseModule):
         elif self.mode == 'random' and has_dyn:
             # Random mode: sample random averages
             dyn_dim = data_met.dim_position('DIM_DYN')
-            min_a, max_a = self._get_limits(self.n_averages, data_met.shape[dyn_dim] - 1)
+            n_total = data_met.shape[dyn_dim]            # actual average count
+            min_a, max_a = self._get_limits(self.n_averages, n_total)
             if min_a < max_a:
-                num_averages = torch.randint(min_a, max_a, (1,)).item()
-                average_indices = torch.randperm(data_met.shape[dyn_dim])[:num_averages].tolist()
+                num_averages    = torch.randint(min_a, max_a, (1,)).item()
+                average_indices = torch.randperm(n_total)[:num_averages].tolist()
         elif self.mode == 'deterministic' and has_dyn:
             # Deterministic mode but no indices provided: use all averages
             dyn_dim = data_met.dim_position('DIM_DYN')
@@ -300,25 +246,29 @@ class CoilAverageSampler(BaseModule):
         """
         raise NotImplementedError("SNR improvement sampling not implemented yet.")
 
-    def _get_limits(self, n, n_max):
+    def _get_limits(self, n, n_total):
         """
-        Computes valid min/max limits for sampling.
+        Return ``(min_n, max_exclusive)`` for ``torch.randint(min_n, max_exclusive)``.
 
         Args:
-            n (tuple): (min, max) tuple where each can be None.
-            n_max (int): Maximum allowable value.
+            n (tuple): ``(min, max)`` — both *inclusive*, either can be ``None``.
+                       ``None`` on min → 1.  ``None`` on max → ``n_total`` (use all).
+            n_total (int): Total number of items available (coils / averages).
+
+        Examples::
+
+            _get_limits((1, None), 4)  →  (1, 5)   # randint → 1, 2, 3 or 4  ✓
+            _get_limits((2, 3),    4)  →  (2, 4)   # randint → 2 or 3         ✓
+            _get_limits((4, 4),    4)  →  (4, 5)   # randint → always 4       ✓
+            _get_limits((6, None), 4)  →  (4, 5)   # clamps to available      ✓
         """
-        # Handle None (use all available)
         if n is None:
-            return n_max, n_max
-        
-        # Handle tuple
-        if n[0] is None:
-            min_n = n_max
-        else:
-            min_n = max(0, min(n[0], n_max))
-        if n[1] is None:
-            max_n = n_max
-        else:
-            max_n = min(n[1], n_max)
-        return min_n, max_n
+            return 1, n_total + 1
+
+        min_val, max_val = n
+
+        min_n = 1 if min_val is None else max(1, min(int(min_val), n_total))
+        max_n = n_total if max_val is None else min(int(max_val), n_total)
+
+        # +1 because torch.randint upper bound is exclusive
+        return min_n, max_n + 1

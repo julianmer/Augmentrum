@@ -117,9 +117,15 @@ class COWSDataModule():
         self.data_dir = data_dir
 
         if location is None:
-            self.location = ['OCCIPITAL', 'PARIETAL', 'PFL']
+            self.location = ['OCCIPITAL', 'PARIETAL', 'PFL', 'PFC']
         elif isinstance(location, str):
-            self.location = [location]
+            # Accept PFL or PFC as aliases for the prefrontal region
+            if location.upper() in ('PFL', 'PFC'):
+                self.location = ['PFL', 'PFC']
+            else:
+                self.location = [location]
+        else:
+            self.location = location
 
         if water_sup is None:
             self.water_sup = ['VAPOR', 'COWS7', 'COWS12']
@@ -128,6 +134,7 @@ class COWSDataModule():
 
     def load_twix(self):
         data, refs, MM_data, MM_refs, names = [], [], [], [], []
+        self.load_failures = []  # (filename, error_msg)
 
         subjects = sorted(os.listdir(self.data_dir))
         for sub in subjects:
@@ -149,8 +156,9 @@ class COWSDataModule():
                                     elif 'mm' in file.lower():
                                         MM_data.append(dat)
                                         MM_refs.append(water)
-                                    names.append(f"{sub}_{location}_{ws}")
+                                    names.append(f"{sub}_{location.replace('PFC', 'PFL')}_{ws}")
                                 except Exception as e:
+                                    self.load_failures.append((file, str(e)))
                                     print(f"Error loading {file}: {e}")
 
         return data, refs, MM_data, MM_refs, names
@@ -184,6 +192,7 @@ class COWSDataModule():
 
     def load_mats(self):
         data, refs, MM_data, MM_refs, names = [], [], [], [], []
+        self.load_failures = []  # (filename, error_msg)
 
         subjects = sorted(os.listdir(self.data_dir))
         for sub in subjects:
@@ -199,21 +208,25 @@ class COWSDataModule():
                         if file.endswith('.mat'):
                             for ws in self.water_sup:
                                 if ws in file:
-                                    names.append(f"{sub}_{loc}_{ws}")
-                                    if 'Water' in file:
-                                        if 'Metab' in file:
-                                            ref = scipy.io.loadmat(os.path.join(loc_path, file))
-                                            refs.append(ref['exptDat'][0])
-                                        elif 'MM' in file:
-                                            ref = scipy.io.loadmat(os.path.join(loc_path, file))
-                                            MM_refs.append(ref['exptDat'][0])
-                                    else:
-                                        if 'Metab' in file:
-                                            dat = scipy.io.loadmat(os.path.join(loc_path, file))
-                                            data.append(dat['exptDat'][0])
-                                        elif 'MM' in file:
-                                            dat = scipy.io.loadmat(os.path.join(loc_path, file))
-                                            MM_data.append(dat['exptDat'][0])
+                                    try:
+                                        names.append(f"{sub}_{loc}_{ws}")
+                                        if 'Water' in file:
+                                            if 'Metab' in file:
+                                                ref = scipy.io.loadmat(os.path.join(loc_path, file))
+                                                refs.append(ref['exptDat'][0])
+                                            elif 'MM' in file:
+                                                ref = scipy.io.loadmat(os.path.join(loc_path, file))
+                                                MM_refs.append(ref['exptDat'][0])
+                                        else:
+                                            if 'Metab' in file:
+                                                dat = scipy.io.loadmat(os.path.join(loc_path, file))
+                                                data.append(dat['exptDat'][0])
+                                            elif 'MM' in file:
+                                                dat = scipy.io.loadmat(os.path.join(loc_path, file))
+                                                MM_data.append(dat['exptDat'][0])
+                                    except Exception as e:
+                                        self.load_failures.append((file, str(e)))
+                                        print(f"Error loading {file}: {e}")
 
         return data, refs, MM_data, MM_refs, names
 

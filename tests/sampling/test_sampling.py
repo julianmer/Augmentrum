@@ -515,16 +515,23 @@ class TestCoilAverageSamplerBackends:
     """Test CoilAverageSampler with different backends."""
 
     def test_supports_all_backends(self):
-        """Test that CoilAverageSampler supports all backends via conversion."""
+        """Test that CoilAverageSampler can process data on all backends.
+
+        SUPPORTED_BACKENDS = [NIFTI_LIST] means it is natively implemented only
+        for NIFTI_LIST.  Other backends are handled by the base-class auto-routing
+        (~ in the README table), so supports_backend() correctly returns False for
+        them — but the sampler still *works* on them via the fallback path.
+        """
         sampler = CoilAverageSampler()
 
-        # Should support all backends
+        # Natively declared
         assert sampler.supports_backend(Backend.NIFTI_LIST)
-        assert sampler.supports_backend(Backend.NUMPY)
-        assert sampler.supports_backend(Backend.PYTORCH)
         assert Backend.NIFTI_LIST in sampler.SUPPORTED_BACKENDS
-        assert Backend.NUMPY in sampler.SUPPORTED_BACKENDS
-        assert Backend.PYTORCH in sampler.SUPPORTED_BACKENDS
+
+        # Non-native backends are NOT in SUPPORTED_BACKENDS by design:
+        # the base class auto-routes them through process_nifti_list (~).
+        assert Backend.NUMPY   not in sampler.SUPPORTED_BACKENDS
+        assert Backend.PYTORCH not in sampler.SUPPORTED_BACKENDS
 
     def test_process_with_nifti_list_backend(self, dummy_nifti_list):
         """Test processing with NIFTI_LIST backend (native)."""
