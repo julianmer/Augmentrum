@@ -5,7 +5,7 @@ A modular Python framework designed to help researchers with limited in-vivo MRS
 create diverse, physically consistent datasets through flexible augmentation.
 """
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 __author__ = "John T. LaMaster, Julian P. Merkofer, Kay C. Igwe"
 __email__ = "j.p.merkofer@tue.nl"
 

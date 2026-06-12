@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "augmentrum"
-version = "0.0.1"
+version = "0.0.2"
 description = "A Data Augmentation Package for MR Spectroscopy"
 readme = "README.md"
 authors = [
