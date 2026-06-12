@@ -41,6 +41,7 @@ from augmentrum.augmentation.eddy_current import EddyCurrent
 from augmentrum.augmentation.apodization import Apodization
 from augmentrum.augmentation.phase_frequency import PhaseShift, FrequencyShift
 from augmentrum.augmentation.spatial_augmentations import SpatialAugmentations
+from augmentrum.augmentation.zero_fill import ZeroFill
 
 
 __all__ = ['Augmentrum']
@@ -176,8 +177,12 @@ class Augmentrum:
         'peaks': ArtificialPeaks,
         'eddy_current': EddyCurrent,
         'eddy': EddyCurrent,
+
+        # Modification
         'apodization': Apodization,
         'apod': Apodization,
+        'zero_filling': ZeroFill,
+        'zero_fill': ZeroFill,
 
         # Spatial
         'spatial': SpatialAugmentations,
@@ -500,32 +505,46 @@ class Augmentrum:
 
     def _build_pipeline_from_list(self, module_names: List[str]) -> AugmentationPipeline:
         """Build pipeline from list of module name strings."""
-        # Create modules with minimal default params
-        # Pipeline will override these with user_kwargs during sampling
+        import inspect
+
         modules = []
-        
+
         # Default parameters for modules that require them at init
         # TODO: Maybe solve at module level instead
         DEFAULT_PARAMS = {
-            'noise': {'sigma_frac': 0.02},
+            'noise':          {'sigma_frac': 0.02},
             'gaussian_noise': {'sigma_frac': 0.02},
         }
-        
+
         for name in module_names:
             if name not in self.AVAILABLE_MODULES:
                 raise ValueError(f"Unknown module '{name}'. Available: {list(self.AVAILABLE_MODULES.keys())}")
-            
-            module_class = self.AVAILABLE_MODULES[name]
-            
-            # Get default params for this module type (if any)
-            default_params = DEFAULT_PARAMS.get(name, {})
-            
-            # Create module with defaults - Pipeline will handle user params
-            modules.append(module_class(**default_params))
 
-        # Pass ALL user kwargs to Pipeline - it handles parameter extraction and sampling
+            module_class = self.AVAILABLE_MODULES[name]
+
+            # --- Introspect constructor to find which user kwargs apply ---
+            try:
+                sig = inspect.signature(module_class.__init__)
+                init_param_names = [
+                    p.name for p in sig.parameters.values()
+                    if p.name not in ('self', 'args', 'kwargs')
+                ]
+            except Exception:
+                init_param_names = []
+
+            # Only inject scalar values (bool, int, float, str) from user_kwargs.
+            # Range tuples (e.g. lb_hz=(0, 10)) are meant for runtime sampling only.
+            scalar_kwargs = {
+                k: v for k, v in self.kwargs.items()
+                if k in init_param_names and isinstance(v, (bool, int, float, str))
+            }
+
+            construct_params = {**DEFAULT_PARAMS.get(name, {}), **scalar_kwargs}
+            modules.append(module_class(**construct_params))
+
+        # Pass ALL user kwargs to Pipeline — it handles parameter extraction/sampling
         return AugmentationPipeline(
-            modules, 
+            modules,
             module_names=module_names,
             user_kwargs=self.kwargs
         )
@@ -614,6 +633,41 @@ class Augmentrum:
     def test_dataloader(self, framework: str = None, **kwargs):
         """Get test dataloader."""
         return self._get_dataloader('test', framework, kwargs.get('shuffle', False))
+
+    def as_torch_dataloader(self, split: str = 'train', **dataloader_kwargs):
+        """
+        Return a PyTorch DataLoader for the given split, ready for use with
+        PyTorch Lightning's Trainer — no external wrapper class required.
+
+        Each item yielded is a complex tensor (B, ..., N_time) directly
+        consumable by FrameworkNN.  Batch size is controlled by the
+        Augmentrum batch_size parameter set at construction.
+
+        Args:
+            split: 'train', 'val', or 'test'
+            **dataloader_kwargs: Extra args forwarded to DataLoader
+                                 (e.g. num_workers, pin_memory).
+
+        Returns:
+            torch.utils.data.DataLoader
+        """
+        import torch
+        from torch.utils.data import DataLoader, IterableDataset
+
+        _aug   = self
+        _split = split
+
+        class _AugIterableDataset(IterableDataset):
+            def __iter__(self_inner):
+                gen = _aug._get_dataloader(_split, framework='pytorch')
+                for batch_data, _ in gen:
+                    if batch_data is None:
+                        continue
+                    if not batch_data.is_complex():
+                        batch_data = batch_data.to(torch.cfloat)
+                    yield batch_data
+
+        return DataLoader(_AugIterableDataset(), batch_size=None, **dataloader_kwargs)
 
     def visualize_pipeline(self, split: str = 'train', detailed: bool = True) -> str:
         """

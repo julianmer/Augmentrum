@@ -69,10 +69,21 @@ Repository = "https://github.com/julianmer/Augmentrum"
 "Bug Tracker" = "https://github.com/julianmer/Augmentrum/issues"
 
 [tool.setuptools]
-packages = ["augmentrum", "augmentrum.core", "augmentrum.augmentation", "augmentrum.dataset", "augmentrum.processing", "augmentrum.sampling", "augmentrum.utils"]
+packages = [
+    "augmentrum",
+    "augmentrum.core",
+    "augmentrum.augmentation",
+    "augmentrum.dataset",
+    "augmentrum.processing",
+    "augmentrum.sampling",
+    "augmentrum.utils",
+    "augmentrum.resources",
+    "augmentrum.resources.scans",
+]
 
 [tool.setuptools.package-data]
 augmentrum = ["py.typed"]
+"augmentrum.resources.scans" = ["*"]
 
 [tool.black]
 line-length = 100

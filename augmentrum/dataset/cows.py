@@ -162,10 +162,9 @@ class COWSDataModule():
                                     print(f"Error loading {file}: {e}")
 
         return data, refs, MM_data, MM_refs, names
-
-    def load_twix_data(self, file_path):
+    def load_twix_data(self, file_path, remove_oversampling=True):
         from fsl_mrs.core.nifti_mrs import split
-        from mapvbvd import mapVBVD
+        from spec2nii.Siemens.twixfunctions import process_twix
         from spec2nii.Siemens.twixfunctions import process_twix, examineTwix
         from augmentrum.processing.utils import safe_squeeze
 
@@ -187,8 +186,59 @@ class COWSDataModule():
         water.set_dim_tag(6, None)
         data.set_dim_tag(6, None)
         water, _ = split(water, 'DIM_DYN', 0)
+
+        # ── Remove Siemens 2x oversampling ────────────────────────────────────
+        # Raw TWIX: 4096 pts / 8000 Hz (dt=125 us).
+        # True acquisition: 2048 pts / 4000 Hz (dt=250 us).
+        # Decimate by 2 along spectral axis (axis 0 of squeezed data).
+        if remove_oversampling:
+            water = self._remove_oversampling(water)
+            data  = self._remove_oversampling(data)
+
         water, data = safe_squeeze(water), safe_squeeze(data)
         return water, data
+    @staticmethod
+    def _remove_oversampling(nifti_obj, factor=2):
+        """Remove Siemens oversampling by decimating spectral points by `factor`.
+
+        Takes every `factor`-th point along the spectral (4th NIfTI) dimension,
+        and rebuilds the NIFTI_MRS object with the correct dwell time.
+
+        Args:
+            nifti_obj: NIFTI_MRS object
+            factor: Oversampling factor to remove (default 2)
+
+        Returns:
+            New NIFTI_MRS object with oversampling removed.
+        """
+        from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+
+        arr = np.asarray(nifti_obj[:])              # (1,1,1, npts, ...)
+        old_dt = float(nifti_obj.dwelltime)
+        hdr = nifti_obj.hdr_ext
+
+        # Decimate along the spectral axis (axis 3 in the 7-D NIfTI array)
+        arr_dec = arr[:, :, :, ::factor, ...]
+
+        new_dt = old_dt * factor
+        cf = getattr(hdr, 'SpectrometerFrequency', [123.259])[0]
+
+        # Rebuild dim tags from original
+        dim_tags = [None, None, None]
+        for i, dim_idx in enumerate([5, 6, 7]):
+            tag = getattr(hdr, f'dim_{dim_idx}', None)
+            if tag is not None and tag != 'N/A':
+                dim_tags[i] = tag
+
+        new_obj = gen_nifti_mrs(
+            data=arr_dec,
+            dwelltime=new_dt,
+            spec_freq=cf,
+            nucleus='1H',
+            dim_tags=dim_tags,
+            no_conj=True,
+        )
+        return new_obj
 
     def load_mats(self):
         data, refs, MM_data, MM_refs, names = [], [], [], [], []

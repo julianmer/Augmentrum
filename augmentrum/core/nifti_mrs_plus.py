@@ -331,7 +331,7 @@ class NIfTI_MRS_Plus:
         Return batched tensor of shape [B, ...] where B = number of subjects.
         Caches the result for efficiency.
 
-        .. note::
+        Note:
             All subjects **must** have the same shape (same N_PTS and same
             extra dimensions).  If subjects have non-uniform shapes (e.g. after
             truncation to different lengths, or different numbers of coils/

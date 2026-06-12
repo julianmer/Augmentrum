@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/logo.png" alt="Augmentrum Logo" width="100" style="margin-bottom: -10px;"/>
+  <img src="assets/figures/logo.png" alt="Augmentrum Logo" width="100" style="margin-bottom: -10px;"/>
   <h1 style="margin-top: 5px; margin-bottom: 5px;">Augmentrum</h1>
   <p style="margin-top: 0px;"><em>A Data Augmentation Package for MR Spectroscopy</em></p>
   
@@ -15,7 +15,7 @@
 **Augmentrum** is a modular Python framework designed to help researchers with limited *in-vivo* MRS data create diverse, physically consistent datasets through flexible augmentation. It supports **k-space resampling**, **coil and average sampling**, **signal-level perturbations**, and **synthetic artifact generation**, expanding both synthetic and *in-vivo* data in a realistic and controlled manner.
 
 <div align="center">
-  <img src="assets/overview.png" alt="Augmentrum Pipeline Overview" width="800"/>
+  <img src="assets/figures/overview.png" alt="Augmentrum Pipeline Overview" width="800"/>
 </div>
 
 Built for data-driven MRS applications, Augmentrum streamlines the integration of data augmentation into existing workflows. It operates on the **NIfTI-MRS** standard, making it compatible with any acquisition format. Simply load your data as NIfTI (using `spec2nii` if needed) and apply either predefined augmentation settings or build a custom pipeline by combining modules. Each augmentation can be parameterized or used with default ranges to populate a dense and diverse dataset environment.
@@ -91,7 +91,7 @@ no manual conversion needed.
 | Module | Modes / Methods                                         | NIfTI | NumPy | PyTorch | TensorFlow | JAX | Keras |
 |:---|:--------------------------------------------------------|:-----:|:---:|:---:|:---:|:---:|:---:|
 | `AmplitudeScaling` | uniform, normal                                         |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `Apodization` | exponential, truncate †                                 |   ✓   | ✓† | ✓† | ✓† | ✓† | ✓† |
+| `Apodization` | exponential, truncate                                   |   ✓   | ✓† | ✓† | ✓† | ✓† | ✓† |
 | `ArtificialPeaks` | Lorentzian, Gaussian, Voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `BaselineAugmentation` | random_walk, bspline, polynomial                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `CoilAverageSampler` | random, deterministic                                   |   ✓   | ~ | ~ | ~ | ~ | ~ |

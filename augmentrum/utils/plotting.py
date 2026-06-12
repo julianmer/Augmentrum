@@ -11,10 +11,152 @@
 #                                                                                                  #
 ####################################################################################################
 
+import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import Optional, Union, List, Tuple
 import warnings
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Simple spectrum / fit plots  (MRS paper style)
+#  Ported from scripts/visualizations.py so there is one canonical location.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _crop_ppm(arr, ppmAxis, ppmLim):
+    """Return (arr_cropped, ppmAxis_cropped) within *ppmLim* = (lo, hi)."""
+    beg = int((np.abs(ppmAxis - ppmLim[0])).argmin())
+    end = int((np.abs(ppmAxis - ppmLim[1])).argmin())
+    if beg > end:
+        beg, end = end, beg
+    return arr[beg:end], ppmAxis[beg:end]
+
+
+def _pick_part(arr, real):
+    """Select real or imaginary part of a (possibly already real) array."""
+    return np.real(arr) if real else np.imag(arr)
+
+
+def _style_mrs_ax(ax, clean):
+    """Canonical MRS axis style (inverted ppm, y-hidden); everything hidden when *clean*."""
+    for spine in ('right', 'top', 'left'):
+        ax.spines[spine].set_visible(False)
+    ax.yaxis.set_visible(False)
+    ax.yaxis.set_ticks_position('none')
+    ax.invert_xaxis()
+    if clean:
+        ax.spines['bottom'].set_visible(False)
+        ax.xaxis.set_visible(False)
+        ax.xaxis.set_ticks_position('none')
+
+
+def _save_fig(fig, save_path, name):
+    """Save *fig* to ``save_path/name.png``, close it, and return the path."""
+    if save_path is not None:
+        os.makedirs(save_path, exist_ok=True)
+        out = os.path.join(save_path, f'{name}.png')
+        fig.savefig(out, dpi=300, bbox_inches='tight', transparent=True)
+        plt.close(fig)
+        return out
+    return None
+
+
+def plot_spec_and_fit(spec, fit, true=None, ppmAxis=None, ppmLim=None, name='',
+                      save_path=None, real=True, clean=False):
+    """Plot a measured spectrum, the model fit, and the residual on a ppm axis.
+
+    Visual style: Data (black) / Fit (red, α=0.6) / Residual offset above (dimgrey) /
+    optional True spectrum (green dashed).  ppm-axis inverted, y-axis hidden.
+
+    Parameters
+    ----------
+    spec      : np.ndarray (complex)  measured spectrum (1-D).
+    fit       : np.ndarray (complex)  forward-modelled fit (1-D).
+    true      : np.ndarray (complex), optional  ground-truth spectrum.
+    ppmAxis   : np.ndarray, optional  chemical-shift axis matching *spec*. Defaults to
+                ``linspace(0.5, 4.0, len(spec))``.
+    ppmLim    : tuple(float, float), optional  (lo, hi) ppm window to display.
+    name      : str  filename stem (without extension).
+    save_path : str, optional  directory to save PNG into; created if missing.
+    real      : bool  if True plot real part, else imaginary.
+    clean     : bool  if True hide all axes/labels (publication snippet style).
+    """
+    if ppmAxis is None:
+        ppmAxis = np.linspace(0.5, 4.0, spec.shape[0])
+
+    if ppmLim is not None:
+        orig_ppm = ppmAxis                                    # save BEFORE first crop
+        spec, ppmAxis = _crop_ppm(spec, orig_ppm, ppmLim)
+        fit_ppm = orig_ppm if fit.shape[0] == orig_ppm.shape[0] \
+                  else np.linspace(orig_ppm[0], orig_ppm[-1], fit.shape[0])
+        fit, _ = _crop_ppm(fit, fit_ppm, ppmLim)
+        if true is not None:
+            true_ppm = orig_ppm if true.shape[0] == orig_ppm.shape[0] \
+                       else np.linspace(orig_ppm[0], orig_ppm[-1], true.shape[0])
+            true, _ = _crop_ppm(true, true_ppm, ppmLim)
+
+    spec = _pick_part(spec, real)
+    fit  = _pick_part(fit,  real)
+    residual = spec - fit + 1.1 * spec.max()
+
+    fig, ax = plt.subplots(figsize=(4, 3.5))
+    ax.plot(ppmAxis, spec,     'k',       label='Data',     linewidth=1)
+    ax.plot(ppmAxis, fit,      'r',       label='Fit',      alpha=0.6, linewidth=2)
+    ax.plot(ppmAxis, residual, 'dimgrey', label='Residual', alpha=0.8, linewidth=1)
+    if true is not None:
+        true = _pick_part(true, real)
+        ax.plot(ppmAxis, true, 'g', label='True Spectrum',
+                alpha=0.8, linewidth=1, linestyle='--')
+
+    if not clean:
+        ax.set_xlabel('Chemical Shift [ppm]')
+    ax.legend(frameon=False, fontsize=8, loc='upper left')
+    _style_mrs_ax(ax, clean)
+    return _save_fig(fig, save_path, name)
+
+
+def plot_spec(spec, ppmAxis=None, ppmLim=None, name='', save_path=None,
+              real=True, color='k', title=None, clean=False):
+    """Plot a single complex spectrum on a ppm axis (no fit / residual).
+
+    Same visual style as :func:`plot_spec_and_fit` — useful for sanity-checking
+    the simulated input in isolation.
+
+    Parameters
+    ----------
+    spec      : np.ndarray (complex)  spectrum to display (1-D).
+    ppmAxis   : np.ndarray, optional  chemical-shift axis matching *spec*.
+    ppmLim    : tuple(float, float), optional  (lo, hi) ppm window to display.
+    name      : str  filename stem (without extension).
+    save_path : str, optional  directory to save PNG into; created if missing.
+    real      : bool  if True plot real part, else imaginary.
+    color     : str  matplotlib colour string for the spectrum line.
+    title     : str, optional  axes title (small font, publication-friendly).
+    clean     : bool  if True hide all axes/labels (publication snippet style).
+    """
+    if ppmAxis is None:
+        ppmAxis = np.linspace(0.5, 4.0, spec.shape[0])
+
+    if ppmLim is not None:
+        spec, ppmAxis = _crop_ppm(spec, ppmAxis, ppmLim)
+
+    spec = _pick_part(spec, real)
+
+    fig, ax = plt.subplots(figsize=(4, 3.5))
+    ax.plot(ppmAxis, spec, color, label='Data', linewidth=1)
+    if not clean:
+        ax.set_xlabel('Chemical Shift [ppm]')
+    if title:
+        ax.set_title(title, fontsize=9)
+    ax.legend(frameon=False, fontsize=8, loc='upper left')
+    _style_mrs_ax(ax, clean)
+    return _save_fig(fig, save_path, name)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  NIfTI-MRS batch plotting (existing code below, unchanged)
+# ══════════════════════════════════════════════════════════════════════════════
 
 try:
     from fsl_mrs.utils.plotting import plot_spectrum, plot_spectra

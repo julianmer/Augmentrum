@@ -1,8 +1,10 @@
 include README.md
 include LICENSE
 recursive-include augmentrum *.py
-recursive-include assets *.png *.jpg *.svg
+recursive-include augmentrum/resources/scans *
+recursive-include assets/figures *.png *.jpg *.svg
 recursive-exclude * __pycache__
 recursive-exclude * *.pyc
 recursive-exclude * *.pyo
 recursive-exclude * .DS_Store
+prune data
