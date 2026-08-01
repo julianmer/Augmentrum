@@ -15,6 +15,13 @@ from augmentrum.augmentation.phase_frequency import PhaseShift, FrequencyShift
 from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 
 
+#**************************************************************************************************#
+#                                   Class TestPhaseShiftCreation                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test PhaseShift initialization.                                                                  #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPhaseShiftCreation:
     """Test PhaseShift initialization."""
 
@@ -37,6 +44,13 @@ class TestPhaseShiftCreation:
         assert phase.first_order_deg == 45.0
 
 
+#**************************************************************************************************#
+#                                     Class TestZeroOrderPhase                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test zero-order phase shift.                                                                     #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestZeroOrderPhase:
     """Test zero-order phase shift."""
 
@@ -73,6 +87,13 @@ class TestZeroOrderPhase:
         assert np.allclose(result_data[0][:], original_data)
 
 
+#**************************************************************************************************#
+#                                    Class TestFirstOrderPhase                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test first-order phase shift.                                                                    #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestFirstOrderPhase:
     """Test first-order phase shift."""
 
@@ -120,6 +141,13 @@ class TestFirstOrderPhase:
         assert np.max(diff_first) > 0.01  # Should create some change
 
 
+#**************************************************************************************************#
+#                                 Class TestFrequencyShiftCreation                                 #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test FrequencyShift initialization.                                                              #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestFrequencyShiftCreation:
     """Test FrequencyShift initialization."""
 
@@ -134,6 +162,13 @@ class TestFrequencyShiftCreation:
         assert freq.shift_hz == -20.0
 
 
+#**************************************************************************************************#
+#                                     Class TestFrequencyShift                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test frequency shift.                                                                            #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestFrequencyShift:
     """Test frequency shift."""
 
@@ -174,6 +209,13 @@ class TestFrequencyShift:
         assert np.allclose(result2[0][:], original_data, rtol=1e-5)
 
 
+#**************************************************************************************************#
+#                              Class TestPhaseFrequencyWaterReference                              #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test water reference handling.                                                                   #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPhaseFrequencyWaterReference:
     """Test water reference handling."""
 
@@ -210,6 +252,13 @@ class TestPhaseFrequencyWaterReference:
         assert np.allclose(result_water[0][:], original_water, rtol=1e-5, atol=1e-7)
 
 
+#**************************************************************************************************#
+#                               Class TestPhaseFrequencyIntegration                                #
+#**************************************************************************************************#
+#                                                                                                  #
+# Integration tests.                                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPhaseFrequencyIntegration:
     """Integration tests."""
 

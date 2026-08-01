@@ -15,6 +15,13 @@ from augmentrum.augmentation.baseline_augmentation import BaselineAugmentation
 from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 
 
+#**************************************************************************************************#
+#                              Class TestBaselineAugmentationCreation                              #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test BaselineAugmentation initialization.                                                        #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBaselineAugmentationCreation:
     """Test BaselineAugmentation initialization."""
 
@@ -48,6 +55,13 @@ class TestBaselineAugmentationCreation:
             BaselineAugmentation(mode='invalid')
 
 
+#**************************************************************************************************#
+#                                   Class TestRandomWalkBaseline                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test random walk baseline.                                                                       #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestRandomWalkBaseline:
     """Test random walk baseline."""
 
@@ -84,6 +98,13 @@ class TestRandomWalkBaseline:
         assert np.allclose(result1[0][:], result2[0][:])
 
 
+#**************************************************************************************************#
+#                                    Class TestBSplineBaseline                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test B-spline baseline.                                                                          #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBSplineBaseline:
     """Test B-spline baseline."""
 
@@ -113,6 +134,13 @@ class TestBSplineBaseline:
         assert result_data is not None
 
 
+#**************************************************************************************************#
+#                                   Class TestPolynomialBaseline                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test polynomial baseline.                                                                        #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPolynomialBaseline:
     """Test polynomial baseline."""
 
@@ -140,6 +168,13 @@ class TestPolynomialBaseline:
         assert result_data is not None
 
 
+#**************************************************************************************************#
+#                                Class TestBaselineMultipleSubjects                                #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test processing multiple subjects.                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBaselineMultipleSubjects:
     """Test processing multiple subjects."""
 
@@ -152,6 +187,13 @@ class TestBaselineMultipleSubjects:
         assert len(result_data) == len(dummy_nifti_list)
 
 
+#**************************************************************************************************#
+#                                 Class TestBaselineWaterReference                                 #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test water reference handling.                                                                   #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBaselineWaterReference:
     """Test water reference handling."""
 
@@ -172,6 +214,13 @@ class TestBaselineWaterReference:
         assert np.allclose(result_water[0][:], original_water, rtol=1e-5, atol=1e-7)
 
 
+#**************************************************************************************************#
+#                                  Class TestBaselineIntegration                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Integration tests.                                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBaselineIntegration:
     """Integration tests."""
 

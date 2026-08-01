@@ -15,6 +15,13 @@ from augmentrum.augmentation.line_broadening import LineBroadening
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 
 
+#**************************************************************************************************#
+#                                 Class TestLineBroadeningCreation                                 #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test LineBroadening initialization.                                                              #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestLineBroadeningCreation:
     """Test LineBroadening initialization."""
 
@@ -62,6 +69,13 @@ class TestLineBroadeningCreation:
         assert broadening.supports_backend(Backend.NUMPY)
 
 
+#**************************************************************************************************#
+#                                  Class TestLorentzianBroadening                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test Lorentzian broadening.                                                                      #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestLorentzianBroadening:
     """Test Lorentzian broadening."""
 
@@ -112,6 +126,13 @@ class TestLorentzianBroadening:
         assert (np.abs(broadened_data[..., -1]) < np.abs(original_data[..., -1])).any()
 
 
+#**************************************************************************************************#
+#                                   Class TestGaussianBroadening                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test Gaussian broadening.                                                                        #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestGaussianBroadening:
     """Test Gaussian broadening."""
 
@@ -144,6 +165,13 @@ class TestGaussianBroadening:
         assert np.allclose(result_data[0][:], original_data)
 
 
+#**************************************************************************************************#
+#                                    Class TestVoigtBroadening                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test Voigt broadening.                                                                           #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestVoigtBroadening:
     """Test Voigt broadening."""
 
@@ -176,6 +204,13 @@ class TestVoigtBroadening:
         assert np.allclose(result_data[0][:], original_data)
 
 
+#**************************************************************************************************#
+#                             Class TestLineBroadeningMultipleSubjects                             #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test processing multiple subjects.                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestLineBroadeningMultipleSubjects:
     """Test processing multiple subjects."""
 
@@ -210,6 +245,13 @@ class TestLineBroadeningMultipleSubjects:
         assert np.allclose(data0, data1)
 
 
+#**************************************************************************************************#
+#                                  Class TestLineBroadeningWater                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test water reference handling.                                                                   #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestLineBroadeningWater:
     """Test water reference handling."""
 
@@ -233,6 +275,13 @@ class TestLineBroadeningWater:
         assert np.allclose(result_water[0][:], original_water, rtol=1e-5, atol=1e-7)
 
 
+#**************************************************************************************************#
+#                                 Class TestLineBroadeningLogging                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test automatic logging/provenance.                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestLineBroadeningLogging:
     """Test automatic logging/provenance."""
 
@@ -258,6 +307,13 @@ class TestLineBroadeningLogging:
         assert result_data.metadata_common == {}
 
 
+#**************************************************************************************************#
+#                                Class TestLineBroadeningEdgeCases                                 #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test edge cases.                                                                                 #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestLineBroadeningEdgeCases:
     """Test edge cases."""
 
@@ -281,6 +337,13 @@ class TestLineBroadeningEdgeCases:
         assert np.iscomplexobj(result_data[0][:])
 
 
+#**************************************************************************************************#
+#                               Class TestLineBroadeningIntegration                                #
+#**************************************************************************************************#
+#                                                                                                  #
+# Integration tests.                                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestLineBroadeningIntegration:
     """Integration tests."""
 

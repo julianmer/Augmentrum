@@ -8,11 +8,14 @@
 #                                                                                                  #
 # Created: 2026-02-07                                                                              #
 #                                                                                                  #
-# Purpose: Residual water augmentation using original working implementation from augment_mrs.py   #
-#          (LaMaster et al.'s Lorentzian water peaks in frequency domain)                          #
+# Purpose: Simulates imperfect water suppression by adding Lorentzian water lobes around           #
+#          4.7 ppm in the frequency domain.                                                        #
 #                                                                                                  #
 ####################################################################################################
 
+#*************#
+#   imports   #
+#*************#
 import numpy as np
 from typing import Optional, List
 from augmentrum.core.base_module import BaseModule
@@ -20,58 +23,17 @@ from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from augmentrum.utils.tensor_ops import fft, ifft, fftshift, ifftshift, to_numpy, match_backend
 
 
-# ============================================================================
-# Helper Function (from original augment_mrs.py lines 379-408)
-# ============================================================================
-
-def add_residual_water(spec, ppm_axis, *, center_ppm=4.7,
-                       peaks=((0.0, 0.20, 1.0),   # (delta_ppm, FWHM_ppm, rel_amp)
-                              (+0.12, 0.18, 0.4),
-                              (-0.15, 0.25, 0.3)),
-                       phase_deg=0.0, amplitude_scale=0.1):
-    """
-    Add Lorentzian residual water lobes (original implementation).
-
-    Args:
-        spec: Complex spectrum
-        ppm_axis: PPM axis
-        center_ppm: Center position of water peak (default: 4.7 ppm)
-        peaks: Tuple of (delta_ppm, FWHM_ppm, rel_amp) for each lobe
-        phase_deg: Phase of water peaks in degrees
-        amplitude_scale: Scale factor relative to spectrum max (default: 0.1 = 10%)
-
-    Returns:
-        Spectrum with water peaks added
-    """
-    s = np.asarray(spec, dtype=complex)
-    ppm = np.asarray(ppm_axis, float)
-
-    phi = np.deg2rad(phase_deg)
-    w = np.zeros_like(ppm, float)
-
-    # Simple Lorentzians
-    for dppm, fwhm_ppm, rel_amp in peaks:
-        x = ppm - (center_ppm + dppm)
-        hw = 0.5 * fwhm_ppm
-        w += rel_amp * (hw / (x**2 + hw**2)) / np.pi
-
-    # Normalize lobes to ~unit max, then scale to a fraction of spec
-    w /= np.max(w) if np.max(w) > 0 else 1.0
-    water_amp = amplitude_scale * np.max(np.abs(np.real(s)))
-    water = water_amp * w * (np.cos(phi) + 1j*np.sin(phi))
-
-    return s + water
-
-
-# ============================================================================
-# ResidualWater Module
-# ============================================================================
-
+#**************************************************************************************************#
+#                                       Class ResidualWater                                        #
+#**************************************************************************************************#
+#                                                                                                  #
+# Add residual water peaks to MRS data.                                                            #
+#                                                                                                  #
+#**************************************************************************************************#
 class ResidualWater(BaseModule):
     """
     Add residual water peaks to MRS data.
 
-    Based on the original implementation from augment_mrs.py (LaMaster et al.).
     Adds Lorentzian-shaped water peaks around 4.7 ppm to simulate imperfect
     water suppression.
 
@@ -125,6 +87,49 @@ class ResidualWater(BaseModule):
         self.peaks = peaks
         self.phase_deg = phase_deg
         self.amplitude_scale = amplitude_scale
+
+    #*****************#
+    #   water lobes   #
+    #*****************#
+
+    @staticmethod
+    def _add_water_lobes(spec, ppm_axis, *, center_ppm=4.7,
+                         peaks=((0.0, 0.20, 1.0),   # (delta_ppm, FWHM_ppm, rel_amp)
+                                (+0.12, 0.18, 0.4),
+                                (-0.15, 0.25, 0.3)),
+                         phase_deg=0.0, amplitude_scale=0.1):
+        """
+        Add Lorentzian residual water lobes to a complex spectrum.
+
+        Args:
+            spec: Complex spectrum
+            ppm_axis: PPM axis
+            center_ppm: Center position of water peak (default: 4.7 ppm)
+            peaks: Tuple of (delta_ppm, FWHM_ppm, rel_amp) for each lobe
+            phase_deg: Phase of water peaks in degrees
+            amplitude_scale: Scale factor relative to spectrum max (default: 0.1 = 10%)
+
+        Returns:
+            Spectrum with water peaks added
+        """
+        s = np.asarray(spec, dtype=complex)
+        ppm = np.asarray(ppm_axis, float)
+
+        phi = np.deg2rad(phase_deg)
+        w = np.zeros_like(ppm, float)
+
+        # Simple Lorentzians
+        for dppm, fwhm_ppm, rel_amp in peaks:
+            x = ppm - (center_ppm + dppm)
+            hw = 0.5 * fwhm_ppm
+            w += rel_amp * (hw / (x**2 + hw**2)) / np.pi
+
+        # Normalize lobes to ~unit max, then scale to a fraction of spec
+        w /= np.max(w) if np.max(w) > 0 else 1.0
+        water_amp = amplitude_scale * np.max(np.abs(np.real(s)))
+        water = water_amp * w * (np.cos(phi) + 1j*np.sin(phi))
+
+        return s + water
 
     def process_nifti_list(self, data_list: List, water_list: Optional[List] = None, **kwargs):
         """
@@ -196,7 +201,7 @@ class ResidualWater(BaseModule):
         water_add_np = np.zeros((n_batch, N), dtype=np.complex128)
 
         for i in range(n_batch):
-            spec_with = add_residual_water(
+            spec_with = self._add_water_lobes(
                 spec_np[i], ppm,
                 center_ppm=self.center_ppm,
                 peaks=self.peaks,
@@ -216,7 +221,7 @@ class ResidualWater(BaseModule):
     def _add_water_to_fid(self, fid: np.ndarray, sw_hz: float, sf_mhz: float,
                           ref_ppm: float = 4.7) -> np.ndarray:
         """
-        Add water peaks to FID data using original augment_mrs.py implementation.
+        Add water peaks to FID data.
 
         Args:
             fid: Input FID data
@@ -248,7 +253,7 @@ class ResidualWater(BaseModule):
             ppm = ref_ppm - freq_hz / sf_mhz
 
             # 3) Add water peaks in frequency domain
-            spec_with_water = add_residual_water(
+            spec_with_water = self._add_water_lobes(
                 spec, ppm,
                 center_ppm=self.center_ppm,
                 peaks=self.peaks,

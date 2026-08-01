@@ -11,6 +11,9 @@
 #                                                                                                  #
 ####################################################################################################
 
+#*************#
+#   imports   #
+#*************#
 import os
 
 import numpy as np
@@ -19,10 +22,9 @@ from typing import Optional, Union, List, Tuple
 import warnings
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Simple spectrum / fit plots  (MRS paper style)
-#  Ported from scripts/visualizations.py so there is one canonical location.
-# ══════════════════════════════════════════════════════════════════════════════
+#*********************************#
+#   simple spectrum / fit plots   #
+#*********************************#
 
 def _crop_ppm(arr, ppmAxis, ppmLim):
     """Return (arr_cropped, ppmAxis_cropped) within *ppmLim* = (lo, hi)."""
@@ -154,9 +156,9 @@ def plot_spec(spec, ppmAxis=None, ppmLim=None, name='', save_path=None,
     return _save_fig(fig, save_path, name)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  NIfTI-MRS batch plotting (existing code below, unchanged)
-# ══════════════════════════════════════════════════════════════════════════════
+#******************************#
+#   nifti-mrs batch plotting   #
+#******************************#
 
 try:
     from fsl_mrs.utils.plotting import plot_spectrum, plot_spectra
@@ -649,3 +651,222 @@ def quick_plot(nifti_plus, index=0, ppmlim=(0.2, 4.2)):
 
 
 
+
+
+#****************#
+#   mrsi plots   #
+#****************#
+#
+#  Colour choices follow the jobs the data does:
+#    * a metabolite / intensity map encodes MAGNITUDE  -> one perceptually
+#      uniform sequential ramp (viridis), never a rainbow
+#    * a sampling mask encodes PRESENCE                -> binary greyscale
+#    * overlaid spectra encode IDENTITY                -> a fixed categorical
+#      order, assigned by position and never cycled, so "clean" is the same
+#      colour in every figure of a run
+#
+#  _MRSI_SERIES is deliberately short. Past four overlaid traces a spectrum plot
+#  stops being readable and wants small multiples instead.
+
+_MRSI_SERIES = ('#1f77b4', '#d62728', '#2ca02c', '#9467bd')
+_MRSI_SEQUENTIAL = 'viridis'
+
+
+def _band_integral(volume, ppm_axis, band, axis=-1):
+    """
+    Collapse the spectral axis to one number per voxel by integrating |spectrum|
+    over a ppm band. This is what makes a 4-D MRSI volume mappable.
+    """
+    lo, hi = (min(band), max(band))
+    sel = (ppm_axis >= lo) & (ppm_axis <= hi)
+    if not sel.any():
+        raise ValueError(
+            f"ppm band {band} selects no points from an axis spanning "
+            f"{ppm_axis.min():.2f}..{ppm_axis.max():.2f} ppm."
+        )
+    return np.abs(np.take(volume, np.flatnonzero(sel), axis=axis)).sum(axis=axis)
+
+
+def plot_mrsi_map(volume, ppm_axis=None, band=(1.8, 2.2), slices=None,
+                  n_cols=None, title=None, cmap=_MRSI_SEQUENTIAL, mask=None,
+                  vmax_percentile=99.5, save_path=None, name='mrsi_map',
+                  figsize=None, cbar_label=None):
+    """
+    Montage of axial slices through an MRSI volume.
+
+    Args:
+        volume: (X, Y, Z, T) complex spectral volume, or (X, Y, Z) real map.
+                A 4-D input is reduced by integrating |spectrum| over *band*.
+        ppm_axis: chemical-shift axis matching the last axis. Required for 4-D.
+        band: ppm window to integrate. Default (1.8, 2.2) brackets NAA at 2.008.
+        slices: which z indices to show. Default is up to 9 spread through the slab.
+        mask: optional (X, Y, Z) boolean; voxels outside are blanked.
+        vmax_percentile: upper display limit, as a percentile of the shown voxels.
+                Guards against one hot voxel flattening everything else.
+        cbar_label: colour-bar label. Defaults to the integrated band.
+
+    Returns:
+        The saved path when *save_path* is given, else the Figure.
+    """
+    volume = np.asarray(volume)
+    if volume.ndim == 4:
+        if ppm_axis is None:
+            raise ValueError("ppm_axis is required to reduce a 4-D volume to a map.")
+        img = _band_integral(volume, np.asarray(ppm_axis), band)
+        default_label = f'|signal| integrated over {min(band)}-{max(band)} ppm'
+    elif volume.ndim == 3:
+        img = np.abs(volume)
+        default_label = 'amplitude'
+    else:
+        raise ValueError(f"volume must be 3-D or 4-D, got shape {volume.shape}.")
+
+    if mask is not None:
+        img = np.where(np.asarray(mask).astype(bool), img, np.nan)
+
+    n_z = img.shape[2]
+    if slices is None:
+        slices = list(np.unique(np.linspace(0, n_z - 1, min(9, n_z)).astype(int)))
+    slices = [int(s) for s in slices]
+
+    finite = img[np.isfinite(img)]
+    vmax = np.percentile(finite, vmax_percentile) if finite.size else 1.0
+    vmax = vmax if vmax > 0 else 1.0
+
+    n_cols = n_cols or min(len(slices), 3)
+    n_rows = int(np.ceil(len(slices) / n_cols))
+    figsize = figsize or (3.2 * n_cols, 3.4 * n_rows)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
+
+    im = None
+    for k, ax in enumerate(axes.ravel()):
+        if k >= len(slices):
+            ax.axis('off')
+            continue
+        z = slices[k]
+        im = ax.imshow(np.rot90(img[:, :, z]), cmap=cmap, vmin=0, vmax=vmax,
+                       interpolation='nearest')
+        # The slice index is the only per-panel label; a full axis frame on a
+        # montage is noise.
+        ax.set_title(f'z = {z}', fontsize=9)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+    if im is not None:
+        cbar = fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.025, pad=0.02)
+        cbar.set_label(cbar_label or default_label, fontsize=9)
+        cbar.ax.tick_params(labelsize=8)
+    if title:
+        fig.suptitle(title, fontsize=12, fontweight='bold')
+
+    saved = _save_fig(fig, save_path, name)
+    return saved if saved is not None else fig
+
+
+def plot_mrsi_voxel_spectra(volumes, ppm_axis, voxel, labels=None,
+                            ppm_lim=(0.2, 4.2), real=True, title=None,
+                            normalize=False, save_path=None,
+                            name='mrsi_voxel_spectra', figsize=(11, 4.5)):
+    """
+    Overlay the spectrum of one voxel across several versions of a volume.
+
+    The intended use is showing what an augmentation did: pass the clean volume
+    and its undersampled / noisy counterparts and read off the difference at a
+    single voxel.
+
+    Args:
+        volumes: one spectral volume, or a sequence of them. Each is (X, Y, Z, T)
+                complex, already transformed to spectra.
+        ppm_axis: chemical-shift axis matching the last axis.
+        voxel: (x, y, z) index to plot.
+        labels: one per volume. Needed once there is more than one.
+        ppm_lim: display window. Default (0.2, 4.2) is the usual metabolite range.
+        real: plot the real part (the convention for a phased spectrum) or the
+                magnitude when False.
+        normalize: scale each trace to unit maximum. Use when comparing shape
+                across volumes whose absolute scales differ.
+
+    Returns:
+        The saved path when *save_path* is given, else the Figure.
+    """
+    if not isinstance(volumes, (list, tuple)):
+        volumes = [volumes]
+    if labels is None:
+        labels = [f'volume {i}' for i in range(len(volumes))] if len(volumes) > 1 else [None]
+    if len(labels) != len(volumes):
+        raise ValueError(f"got {len(volumes)} volumes but {len(labels)} labels.")
+    if len(volumes) > len(_MRSI_SERIES):
+        raise ValueError(
+            f"{len(volumes)} overlaid spectra is past readable; "
+            f"plot at most {len(_MRSI_SERIES)}, or use separate panels."
+        )
+
+    ppm_axis = np.asarray(ppm_axis)
+    vx, vy, vz = (int(v) for v in voxel)
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    for i, (vol, label) in enumerate(zip(volumes, labels)):
+        trace = np.asarray(vol)[vx, vy, vz]
+        y = np.real(trace) if real else np.abs(trace)
+        y, x = _crop_ppm(y, ppm_axis, ppm_lim)
+        if normalize:
+            peak = np.max(np.abs(y))
+            y = y / peak if peak > 0 else y
+        ax.plot(x, y, color=_MRSI_SERIES[i], linewidth=1.4, label=label)
+
+    ax.set_xlabel('chemical shift [ppm]', fontsize=11)
+    _style_mrs_ax(ax, clean=False)
+    ax.set_xlim(max(ppm_lim), min(ppm_lim))
+    if any(l is not None for l in labels):
+        ax.legend(frameon=False, fontsize=10)
+    ax.set_title(title or f'voxel ({vx}, {vy}, {vz})', fontsize=12)
+    fig.tight_layout()
+
+    saved = _save_fig(fig, save_path, name)
+    return saved if saved is not None else fig
+
+
+def plot_kspace_mask(mask, title=None, save_path=None, name='kspace_mask',
+                     figsize=None, subtitles=None):
+    """
+    Show one or more k-space sampling masks, with the retained fraction stated.
+
+    Args:
+        mask: (kx, ky) boolean, or a sequence / stack of them.
+        subtitles: per-panel labels. Defaults to the achieved acceleration, which
+                is the number you actually want to check.
+
+    Returns:
+        The saved path when *save_path* is given, else the Figure.
+    """
+    mask = np.asarray(mask)
+    if mask.ndim == 2:
+        masks = [mask]
+    elif mask.ndim == 3:
+        masks = [mask[i] for i in range(mask.shape[0])]
+    else:
+        raise ValueError(f"mask must be 2-D or a stack of 2-D, got {mask.shape}.")
+
+    n = len(masks)
+    figsize = figsize or (3.1 * n, 3.4)
+    fig, axes = plt.subplots(1, n, figsize=figsize, squeeze=False)
+    for i, (m, ax) in enumerate(zip(masks, axes.ravel())):
+        m = np.asarray(m).astype(float)
+        while m.ndim > 2:                       # collapse any fully-sampled axes
+            m = m[..., 0]
+        ax.imshow(m.T, cmap='gray', vmin=0, vmax=1, interpolation='nearest')
+        kept = float(m.mean())
+        ax.set_title(subtitles[i] if subtitles else
+                     f'{100 * kept:.0f}% of bins  (1/{1 / kept:.1f})' if kept > 0 else 'empty',
+                     fontsize=9)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+    if title:
+        fig.suptitle(title, fontsize=12, fontweight='bold')
+    fig.tight_layout()
+
+    saved = _save_fig(fig, save_path, name)
+    return saved if saved is not None else fig

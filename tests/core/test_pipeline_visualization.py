@@ -6,6 +6,13 @@ import pytest
 from augmentrum import Augmentrum
 
 
+#**************************************************************************************************#
+#                                 Class TestPipelineVisualization                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test pipeline visualization methods.                                                             #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPipelineVisualization:
     """Test pipeline visualization methods."""
 
@@ -63,13 +70,15 @@ class TestPipelineVisualization:
         augmenter = Augmentrum(
             data=dummy_nifti_list,
             pipeline=['noise'],
-            sigma_frac=0.05  # User param (stored in Pipeline, not shown in viz)
+            sigma_frac=0.05
         )
         viz = augmenter.visualize_pipeline(detailed=True)
 
         assert 'sigma_frac' in viz
-        # Module is created with default 0.02, user param 0.05 is in Pipeline
-        assert '0.02' in viz or '0.020' in viz
+        # Scalar user params are injected into the module constructor by
+        # _build_pipeline_from_list, so the module holds 0.05 rather than the
+        # 0.02 fallback in DEFAULT_PARAMS, and that is what the view reports.
+        assert '0.05' in viz
 
     def test_visualization_simple_hides_params(self, dummy_nifti_list):
         """Test that simple visualization hides parameters."""

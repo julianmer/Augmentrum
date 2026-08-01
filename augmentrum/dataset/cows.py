@@ -24,13 +24,9 @@ import scipy.io
 from augmentrum import Augmentrum
 
 
-#**************************************************************************************************#
-#                                       Function: COWSData                                         #
-#**************************************************************************************************#
-#                                                                                                  #
-# Helper function to load the COWS dataset and create an Augmentrum instance.                      #
-#                                                                                                  #
-#**************************************************************************************************#
+#**********************#
+#   cows data loader   #
+#**********************#
 def COWSData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
              n_coils=(1, None), n_averages=(1, None), pipelines=None,
              modes=None, backend='pytorch', volatile=False, **kwargs):
@@ -106,11 +102,7 @@ def COWSData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
 
 
 #**************************************************************************************************#
-#                                        Class COWSDataModule                                      #
-#**************************************************************************************************#
-#                                                                                                  #
-# The data module to load the COWS study data.                                                     #
-#                                                                                                  #
+#                                       Class COWSDataModule                                       #
 #**************************************************************************************************#
 class COWSDataModule():
     def __init__(self, data_dir, location=None, water_sup=None):

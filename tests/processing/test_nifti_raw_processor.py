@@ -18,6 +18,13 @@ from augmentrum.processing.nifti_raw_processor import NIfTI_RawProcessor
 from augmentrum.core import Backend
 
 
+#**************************************************************************************************#
+#                            Class TestNIfTIRawProcessorInitialization                             #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test NIfTI_RawProcessor initialization.                                                          #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIRawProcessorInitialization:
     """Test NIfTI_RawProcessor initialization."""
 
@@ -74,6 +81,13 @@ class TestNIfTIRawProcessorInitialization:
         assert Backend.NIFTI_LIST in processor.SUPPORTED_BACKENDS
 
 
+#**************************************************************************************************#
+#                                    Class TestProcessNIfTIList                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test process_nifti_list method.                                                                  #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestProcessNIfTIList:
     """Test process_nifti_list method."""
 
@@ -125,6 +139,13 @@ class TestProcessNIfTIList:
         assert result_water[0] is not None
 
 
+#**************************************************************************************************#
+#                                Class TestProcessingSingleSubject                                 #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test _process_single method.                                                                     #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestProcessingSingleSubject:
     """Test _process_single method."""
 
@@ -193,6 +214,13 @@ class TestProcessingSingleSubject:
             assert result.shape[result.dim_position('DIM_DYN')] == 1
 
 
+#**************************************************************************************************#
+#                                    Class TestCoilCombination                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test coil_combine method.                                                                        #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestCoilCombination:
     """Test coil_combine method."""
 
@@ -236,6 +264,13 @@ class TestCoilCombination:
         assert result_met is not None
 
 
+#**************************************************************************************************#
+#                                      Class TestRegistration                                      #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test registration method.                                                                        #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestRegistration:
     """Test registration method."""
 
@@ -263,6 +298,13 @@ class TestRegistration:
         assert processor_fsl.registration_method == 'fsl-mrs'
 
 
+#**************************************************************************************************#
+#                                       Class TestAveraging                                        #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test combine_averages method.                                                                    #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestAveraging:
     """Test combine_averages method."""
 
@@ -284,6 +326,13 @@ class TestAveraging:
         assert result_met is not None
 
 
+#**************************************************************************************************#
+#                                 Class TestEddyCurrentCorrection                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test eddy_current_correction method.                                                             #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestEddyCurrentCorrection:
     """Test eddy_current_correction method."""
 
@@ -313,6 +362,13 @@ class TestEddyCurrentCorrection:
             processor.eddy_current_correction(dummy_nifti_single_coil, None)
 
 
+#**************************************************************************************************#
+#                                      Class TestWaterRemoval                                      #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test water_removal method.                                                                       #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestWaterRemoval:
     """Test water_removal method."""
 
@@ -324,6 +380,13 @@ class TestWaterRemoval:
         assert result_met is not None
 
 
+#**************************************************************************************************#
+#                                   Class TestFrequencyShifting                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test shift_to_reference method.                                                                  #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestFrequencyShifting:
     """Test shift_to_reference method."""
 
@@ -335,6 +398,13 @@ class TestFrequencyShifting:
         assert result_met is not None
 
 
+#**************************************************************************************************#
+#                                    Class TestPhaseCorrection                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test phase_correction method.                                                                    #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPhaseCorrection:
     """Test phase_correction method."""
 
@@ -346,6 +416,13 @@ class TestPhaseCorrection:
         assert result_met is not None
 
 
+#**************************************************************************************************#
+#                                      Class TestIntegration                                       #
+#**************************************************************************************************#
+#                                                                                                  #
+# Integration tests for complete processing pipeline.                                              #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestIntegration:
     """Integration tests for complete processing pipeline."""
 
@@ -383,6 +460,13 @@ class TestIntegration:
         assert len(result_data) == n_subjects
 
 
+#**************************************************************************************************#
+#                                       Class TestEdgeCases                                        #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test edge cases and error handling.                                                              #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestEdgeCases:
     """Test edge cases and error handling."""
 
@@ -397,6 +481,13 @@ class TestEdgeCases:
             processor.process_nifti_list(data_list, water_list)
 
 
+#**************************************************************************************************#
+#                                  Class TestBackendCompatibility                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test backend compatibility.                                                                      #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBackendCompatibility:
     """Test backend compatibility."""
 

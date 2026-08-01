@@ -11,13 +11,23 @@
 #                                                                                                  #
 ####################################################################################################
 
+#*************#
+#   imports   #
+#*************#
 import numpy as np
 from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
-from augmentrum.utils.tensor_ops import to_numpy, match_backend, _is_torch, _is_jax, _is_tf
+from augmentrum.utils.tensor_ops import to_numpy, match_backend, is_torch, is_jax, is_tf
 
 
+#**************************************************************************************************#
+#                                       Class GaussianNoise                                        #
+#**************************************************************************************************#
+#                                                                                                  #
+# Add uncorrelated complex Gaussian noise (AWGN) to MRS data.                                      #
+#                                                                                                  #
+#**************************************************************************************************#
 class GaussianNoise(BaseModule):
     """
     Add uncorrelated complex Gaussian noise (AWGN) to MRS data.
@@ -37,6 +47,18 @@ class GaussianNoise(BaseModule):
         Sigma as fraction of max|FID| (alternative to sigma)
     seed : int, optional
         Random seed for reproducibility
+    global_scale : bool, default False
+        Controls how the reference statistic for ``snr`` / ``snr_db`` /
+        ``sigma_frac`` is reduced.  ``False`` (default) measures it **per FID
+        trace**, which is the right thing for SVS.  ``True`` measures a single
+        statistic **per batch element**, reduced over every other axis.
+
+        Use ``global_scale=True`` for MRSI.  A per-trace statistic on a
+        ``(B, X, Y, Z, T)`` volume gives every voxel its own sigma, so
+        background voxels (whose signal power is ~0) receive almost no noise
+        while brain voxels receive plenty.  The resulting noise field traces the
+        anatomy and hands a network a free brain mask.  ``sigma`` is an absolute
+        scale and is unaffected by this flag.
 
     Notes
     -----
@@ -49,6 +71,7 @@ class GaussianNoise(BaseModule):
     >>> noise = GaussianNoise(snr_db=10.0)
     >>> noise = GaussianNoise(sigma=0.01)
     >>> noise = GaussianNoise(sigma_frac=0.02)
+    >>> noise = GaussianNoise(sigma_frac=0.02, global_scale=True)  # MRSI volumes
     """
 
     SUPPORTED_BACKENDS = []  # Supports all backends
@@ -58,14 +81,17 @@ class GaussianNoise(BaseModule):
                  snr_db: Optional[float] = None,
                  sigma: Optional[float] = None,
                  sigma_frac: Optional[float] = None,
-                 seed: Optional[int] = None):
-        super().__init__(snr=snr, snr_db=snr_db, sigma=sigma, sigma_frac=sigma_frac, seed=seed)
+                 seed: Optional[int] = None,
+                 global_scale: bool = False):
+        super().__init__(snr=snr, snr_db=snr_db, sigma=sigma, sigma_frac=sigma_frac,
+                         seed=seed, global_scale=global_scale)
 
         self.snr = snr
         self.snr_db = snr_db
         self.sigma = sigma
         self.sigma_frac = sigma_frac
         self.seed = seed
+        self.global_scale = global_scale
 
         # Validate parameters
         params_provided = sum([snr is not None, snr_db is not None,
@@ -105,34 +131,37 @@ class GaussianNoise(BaseModule):
         Returns:
             Tuple of (noisy_data, water_array)
         """
-        original_shape = data_array.shape
-        N = original_shape[-1]
-        n_batch = int(np.prod(original_shape[:-1]))
+        original_shape = tuple(data_array.shape)
+        ndim = len(original_shape)
 
         # ── Step 1: compute noise scale (small scalar reduction → numpy OK) ──
+        # `keepdims=True` throughout, so scale_np always broadcasts against
+        # original_shape without any further reshaping.  Reducing to a flat
+        # (n_batch, 1) and reshaping only broadcasts correctly when every axis
+        # between the batch and the points axis is singleton — true for SVS
+        # (B, 1, 1, 1, N), false for MRSI (B, X, Y, Z, T).
         if self.sigma is not None:
             # Fixed sigma — no data stats needed at all
-            scale_np = np.full((n_batch, 1), float(self.sigma), dtype=np.float64)
+            scale_np = np.full((1,) * ndim, float(self.sigma), dtype=np.float64)
         else:
-            flat_np = to_numpy(data_array).reshape(n_batch, N)
+            arr_np = to_numpy(data_array)
+            # global_scale: one statistic per batch element; otherwise per trace.
+            red_axes = tuple(range(1, ndim)) if self.global_scale else (ndim - 1,)
+
             if self.sigma_frac is not None:
-                peak = np.max(np.abs(flat_np), axis=-1, keepdims=True)
+                peak = np.max(np.abs(arr_np), axis=red_axes, keepdims=True)
                 peak = np.where(peak > 0, peak, 1.0)
                 scale_np = self.sigma_frac * peak
             else:
-                sig_pow = np.mean(np.abs(flat_np) ** 2, axis=-1, keepdims=True) + 1e-16
+                sig_pow = np.mean(np.abs(arr_np) ** 2, axis=red_axes, keepdims=True) + 1e-16
                 if self.snr is not None:
                     noise_pow = sig_pow / float(self.snr)
                 else:
                     noise_pow = sig_pow / (10.0 ** (float(self.snr_db) / 10.0))
                 scale_np = np.sqrt(noise_pow / 2.0)  # per-channel std
 
-        # scale_np shape: (n_batch, 1) — broadcast over last N axis
-        # Reshape to broadcast correctly over all dims
-        scale_np = scale_np.reshape([-1] + [1] * (len(original_shape) - 1))
-
         # ── Step 2: generate noise in the native framework ────────────────────
-        if _is_torch(data_array):
+        if is_torch(data_array):
             import torch
             gen = torch.Generator(device=data_array.device)
             if self.seed is not None:
@@ -148,7 +177,7 @@ class GaussianNoise(BaseModule):
             noise = torch.complex(r, i_) * scale_t
             return data_array + noise, water_array
 
-        elif _is_jax(data_array):
+        elif is_jax(data_array):
             import jax
             import jax.numpy as jnp
             seed = self.seed if self.seed is not None else 0
@@ -160,7 +189,7 @@ class GaussianNoise(BaseModule):
             noise = (r + 1j * i_).astype(jnp.complex64) * scale_j
             return data_array + noise, water_array
 
-        elif _is_tf(data_array):
+        elif is_tf(data_array):
             import tensorflow as tf
             if self.seed is not None:
                 tf.random.set_seed(self.seed)
@@ -178,9 +207,9 @@ class GaussianNoise(BaseModule):
             noise = (r + 1j * i_) * scale_np
             return data_array + match_backend(noise, data_array), water_array
 
-    # ------------------------------------------------------------------
-    # Pure-numpy path for process_nifti_list (input is always numpy)
-    # ------------------------------------------------------------------
+    #********************************************************************#
+    #   pure-numpy path for process_nifti_list (input is always numpy)   #
+    #********************************************************************#
 
     def _add_noise_numpy(self, fid: np.ndarray) -> np.ndarray:
         """Add Gaussian noise to numpy FID data."""
@@ -191,19 +220,23 @@ class GaussianNoise(BaseModule):
         out_dtype = np.result_type(fid.dtype, np.complex64)
         fid_flat = fid_flat.astype(out_dtype, copy=False)
 
+        # This path handles one NIFTI_MRS object at a time, so "global" means a
+        # single statistic over the whole array rather than one per FID trace.
+        red_axis = None if self.global_scale else -1
+
         if self.sigma is not None:
             scale = float(self.sigma)
         elif self.sigma_frac is not None:
-            peak = np.max(np.abs(fid_flat), axis=-1)
+            peak = np.max(np.abs(fid_flat), axis=red_axis, keepdims=True)
             peak = np.where(peak > 0, peak, 1.0)
-            scale = (self.sigma_frac * peak)[:, None]
+            scale = self.sigma_frac * peak
         else:
-            sig_pow = np.mean(np.abs(fid_flat) ** 2, axis=-1) + 1e-16
+            sig_pow = np.mean(np.abs(fid_flat) ** 2, axis=red_axis, keepdims=True) + 1e-16
             if self.snr is not None:
                 noise_pow = sig_pow / float(self.snr)
             else:
                 noise_pow = sig_pow / (10.0 ** (float(self.snr_db) / 10.0))
-            scale = np.sqrt(noise_pow / 2.0)[:, None]
+            scale = np.sqrt(noise_pow / 2.0)
 
         noise = (rng.normal(0.0, 1.0, size=fid_flat.shape)
                  + 1j * rng.normal(0.0, 1.0, size=fid_flat.shape)) * scale

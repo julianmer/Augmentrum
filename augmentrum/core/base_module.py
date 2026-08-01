@@ -10,11 +10,21 @@
 #                                                                                                  #
 ####################################################################################################
 
+#*************#
+#   imports   #
+#*************#
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple, Union
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 
 
+#**************************************************************************************************#
+#                                         Class BaseModule                                         #
+#**************************************************************************************************#
+#                                                                                                  #
+# Unified base class for ALL augmentation/processing pipeline modules.                             #
+#                                                                                                  #
+#**************************************************************************************************#
 class BaseModule(ABC):
     """
     Unified base class for ALL augmentation/processing pipeline modules.
@@ -194,6 +204,18 @@ class BaseModule(ABC):
                     pass
             if sf is not None:
                 kwargs['sf_mhz'] = sf[0] if hasattr(sf, '__getitem__') else sf
+
+        # Inject spatial geometry (matrix, voxel size, FOV) the same way, so
+        # modules that need to reason about k-space read it off the NIfTI-MRS
+        # data rather than having it passed in by hand and drifting from it.
+        # Absent or unreadable geometry is not an error — most modules never
+        # look at it, and a bare-array workflow legitimately has none.
+        if 'geometry' not in kwargs and data.n_subjects > 0:
+            try:
+                from augmentrum.sampling.kspace_sampling import KspaceGeometry
+                kwargs['geometry'] = KspaceGeometry.read_header_geometry(data)
+            except Exception:
+                pass
 
         # ── Get data in native backend format (not forced to numpy!) ──
         data_array = data.get_data(backend)

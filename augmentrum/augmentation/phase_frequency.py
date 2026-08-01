@@ -11,6 +11,9 @@
 #                                                                                                  #
 ####################################################################################################
 
+#*************#
+#   imports   #
+#*************#
 import math
 import numpy as np
 from typing import Optional, List
@@ -19,6 +22,13 @@ from augmentrum.core.base_module import BaseModule
 from augmentrum.utils.tensor_ops import fft, ifft, fftshift, ifftshift, match_backend
 
 
+#**************************************************************************************************#
+#                                         Class PhaseShift                                         #
+#**************************************************************************************************#
+#                                                                                                  #
+# Apply phase shifts to MRS data.                                                                  #
+#                                                                                                  #
+#**************************************************************************************************#
 class PhaseShift(BaseModule):
     """
     Apply phase shifts to MRS data.
@@ -155,6 +165,13 @@ class PhaseShift(BaseModule):
         return fft(ifftshift(spec * match_backend(ramp, spec)))
 
 
+#**************************************************************************************************#
+#                                       Class FrequencyShift                                       #
+#**************************************************************************************************#
+#                                                                                                  #
+# Apply frequency shift to MRS data.                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class FrequencyShift(BaseModule):
     """
     Apply frequency shift to MRS data.

@@ -34,9 +34,9 @@ __all__ = [
 ]
 
 
-#**************************************************************************************************#
-#                                       Helper Functions                                           #
-#**************************************************************************************************#
+#**********************#
+#   helper functions   #
+#**********************#
 
 def create_deterministic_indices(data: NIfTI_MRS_Plus, n_coils: Tuple, n_averages: Tuple) -> List[Tuple]:
     """
@@ -83,9 +83,9 @@ def _get_limits(n: Tuple, n_max: int) -> Tuple[int, int]:
     return min_n, max_n
 
 
-#**************************************************************************************************#
-#                                    Backend-Agnostic Generators                                   #
-#**************************************************************************************************#
+#*********************************#
+#   backend-agnostic generators   #
+#*********************************#
 
 def _make_batch(data, water, indices, copy=False):
     """
@@ -222,9 +222,9 @@ def create_deterministic_generator(data: NIfTI_MRS_Plus,
         yield batch_data_list, batch_water_list
 
 
-#**************************************************************************************************#
-#                                    Backend Conversion Functions                                  #
-#**************************************************************************************************#
+#**********************************#
+#   backend conversion functions   #
+#**********************************#
 
 def convert_batch_to_backend(batch_data: List, batch_water: List, backend: Backend):
     """
@@ -295,9 +295,9 @@ def convert_batch_to_backend(batch_data: List, batch_water: List, backend: Backe
         raise ValueError(f"Unknown backend: {backend}")
 
 
-#**************************************************************************************************#
-#                                    Framework DataLoader Wrappers                                 #
-#**************************************************************************************************#
+#***********************************#
+#   framework dataloader wrappers   #
+#***********************************#
 
 def wrap_generator_for_framework(generator: Callable,
                                  backend: Backend,

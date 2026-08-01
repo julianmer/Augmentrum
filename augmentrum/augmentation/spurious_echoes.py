@@ -13,6 +13,9 @@
 #                                                                                                  #
 ####################################################################################################
 
+#*************#
+#   imports   #
+#*************#
 import numpy as np
 from typing import Optional, List, Tuple, Union
 from augmentrum.core.base_module import BaseModule
@@ -20,6 +23,13 @@ from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from augmentrum.utils.tensor_ops import to_numpy, match_backend
 
 
+#**************************************************************************************************#
+#                                       Class SpuriousEchoes                                       #
+#**************************************************************************************************#
+#                                                                                                  #
+# Add spurious echo artifacts to MRS data.                                                         #
+#                                                                                                  #
+#**************************************************************************************************#
 class SpuriousEchoes(BaseModule):
     """
     Add spurious echo artifacts to MRS data.

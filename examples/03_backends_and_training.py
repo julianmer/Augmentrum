@@ -166,9 +166,9 @@ def plot_comparison(nifti_list, labels, title, ppmlim=(0.2, 4.2)):
     return fig
 
 
-# ============================================================================
-# PART 1: LOADING DATA
-# ============================================================================
+#**************************#
+#   part 1: loading data   #
+#**************************#
 
 print("\n" + "="*80)
 print(" PART 1: LOADING DATA")
@@ -194,9 +194,9 @@ data_list, water_list, subject_names = load_cows_data(data_dir)
 print(f"✓ Loaded {len(data_list)} subjects\n")
 
 
-# ============================================================================
-# PART 2: UNDERSTANDING BACKENDS
-# ============================================================================
+#************************************#
+#   part 2: understanding backends   #
+#************************************#
 
 print("="*80)
 print(" PART 2: EXPLORING DIFFERENT BACKENDS")
@@ -295,9 +295,9 @@ print(f"  • Exporting to NIfTI files")
 print(f"  • Integration with FSL/Osprey/TARQUIN")
 
 
-# ============================================================================
-# PART 3: AUTOMATIC BACKEND CONVERSION
-# ============================================================================
+#******************************************#
+#   part 3: automatic backend conversion   #
+#******************************************#
 
 print("\n" + "="*80)
 print(" PART 3: AUTOMATIC BACKEND CONVERSION - THE MAGIC!")
@@ -371,9 +371,9 @@ except ImportError:
     print("PyTorch not available for this demo")
 
 
-# ============================================================================
-# PART 4: EXPORTING TO NIFTI FILES
-# ============================================================================
+#**************************************#
+#   part 4: exporting to nifti files   #
+#**************************************#
 
 print("\n" + "="*80)
 print(" PART 4: EXPORTING AUGMENTED DATA TO NIFTI FILES")
@@ -478,9 +478,9 @@ shutil.rmtree(temp_dir)
 print(f"  ✓ Removed: {temp_dir}")
 
 
-# ============================================================================
-# PART 5: COMPLETE PYTORCH TRAINING EXAMPLE
-# ============================================================================
+#***********************************************#
+#   part 5: complete pytorch training example   #
+#***********************************************#
 
 print("\n" + "="*80)
 print(" PART 5: COMPLETE PYTORCH TRAINING EXAMPLE")
@@ -510,9 +510,9 @@ try:
 
     print("\n✓ PyTorch is available. Starting training example...")
 
-    # ========================================================================
-    # STEP 1: DEFINE THE MODEL
-    # ========================================================================
+    #******************************#
+    #   step 1: define the model   #
+    #******************************#
 
     print("\n" + "-"*60)
     print("STEP 1: Define Neural Network Architecture")
@@ -559,9 +559,9 @@ try:
     print(f"\n✓ Created model: {model.__class__.__name__}")
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # ========================================================================
-    # STEP 2: SETUP DATA AUGMENTATION
-    # ========================================================================
+    #*************************************#
+    #   step 2: setup data augmentation   #
+    #*************************************#
 
     print("\n" + "-"*60)
     print("STEP 2: Setup Data Augmentation")
@@ -603,9 +603,9 @@ try:
     print(f"  Val:   {len(augmenter_train.splits['val'][0])} subjects")
     print(f"  Batch size: {augmenter_train.batch_size}")
 
-    # ========================================================================
-    # STEP 3: CREATE SYNTHETIC TARGETS
-    # ========================================================================
+    #**************************************#
+    #   step 3: create synthetic targets   #
+    #**************************************#
 
     print("\n" + "-"*60)
     print("STEP 3: Create Synthetic Targets")
@@ -619,9 +619,9 @@ try:
 
     print(f"\n✓ Created targets: shape={synthetic_targets.shape}")
 
-    # ========================================================================
-    # STEP 4: TRAINING SETUP
-    # ========================================================================
+    #****************************#
+    #   step 4: training setup   #
+    #****************************#
 
     print("\n" + "-"*60)
     print("STEP 4: Training Setup")
@@ -634,9 +634,9 @@ try:
     print(f"  Optimizer: {optimizer.__class__.__name__}")
     print(f"  Learning rate: 0.001")
 
-    # ========================================================================
-    # STEP 5: TRAINING LOOP
-    # ========================================================================
+    #***************************#
+    #   step 5: training loop   #
+    #***************************#
 
     print("\n" + "-"*60)
     print("STEP 5: Training (3 epochs for demonstration)")
@@ -645,9 +645,9 @@ try:
     num_epochs = 3
 
     for epoch in range(num_epochs):
-        # =========================
-        # TRAINING PHASE
-        # =========================
+        #********************#
+        #   training phase   #
+        #********************#
         model.train()
         train_loss = 0.0
         train_batches = 0
@@ -681,9 +681,9 @@ try:
 
         avg_train_loss = train_loss / train_batches
 
-        # =========================
-        # VALIDATION PHASE
-        # =========================
+        #**********************#
+        #   validation phase   #
+        #**********************#
         model.eval()
         val_loss = 0.0
         val_batches = 0
@@ -753,9 +753,9 @@ for epoch in range(num_epochs):
 """)
 
 
-# ============================================================================
-# PART 6: BEST PRACTICES SUMMARY
-# ============================================================================
+#************************************#
+#   part 6: best practices summary   #
+#************************************#
 
 print("\n" + "="*80)
 print(" PART 6: BEST PRACTICES BY FRAMEWORK")
@@ -821,9 +821,9 @@ GENERAL TIPS:
 """)
 
 
-# ============================================================================
-# SUMMARY
-# ============================================================================
+#*************#
+#   summary   #
+#*************#
 
 print("\n" + "="*80)
 print(" 🎉 TUTORIAL 03 COMPLETE - YOU'VE MASTERED AUGMENTRUM!")

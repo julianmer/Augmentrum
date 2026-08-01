@@ -17,6 +17,13 @@ import numpy as np
 from augmentrum.core import BaseModule, NIfTI_MRS_Plus, Backend
 
 
+#**************************************************************************************************#
+#                                   Class TestBaseModuleCreation                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test BaseModule initialization.                                                                  #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBaseModuleCreation:
     """Test BaseModule initialization."""
 
@@ -69,6 +76,13 @@ class TestBaseModuleCreation:
         assert module.supports_backend(Backend.PYTORCH)
 
 
+#**************************************************************************************************#
+#                                Class TestBaseModuleBackendSupport                                #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test backend support checking.                                                                   #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBaseModuleBackendSupport:
     """Test backend support checking."""
 
@@ -111,6 +125,13 @@ class TestBaseModuleBackendSupport:
         assert module.get_preferred_backend() == Backend.NIFTI_LIST
 
 
+#**************************************************************************************************#
+#                             Class TestBaseModuleDispatchingNIfTIList                             #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test dispatching to process_nifti_list() method.                                                 #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBaseModuleDispatchingNIfTIList:
     """Test dispatching to process_nifti_list() method."""
 
@@ -166,6 +187,13 @@ class TestBaseModuleDispatchingNIfTIList:
         assert len(result_water) == 3
 
 
+#**************************************************************************************************#
+#                              Class TestBaseModuleDispatchingTensor                               #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test dispatching to process_tensor() method.                                                     #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBaseModuleDispatchingTensor:
     """Test dispatching to process_tensor() method."""
 
@@ -206,6 +234,13 @@ class TestBaseModuleDispatchingTensor:
         assert received_backend == Backend.NUMPY
 
 
+#**************************************************************************************************#
+#                              Class TestBaseModuleDispatchingForward                              #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test dispatching to forward() method (legacy).                                                   #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBaseModuleDispatchingForward:
     """Test dispatching to forward() method (legacy)."""
 
@@ -227,6 +262,13 @@ class TestBaseModuleDispatchingForward:
         assert len(result_data) == 3
 
 
+#**************************************************************************************************#
+#                                   Class TestBaseModuleLogging                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test automatic logging/provenance functionality.                                                 #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBaseModuleLogging:
     """Test automatic logging/provenance functionality."""
 
@@ -299,6 +341,13 @@ class TestBaseModuleLogging:
         assert len(provenance) > 0
 
 
+#**************************************************************************************************#
+#                                Class TestBaseModuleErrorHandling                                 #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test error handling.                                                                             #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBaseModuleErrorHandling:
     """Test error handling."""
 
@@ -335,6 +384,13 @@ class TestBaseModuleErrorHandling:
             module.forward([], None)
 
 
+#**************************************************************************************************#
+#                                     Class TestBaseModuleRepr                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test string representation.                                                                      #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBaseModuleRepr:
     """Test string representation."""
 
@@ -367,6 +423,13 @@ class TestBaseModuleRepr:
         assert 'all' in repr_str.lower()
 
 
+#**************************************************************************************************#
+#                                 Class TestBaseModuleIntegration                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Integration tests with real modules.                                                             #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBaseModuleIntegration:
     """Integration tests with real modules."""
 

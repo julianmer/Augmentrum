@@ -99,10 +99,13 @@ N_AVG     = 8
 N_REPS    = 3        # repetitions for mean speed measurement
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Registry entry
-# ─────────────────────────────────────────────────────────────────────────────
-
+#**************************************************************************************************#
+#                                        Class ModuleEntry                                         #
+#**************************************************************************************************#
+#                                                                                                  #
+# One row in the module registry.                                                                  #
+#                                                                                                  #
+#**************************************************************************************************#
 @dataclass
 class ModuleEntry:
     """One row in the module registry.
@@ -121,9 +124,9 @@ class ModuleEntry:
     spatial:         bool = False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ★  MODULE REGISTRY  ★   ← add new modules here
-# ─────────────────────────────────────────────────────────────────────────────
+#****************************************************#
+#   ★  module registry  ★   ← add new modules here   #
+#****************************************************#
 
 _REGISTRY: list[ModuleEntry] = [
 
@@ -221,10 +224,9 @@ _REGISTRY: list[ModuleEntry] = [
 ]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Result collection
-# ─────────────────────────────────────────────────────────────────────────────
-
+#**************************************************************************************************#
+#                                         Class CellResult                                         #
+#**************************************************************************************************#
 @dataclass
 class CellResult:
     outcome:  str   = NA
@@ -236,9 +238,9 @@ class CellResult:
 _RESULTS: dict[tuple[str, str], CellResult] = {}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fixtures
-# ─────────────────────────────────────────────────────────────────────────────
+#**************#
+#   fixtures   #
+#**************#
 
 @pytest.fixture(scope="module")
 def single_coil_nifti_list():
@@ -265,9 +267,9 @@ def multi_coil_nifti_list():
     return out
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+#*************#
+#   helpers   #
+#*************#
 
 def _infer_outcome(module: BaseModule, backend_enum: Backend) -> str:
     sb = module.SUPPORTED_BACKENDS
@@ -308,9 +310,9 @@ def _run_spatial_module(module, backend_enum) -> float:
     return (time.perf_counter() - t0) * 1000.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main parametrised test
-# ─────────────────────────────────────────────────────────────────────────────
+#****************************#
+#   main parametrised test   #
+#****************************#
 
 @pytest.mark.parametrize("backend_enum", _ALL_BACKENDS,
                          ids=[b.value for b in _ALL_BACKENDS])
@@ -373,41 +375,89 @@ def test_discover_backend_support(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# KspaceReconstructor — standalone function, not a BaseModule
-# ─────────────────────────────────────────────────────────────────────────────
-
+#**************************************************************************************************#
+#                                Class TestKspaceReconstructorTable                                #
+#**************************************************************************************************#
+#                                                                                                  #
+# KspaceReconstructor: standalone PyTorch-only class (needs torchkbnufft to run).                  #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestKspaceReconstructorTable:
     """
-    KspaceReconstructor: standalone PyTorch-only function (needs torchkbnufft).
-    README: NIfTI=—, NumPy=—, PyTorch=✓(fn), TF=—, JAX=—, Keras=—
+    KspaceReconstructor: standalone PyTorch-only class (needs torchkbnufft to run).
+    README: NIfTI=—, NumPy=—, PyTorch=✓, TF=—, JAX=—, Keras=—
     """
 
-    @pytest.mark.skipif(not TORCHKBNUFFT_AVAILABLE,
-                        reason="torchkbnufft not installed")
-    def test_is_standalone_callable(self):
-        from augmentrum.sampling.kspace_reconstructor import reconstruct_with_masking
-        assert callable(reconstruct_with_masking)
-        assert not (isinstance(reconstruct_with_masking, type)
-                    and issubclass(reconstruct_with_masking, BaseModule))
+    def test_importable_without_torchkbnufft(self):
+        """torchkbnufft is imported lazily, so importing the module must not need it."""
+        from augmentrum.sampling.kspace_reconstructor import KspaceReconstructor
+        assert isinstance(KspaceReconstructor, type)
+        assert not issubclass(KspaceReconstructor, BaseModule)
 
-    @pytest.mark.skipif(not (TORCH_AVAILABLE and TORCHKBNUFFT_AVAILABLE),
-                        reason="torch + torchkbnufft required")
-    def test_pytorch_entry_importable(self):
-        from augmentrum.sampling.kspace_reconstructor import reconstruct_with_masking
-        assert callable(reconstruct_with_masking)
+    @pytest.mark.skipif(not TORCH_AVAILABLE, reason="torch not installed")
+    def test_constructs_and_validates_geometry(self):
+        from augmentrum.sampling.kspace_reconstructor import KspaceReconstructor
+
+        recon = KspaceReconstructor(image_size=(64, 64), oversampling_factor=1.5)
+        assert recon.image_size == [64, 64]
+        assert recon.grid_size == [96, 96]
+
+        # a scalar factor is broadcast; a per-axis one is taken as given
+        assert KspaceReconstructor((8, 8, 8), (1.0, 2.0, 1.0)).grid_size == [8, 16, 8]
+
+        with pytest.raises(ValueError):
+            KspaceReconstructor(image_size=(8, 8, 8, 8))
+        with pytest.raises(ValueError):
+            KspaceReconstructor(image_size=(8, 8), oversampling_factor=0.5)
+        with pytest.raises(ValueError):
+            KspaceReconstructor(image_size=(8, 8), oversampling_factor=(1.5, 1.5, 1.5))
+
+    @pytest.mark.skipif(not TORCH_AVAILABLE, reason="torch not installed")
+    def test_flatten_and_normalise_are_backend_free(self):
+        """The coordinate plumbing is plain torch and must work without torchkbnufft."""
+        import torch
+        from augmentrum.sampling.kspace_reconstructor import KspaceReconstructor
+
+        B, S, D, L, C = 2, 3, 2, 5, 1
+        coords = torch.rand(B, S, D, L) * 2 - 1
+        kdata = torch.randn(B, S, C, L, dtype=torch.complex64)
+
+        k_traj, kdata_flat = KspaceReconstructor.flatten(coords, kdata)
+        assert tuple(k_traj.shape) == (B, D, S * L)
+        assert tuple(kdata_flat.shape) == (B, C, S * L)
+
+        # [-1, 1] in, [-pi, pi] out
+        assert torch.allclose(k_traj[0, :, 0], coords[0, 0, :, 0] * torch.pi)
+
+        # cycles/m -> [-1, 1]
+        k_max = 250.0
+        assert torch.allclose(
+            KspaceReconstructor.normalise_trajectory(coords * k_max, k_max), coords
+        )
+
+        with pytest.raises(ValueError):
+            KspaceReconstructor.flatten(coords[0])
+        with pytest.raises(ValueError):
+            KspaceReconstructor.flatten(coords, kdata[:, :-1])
+
+    @pytest.mark.skipif(TORCHKBNUFFT_AVAILABLE,
+                        reason="only meaningful when torchkbnufft is absent")
+    def test_missing_dependency_is_actionable(self):
+        from augmentrum.sampling.kspace_reconstructor import KspaceReconstructor
+        with pytest.raises(ImportError, match="torchkbnufft"):
+            KspaceReconstructor._tkbn()
 
     def test_not_exported_as_augmentation(self):
         import augmentrum.augmentation as pkg
         assert not hasattr(pkg, "KspaceReconstructor"), (
-            "KspaceReconstructor is a standalone function and should not be "
-            "exported from augmentrum.augmentation."
+            "KspaceReconstructor is a standalone class, not an augmentation, and "
+            "should not be exported from augmentrum.augmentation."
         )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Summary tables  (zzz → sorts last, always runs after all discovery tests)
-# ─────────────────────────────────────────────────────────────────────────────
+#*******************************************************************************#
+#   summary tables  (zzz → sorts last, always runs after all discovery tests)   #
+#*******************************************************************************#
 
 def test_zzz_print_summary():
     """

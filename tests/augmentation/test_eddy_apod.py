@@ -9,10 +9,13 @@ from augmentrum.augmentation.apodization import Apodization
 from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 
 
-# ============================================================================
-# EddyCurrent Tests
-# ============================================================================
-
+#**************************************************************************************************#
+#                                  Class TestEddyCurrentCreation                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test EddyCurrent initialization.                                                                 #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestEddyCurrentCreation:
     """Test EddyCurrent initialization."""
 
@@ -41,6 +44,13 @@ class TestEddyCurrentCreation:
             EddyCurrent(mode='invalid')
 
 
+#**************************************************************************************************#
+#                                  Class TestSyntheticEddyCurrent                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test synthetic eddy current.                                                                     #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestSyntheticEddyCurrent:
     """Test synthetic eddy current."""
 
@@ -77,6 +87,13 @@ class TestSyntheticEddyCurrent:
         assert np.allclose(result1[0][:], result2[0][:])
 
 
+#**************************************************************************************************#
+#                                Class TestWaterDerivedEddyCurrent                                 #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test water-derived eddy current.                                                                 #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestWaterDerivedEddyCurrent:
     """Test water-derived eddy current."""
 
@@ -101,10 +118,13 @@ class TestWaterDerivedEddyCurrent:
         assert not np.allclose(ec_data, original_data)
 
 
-# ============================================================================
-# Apodization Tests
-# ============================================================================
-
+#**************************************************************************************************#
+#                                  Class TestApodizationCreation                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test Apodization initialization.                                                                 #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestApodizationCreation:
     """Test Apodization initialization."""
 
@@ -131,6 +151,13 @@ class TestApodizationCreation:
             Apodization(mode='invalid')
 
 
+#**************************************************************************************************#
+#                                 Class TestTruncationApodization                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test truncation apodization.                                                                     #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestTruncationApodization:
     """Test truncation apodization."""
 
@@ -162,6 +189,13 @@ class TestTruncationApodization:
         assert new_size <= original_size // 2 + 1
 
 
+#**************************************************************************************************#
+#                                 Class TestExponentialApodization                                 #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test exponential apodization.                                                                    #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestExponentialApodization:
     """Test exponential apodization."""
 
@@ -208,10 +242,13 @@ class TestExponentialApodization:
         assert result_data is not None
 
 
-# ============================================================================
-# Integration Tests
-# ============================================================================
-
+#**************************************************************************************************#
+#                                  Class TestEddyApodIntegration                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Integration tests.                                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestEddyApodIntegration:
     """Integration tests."""
 

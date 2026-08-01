@@ -96,13 +96,14 @@ no manual conversion needed.
 | `BaselineAugmentation` | random_walk, bspline, polynomial                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `CoilAverageSampler` | random, deterministic                                   |   ✓   | ~ | ~ | ~ | ~ | ~ |
 | `EddyCurrent` | synthetic, water                                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `FrequencyShift` | —                                                       |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `FrequencyShift` | shift_hz                                                |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `GaussianNoise` | sigma, sigma_frac, snr, snr_db                          |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `KspaceReconstructor` | NUFFT + density compensation                            |   —   | — | ✓ | — | — | — |
+| `KspaceUndersampling[cartesian, gridded]` | trajectory-derived Cartesian masks   |   ~   | ✓ | ✓ | ~ | ~ | ~ |
+| `KspaceUndersampling[nufft]` | samples the real trajectory ‖                     |   ~   | ~ | ✓ | ~ | ~ | ~ |
 | `LineBroadening` | lorentzian, gaussian, voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `NIfTI_RawProcessor` | coil combination, alignment, averaging, ECC, phase/freq |   ✓   | ~ | ~ | ~ | ~ | ~ |
 | `PhaseShift` | zero_order, first_order                                 |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `ResidualWater` | —                                                       |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `ResidualWater` | lorentzian                                              |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `SpatialAugmentations` | 2-D / 3-D affine, flip, zoom, shear                     |  ✓ ‡  | ✓ ‡ | ✓ | ~ | ~ | ~ |
 | `SpuriousEchoes` | replica, hybrid                                         |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `ZeroFill` | pad FID to target length                                |   ✓   | ✓† | ✓† | ✓† | ✓† | ✓† |
@@ -111,10 +112,13 @@ no manual conversion needed.
 **~** automatic — the base class routes the call through the NIfTI-list path; the result is returned in the original backend format. Functional, but not natively differentiable.  
 **—** not supported / not applicable.
 
+Modes that differ in backend support get a row each, named `Module[mode]`.
+
 > **†** `Apodization[truncate]` and `ZeroFill` both change `N_PTS`. Because `target_pts` / `n_pts` is a module-level scalar, the **same length is applied uniformly to every batch member** — the output is still a uniform tensor. On non-NIfTI backends the base class detects the shape change, rebuilds each NIfTI_MRS object at the new length, and emits a `RuntimeWarning`.
 
 > **‡** `SpatialAugmentations` uses `F.grid_sample` (PyTorch) internally; NIfTI-list and NumPy inputs are converted to PyTorch for processing and converted back. TensorFlow, JAX, and Keras are handled by the base-class automatic routing (~).
 
+> **‖** `KspaceUndersampling[nufft]` measures at the coordinates the trajectory actually visits and inverts with a density-compensated adjoint, instead of masking the Cartesian grid. Needs the optional `torchkbnufft` dependency.
 
 ---
 

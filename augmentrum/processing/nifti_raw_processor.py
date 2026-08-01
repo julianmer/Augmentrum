@@ -25,12 +25,10 @@ from augmentrum.core import Backend
 
 
 #**************************************************************************************************#
-#                                    Class NIfTI_RawProcessor                                      #
+#                                     Class NIfTI_RawProcessor                                     #
 #**************************************************************************************************#
 #                                                                                                  #
-# Processes raw MRS data using FSL-MRS functions that operate on NIfTI-MRS objects.                #
-# Handles: coil combination, alignment, outlier removal, averaging, eddy current correction,       #
-# truncation, water removal, frequency shifting, and phase correction.                             #
+# Processes raw MRS data using FSL-MRS functions on NIfTI-MRS objects.                             #
 #                                                                                                  #
 #**************************************************************************************************#
 class NIfTI_RawProcessor(BaseModule):

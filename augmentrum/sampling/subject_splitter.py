@@ -19,10 +19,10 @@ import torch
 
 
 #**************************************************************************************************#
-#                                          Class SubjectSampler                                    #
+#                                      Class SubjectSplitter                                       #
 #**************************************************************************************************#
 #                                                                                                  #
-# Simplistic subject splitter for train/val/test splits. Supports random splitting.                #
+# Splits subjects into train/val/test sets.                                                        #
 #                                                                                                  #
 #**************************************************************************************************#
 class SubjectSplitter:

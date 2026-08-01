@@ -1,3 +1,18 @@
+####################################################################################################
+#                                           __init__.py                                            #
+####################################################################################################
+#                                                                                                  #
+# Authors: J. T. LaMaster (john.t.lamaster@gmail.com)                                              #
+#          J. P. Merkofer (j.p.merkofer@tue.nl)                                                    #
+#          K. C. Igwe (kci2104@columbia.edu)                                                       #
+#                                                                                                  #
+# Created: 2025-10-25                                                                              #
+#                                                                                                  #
+# Purpose: Package entry point. Re-exports the public API: the Augmentrum container, the pipeline, #
+#          and every augmentation module.                                                          #
+#                                                                                                  #
+####################################################################################################
+
 """
 Augmentrum - A Data Augmentation Package for MR Spectroscopy
 
@@ -10,6 +25,9 @@ __author__ = "John T. LaMaster, Julian P. Merkofer, Kay C. Igwe"
 __email__ = "j.p.merkofer@tue.nl"
 
 # Main API
+#*************#
+#   imports   #
+#*************#
 from augmentrum.core import Augmentrum, NIfTI_MRS_Plus, Backend, BaseModule, AugmentationPipeline
 
 __all__ = [

@@ -70,9 +70,9 @@ from augmentrum import Augmentrum, Backend
 from augmentrum.dataset.cows import COWSDataModule
 
 
-# ============================================================================
-# VISUALIZATION HELPERS
-# ============================================================================
+#***************************#
+#   visualization helpers   #
+#***************************#
 
 def plot_batch_variety(batch_data, title, max_plots=6):
     """
@@ -211,9 +211,9 @@ def plot_overlay(nifti_list, labels, title):
     return fig
 
 
-# ============================================================================
-# PART 1: LOADING DATA FOR SPLITTING
-# ============================================================================
+#****************************************#
+#   part 1: loading data for splitting   #
+#****************************************#
 
 print("\n" + "="*80)
 print(" PART 1: LOADING DATA")
@@ -247,9 +247,9 @@ print(f"  This is enough for a 70/15/15 train/val/test split!")
 print(f"  Subject IDs: {subject_names[:5]}...\n")
 
 
-# ============================================================================
-# PART 2: CREATING SPLITS
-# ============================================================================
+#*****************************#
+#   part 2: creating splits   #
+#*****************************#
 
 print("="*80)
 print(" PART 2: CREATING TRAIN/VAL/TEST SPLITS")
@@ -331,9 +331,9 @@ This ensures you can reproduce your experiments exactly.
 """)
 
 
-# ============================================================================
-# PART 3: DIFFERENT PIPELINES PER SPLIT
-# ============================================================================
+#*******************************************#
+#   part 3: different pipelines per split   #
+#*******************************************#
 
 print("\n" + "="*80)
 print(" PART 3: DIFFERENT AUGMENTATION STRATEGIES PER SPLIT")
@@ -407,9 +407,9 @@ This setup ensures:
 """)
 
 
-# ============================================================================
-# PART 4: UNDERSTANDING MODES - ON-THE-FLY VS FIXED
-# ============================================================================
+#*******************************************************#
+#   part 4: understanding modes - on-the-fly vs fixed   #
+#*******************************************************#
 
 print("\n" + "="*80)
 print(" PART 4: ON-THE-FLY VS FIXED MODE - THE CRITICAL DIFFERENCE")
@@ -510,9 +510,9 @@ KEY TAKEAWAY:
 """)
 
 
-# ============================================================================
-# PART 5: USING DATALOADERS
-# ============================================================================
+#*******************************#
+#   part 5: using dataloaders   #
+#*******************************#
 
 print("\n" + "="*80)
 print(" PART 5: USING DATALOADERS FOR BATCH GENERATION")
@@ -611,9 +611,9 @@ for epoch in range(num_epochs):
 """)
 
 
-# ============================================================================
-# PART 6: PROVENANCE LOGGING VS VOLATILE MODE
-# ============================================================================
+#*************************************************#
+#   part 6: provenance logging vs volatile mode   #
+#*************************************************#
 
 print("\n" + "="*80)
 print(" PART 6: PROVENANCE LOGGING VS VOLATILE MODE")
@@ -710,9 +710,9 @@ RECOMMENDATION:
 """)
 
 
-# ============================================================================
-# PART 7: COMPLETE TRAINING EXAMPLE
-# ============================================================================
+#***************************************#
+#   part 7: complete training example   #
+#***************************************#
 
 print("\n" + "="*80)
 print(" PART 7: PUTTING IT ALL TOGETHER - COMPLETE TRAINING SETUP")
@@ -726,15 +726,15 @@ augmenter_complete = Augmentrum(
     data=data_list,
     water=water_list,
 
-    # -------------------------
-    # 1. SPLIT CONFIGURATION
-    # -------------------------
+    #****************************#
+    #   1. split configuration   #
+    #****************************#
     split_fractions={'val': 0.15, 'test': 0.15},  # 70/15/15 split
     seed=42,  # Reproducible splits
 
-    # -------------------------
-    # 2. SPLIT-SPECIFIC PIPELINES
-    # -------------------------
+    #*********************************#
+    #   2. split-specific pipelines   #
+    #*********************************#
     pipelines={
         'train': [
             'processing',
@@ -747,18 +747,18 @@ augmenter_complete = Augmentrum(
         'test': None
     },
 
-    # -------------------------
-    # 3. SPLIT-SPECIFIC MODES
-    # -------------------------
+    #*****************************#
+    #   3. split-specific modes   #
+    #*****************************#
     modes={
         'train': 'on-the-fly',  # Infinite variety
         'val': 'fixed',         # Consistent evaluation
         'test': 'fixed'         # Reproducible results
     },
 
-    # -------------------------
-    # 4. AUGMENTATION PARAMETERS
-    # -------------------------
+    #********************************#
+    #   4. augmentation parameters   #
+    #********************************#
     # These ranges are sampled randomly for training
     zero_order_deg=(-45, 45),      # Phase ±45°
     first_order_deg=(-20, 20),     # First-order phase
@@ -767,9 +767,9 @@ augmenter_complete = Augmentrum(
     gb_hz=(0, 1.0),                # Gaussian broadening
     sigma_frac=(0.005, 0.03),      # Noise 0.5-3%
 
-    # -------------------------
-    # 5. GENERAL SETTINGS
-    # -------------------------
+    #*************************#
+    #   5. general settings   #
+    #*************************#
     batch_size=32,      # Adjust for your GPU
     backend='numpy',    # Or 'pytorch', 'tensorflow'
     volatile=True       # Fast, no logging
@@ -838,9 +838,9 @@ with torch.no_grad():
 """)
 
 
-# ============================================================================
-# PART 8: PRE-PIPELINE - PERFORMANCE OPTIMIZATION
-# ============================================================================
+#*****************************************************#
+#   part 8: pre-pipeline - performance optimization   #
+#*****************************************************#
 
 print("\n" + "="*80)
 print(" PART 8: PRE-PIPELINE FOR FASTER TRAINING")
@@ -942,9 +942,9 @@ This gives maximum flexibility for different training strategies!
 """)
 
 
-# ============================================================================
-# SUMMARY
-# ============================================================================
+#*************#
+#   summary   #
+#*************#
 
 print("\n" + "="*80)
 print(" 🎉 TUTORIAL 02 COMPLETE!")

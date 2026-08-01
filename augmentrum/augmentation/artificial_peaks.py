@@ -11,6 +11,9 @@
 #                                                                                                  #
 ####################################################################################################
 
+#*************#
+#   imports   #
+#*************#
 import numpy as np
 from typing import Optional, List, Dict
 from augmentrum.core.base_module import BaseModule
@@ -19,6 +22,13 @@ from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from augmentrum.utils.tensor_ops import fft, ifft, fftshift, ifftshift, to_numpy, match_backend
 
 
+#**************************************************************************************************#
+#                                      Class ArtificialPeaks                                       #
+#**************************************************************************************************#
+#                                                                                                  #
+# Add artificial contaminant peaks to MRS data.                                                    #
+#                                                                                                  #
+#**************************************************************************************************#
 class ArtificialPeaks(BaseModule):
     """
     Add artificial contaminant peaks to MRS data.

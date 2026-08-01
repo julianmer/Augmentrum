@@ -9,6 +9,13 @@ from augmentrum.sampling.coil_average_sampler import CoilAverageSampler
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 
 
+#**************************************************************************************************#
+#                                Class TestSubjectSplitterCreation                                 #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test SubjectSplitter initialization.                                                             #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestSubjectSplitterCreation:
     """Test SubjectSplitter initialization."""
 
@@ -48,6 +55,13 @@ class TestSubjectSplitterCreation:
         assert splitter is not None
 
 
+#**************************************************************************************************#
+#                                  Class TestSubjectSplitterSplit                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test SubjectSplitter split functionality.                                                        #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestSubjectSplitterSplit:
     """Test SubjectSplitter split functionality."""
 
@@ -159,6 +173,13 @@ class TestSubjectSplitterSplit:
         assert len(test_data) == len(test_water)
 
 
+#**************************************************************************************************#
+#                                Class TestSubjectSplitterEdgeCases                                #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test edge cases for SubjectSplitter.                                                             #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestSubjectSplitterEdgeCases:
     """Test edge cases for SubjectSplitter."""
 
@@ -230,6 +251,13 @@ class TestSubjectSplitterEdgeCases:
         assert len(train_data) + len(val_data) == len(dummy_nifti_list)
 
 
+#**************************************************************************************************#
+#                                Class TestSubjectSplitterBackends                                 #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test SubjectSplitter with different backends.                                                    #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestSubjectSplitterBackends:
     """Test SubjectSplitter with different backends."""
 
@@ -351,10 +379,13 @@ class TestSubjectSplitterBackends:
         assert all(hasattr(item, 'shape') for item in train_data)  # NIFTI_MRS objects
 
 
-# ============================================================================
-# CoilAverageSampler Tests
-# ============================================================================
-
+#**************************************************************************************************#
+#                               Class TestCoilAverageSamplerCreation                               #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test CoilAverageSampler initialization.                                                          #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestCoilAverageSamplerCreation:
     """Test CoilAverageSampler initialization."""
 
@@ -379,6 +410,13 @@ class TestCoilAverageSamplerCreation:
         assert sampler.supports_backend(Backend.NIFTI_LIST)
 
 
+#**************************************************************************************************#
+#                              Class TestCoilAverageSamplerProcessing                              #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test CoilAverageSampler processing.                                                              #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestCoilAverageSamplerProcessing:
     """Test CoilAverageSampler processing."""
 
@@ -442,6 +480,13 @@ class TestCoilAverageSamplerProcessing:
         assert result_water is not None
 
 
+#**************************************************************************************************#
+#                                Class TestCoilAverageSamplerModes                                 #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test different modes.                                                                            #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestCoilAverageSamplerModes:
     """Test different modes."""
 
@@ -481,6 +526,13 @@ class TestCoilAverageSamplerModes:
         assert result_data is not None
 
 
+#**************************************************************************************************#
+#                             Class TestCoilAverageSamplerIntegration                              #
+#**************************************************************************************************#
+#                                                                                                  #
+# Integration tests for CoilAverageSampler.                                                        #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestCoilAverageSamplerIntegration:
     """Integration tests for CoilAverageSampler."""
 
@@ -511,6 +563,13 @@ class TestCoilAverageSamplerIntegration:
         assert result_data is not None
 
 
+#**************************************************************************************************#
+#                               Class TestCoilAverageSamplerBackends                               #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test CoilAverageSampler with different backends.                                                 #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestCoilAverageSamplerBackends:
     """Test CoilAverageSampler with different backends."""
 

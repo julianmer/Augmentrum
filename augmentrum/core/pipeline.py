@@ -11,6 +11,9 @@
 #                                                                                                  #
 ####################################################################################################
 
+#*************#
+#   imports   #
+#*************#
 from typing import List, Optional, Tuple
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 from augmentrum.core.base_module import BaseModule
@@ -21,7 +24,7 @@ import warnings
 #                                    Class AugmentationPipeline                                    #
 #**************************************************************************************************#
 #                                                                                                  #
-# Chains multiple augmentation/processing steps with backend compatibility checking.               #
+# Chains multiple augmentation steps in sequence with backend compatibility.                       #
 #                                                                                                  #
 #**************************************************************************************************#
 class AugmentationPipeline:

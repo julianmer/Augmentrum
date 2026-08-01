@@ -23,9 +23,9 @@ from augmentrum.utils.plotting import (
 )
 
 
-# ==============================================================================
-# Fixtures
-# ==============================================================================
+#**************#
+#   fixtures   #
+#**************#
 
 @pytest.fixture
 def mock_nifti_mrs():
@@ -96,9 +96,9 @@ def nifti_mrs_plus(mock_nifti_mrs_list):
     )
 
 
-# ==============================================================================
-# Test Helper Functions
-# ==============================================================================
+#***************************#
+#   test helper functions   #
+#***************************#
 
 def test_plot_spectrum_on_axis(mock_nifti_mrs):
     """Test the low-level plotting function."""
@@ -141,9 +141,9 @@ def test_plot_single_spectrum(mock_nifti_mrs):
     plt.close(fig)
 
 
-# ==============================================================================
-# Test NIfTI_MRS_Plus.plot() Method
-# ==============================================================================
+#***************************************#
+#   test nifti_mrs_plus.plot() method   #
+#***************************************#
 
 def test_nifti_plus_plot_single_spectrum(nifti_mrs_plus):
     """Test plotting a single spectrum from batch."""
@@ -194,9 +194,9 @@ def test_nifti_plus_plot_empty_batch():
         empty_nifti_plus.plot()
 
 
-# ==============================================================================
-# Test NIfTI_MRS_Plus.plot_comparison() Method
-# ==============================================================================
+#**************************************************#
+#   test nifti_mrs_plus.plot_comparison() method   #
+#**************************************************#
 
 def test_nifti_plus_plot_comparison(nifti_mrs_plus):
     """Test comparison overlay plotting."""
@@ -242,9 +242,9 @@ def test_nifti_plus_plot_comparison_custom_colors(nifti_mrs_plus):
     plt.close(fig)
 
 
-# ==============================================================================
-# Test NIfTI_MRS_Plus.plot_grid() Method
-# ==============================================================================
+#********************************************#
+#   test nifti_mrs_plus.plot_grid() method   #
+#********************************************#
 
 def test_nifti_plus_plot_grid(nifti_mrs_plus):
     """Test detailed grid plotting."""
@@ -293,9 +293,9 @@ def test_nifti_plus_plot_grid_max_display(nifti_mrs_plus):
     plt.close(fig)
 
 
-# ==============================================================================
-# Test Batch-Aware Visualization
-# ==============================================================================
+#************************************#
+#   test batch-aware visualization   #
+#************************************#
 
 def test_vis_nifti_mrs_plus_single(nifti_mrs_plus):
     """Test vis_nifti_mrs_plus with single spectrum."""
@@ -329,9 +329,9 @@ def test_vis_nifti_mrs_plus_invalid_input():
         vis_nifti_mrs_plus("not a nifti object")
 
 
-# ==============================================================================
-# Test plot_batch_comparison Function
-# ==============================================================================
+#*****************************************#
+#   test plot_batch_comparison function   #
+#*****************************************#
 
 def test_plot_batch_comparison_function(nifti_mrs_plus):
     """Test standalone plot_batch_comparison function."""
@@ -346,9 +346,9 @@ def test_plot_batch_comparison_function(nifti_mrs_plus):
     plt.close(fig)
 
 
-# ==============================================================================
-# Test plot_batch_grid_detailed Function
-# ==============================================================================
+#********************************************#
+#   test plot_batch_grid_detailed function   #
+#********************************************#
 
 def test_plot_batch_grid_detailed_function(nifti_mrs_plus):
     """Test standalone plot_batch_grid_detailed function."""
@@ -363,9 +363,9 @@ def test_plot_batch_grid_detailed_function(nifti_mrs_plus):
     plt.close(fig)
 
 
-# ==============================================================================
-# Test quick_plot Convenience Function
-# ==============================================================================
+#******************************************#
+#   test quick_plot convenience function   #
+#******************************************#
 
 def test_quick_plot(nifti_mrs_plus):
     """Test quick_plot convenience function."""
@@ -376,9 +376,9 @@ def test_quick_plot(nifti_mrs_plus):
     plt.close(fig)
 
 
-# ==============================================================================
-# Test PPM Axis Calculation
-# ==============================================================================
+#*******************************#
+#   test ppm axis calculation   #
+#*******************************#
 
 def test_ppm_axis_calculation(mock_nifti_mrs):
     """Test that PPM axis is calculated correctly."""
@@ -398,9 +398,9 @@ def test_ppm_axis_calculation(mock_nifti_mrs):
     plt.close(fig)
 
 
-# ==============================================================================
-# Test FFT Convention
-# ==============================================================================
+#*************************#
+#   test fft convention   #
+#*************************#
 
 def test_fft_convention(mock_nifti_mrs):
     """Test that FFT is applied correctly (not IFFT)."""
@@ -419,9 +419,9 @@ def test_fft_convention(mock_nifti_mrs):
     assert not np.allclose(spec, spec_ifft), "Should use FFT not IFFT"
 
 
-# ==============================================================================
-# Test Multi-Dimensional Data Handling
-# ==============================================================================
+#******************************************#
+#   test multi-dimensional data handling   #
+#******************************************#
 
 def test_multidimensional_data_averaging():
     """Test that multi-dimensional data is averaged correctly."""
@@ -452,9 +452,9 @@ def test_multidimensional_data_averaging():
     plt.close(fig)
 
 
-# ==============================================================================
-# Test Figure Attributes
-# ==============================================================================
+#****************************#
+#   test figure attributes   #
+#****************************#
 
 def test_plot_figure_size(nifti_mrs_plus):
     """Test custom figure size."""
@@ -484,9 +484,9 @@ def test_plot_title(nifti_mrs_plus):
     plt.close(fig)
 
 
-# ==============================================================================
-# Test Edge Cases
-# ==============================================================================
+#*********************#
+#   test edge cases   #
+#*********************#
 
 def test_plot_single_element_batch():
     """Test plotting a batch with only one element."""
@@ -541,9 +541,9 @@ def test_plot_large_batch():
     plt.close(fig)
 
 
-# ==============================================================================
-# Integration Test
-# ==============================================================================
+#**********************#
+#   integration test   #
+#**********************#
 
 def test_plotting_integration(nifti_mrs_plus):
     """Integration test for all plotting methods."""

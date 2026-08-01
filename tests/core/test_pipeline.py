@@ -17,6 +17,13 @@ from augmentrum.core import BaseModule, NIfTI_MRS_Plus, Backend
 from augmentrum.core.pipeline import AugmentationPipeline
 
 
+#**************************************************************************************************#
+#                                    Class TestPipelineCreation                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test pipeline creation and initialization.                                                       #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPipelineCreation:
     """Test pipeline creation and initialization."""
 
@@ -56,6 +63,13 @@ class TestPipelineCreation:
         assert pipeline.steps[0] is module
 
 
+#**************************************************************************************************#
+#                                   Class TestPipelineExecution                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test pipeline execution.                                                                         #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPipelineExecution:
     """Test pipeline execution."""
 
@@ -151,6 +165,13 @@ class TestPipelineExecution:
         assert len(result_data) == 3
 
 
+#**************************************************************************************************#
+#                              Class TestPipelineBackendCompatibility                              #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test pipeline backend compatibility checking.                                                    #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPipelineBackendCompatibility:
     """Test pipeline backend compatibility checking."""
 
@@ -213,6 +234,13 @@ class TestPipelineBackendCompatibility:
         assert isinstance(result_data, NIfTI_MRS_Plus)
 
 
+#**************************************************************************************************#
+#                               Class TestPipelineBackendConversion                                #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test automatic backend conversion.                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPipelineBackendConversion:
     """Test automatic backend conversion."""
 
@@ -255,6 +283,13 @@ class TestPipelineBackendConversion:
         assert CheckDataModule.received_shape[0] == len(dummy_nifti_list)
 
 
+#**************************************************************************************************#
+#                                     Class TestPipelineKwargs                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test passing kwargs through pipeline.                                                            #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPipelineKwargs:
     """Test passing kwargs through pipeline."""
 
@@ -300,6 +335,13 @@ class TestPipelineKwargs:
         assert received_params == ['propagated', 'propagated']
 
 
+#**************************************************************************************************#
+#                                 Class TestPipelineErrorHandling                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test pipeline error handling.                                                                    #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPipelineErrorHandling:
     """Test pipeline error handling."""
 
@@ -329,6 +371,13 @@ class TestPipelineErrorHandling:
         assert result_water is None
 
 
+#**************************************************************************************************#
+#                                      Class TestPipelineRepr                                      #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test pipeline string representation.                                                             #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPipelineRepr:
     """Test pipeline string representation."""
 
@@ -360,6 +409,13 @@ class TestPipelineRepr:
         assert 'Module2' in repr_str
 
 
+#**************************************************************************************************#
+#                                  Class TestPipelineIntegration                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Integration tests with real-world scenarios.                                                     #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPipelineIntegration:
     """Integration tests with real-world scenarios."""
 

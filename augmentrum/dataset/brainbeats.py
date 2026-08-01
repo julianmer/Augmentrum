@@ -32,13 +32,9 @@ from augmentrum.processing.utils import (own_nifti_coil_combination,
                                          resample_signal_fir, resample_signal_lp)
 
 
-#**************************************************************************************************#
-#                                     Function: BrainBeatsData                                     #
-#**************************************************************************************************#
-#                                                                                                  #
-# Helper function to load the Brain Beats study data and create an Augmentrum instance.            #
-#                                                                                                  #
-#**************************************************************************************************#
+#****************************#
+#   brainbeats data loader   #
+#****************************#
 def BrainBeatsData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
                    n_coils=(1, None), n_averages=(1, None), pipelines=None,
                    modes=None, backend='pytorch', volatile=False, **kwargs):
@@ -93,11 +89,7 @@ def BrainBeatsData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
 
 
 #**************************************************************************************************#
-#                                     Class BrainBeatsDataModule                                   #
-#**************************************************************************************************#
-#                                                                                                  #
-# The data module to load the brain beats study data.                                              #
-#                                                                                                  #
+#                                    Class BrainBeatsDataModule                                    #
 #**************************************************************************************************#
 class BrainBeatsDataModule():
 

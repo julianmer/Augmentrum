@@ -10,6 +10,9 @@
 #                                                                                                  #
 ####################################################################################################
 
+#*************#
+#   imports   #
+#*************#
 import numpy as np
 from enum import Enum
 from typing import List, Dict, Any, Optional, Union
@@ -46,6 +49,13 @@ except ImportError:
 from fsl_mrs.core.nifti_mrs import NIFTI_MRS
 
 
+#**************************************************************************************************#
+#                                          Class Backend                                           #
+#**************************************************************************************************#
+#                                                                                                  #
+# Supported data backends.                                                                         #
+#                                                                                                  #
+#**************************************************************************************************#
 class Backend(Enum):
     """Supported data backends."""
     NIFTI_LIST = "nifti_list"  # List of NIFTI_MRS objects
@@ -56,6 +66,13 @@ class Backend(Enum):
     KERAS = "keras"             # Keras tensors (backed by TF/JAX)
 
 
+#**************************************************************************************************#
+#                                       Class NIfTI_MRS_Plus                                       #
+#**************************************************************************************************#
+#                                                                                                  #
+# Handles batch-aware NIfTI_MRS data.                                                              #
+#                                                                                                  #
+#**************************************************************************************************#
 class NIfTI_MRS_Plus:
     """
     Handles batch-aware NIfTI_MRS data.
@@ -729,9 +746,9 @@ class NIfTI_MRS_Plus:
         return (f"NIfTI_MRS_Plus(n_subjects={self.n_subjects}, shape={self.shape}, "
                 f"backend={self._backend.value}, volatile={self.volatile})")
 
-    # ===========================================================================================
-    # PLOTTING METHODS
-    # ===========================================================================================
+    #**********************#
+    #   plotting methods   #
+    #**********************#
     
     def plot(
         self,
@@ -875,9 +892,9 @@ class NIfTI_MRS_Plus:
             figsize=figsize
         )
 
-    # ===========================================================================================
-    # EXPORT METHODS
-    # ===========================================================================================
+    #********************#
+    #   export methods   #
+    #********************#
 
     def save_nifti(self, output_dir: str, prefix: str = "augmented", zero_pad: int = 4):
         """

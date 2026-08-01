@@ -15,6 +15,13 @@ from augmentrum import Augmentrum
 from augmentrum.core import Backend, NIfTI_MRS_Plus
 
 
+#**************************************************************************************************#
+#                                   Class TestAugmentrumCreation                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test Augmentrum initialization.                                                                  #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestAugmentrumCreation:
     """Test Augmentrum initialization."""
 
@@ -71,6 +78,13 @@ class TestAugmentrumCreation:
         assert len(augmenter.splits['val'][0]) >= 1
 
 
+#**************************************************************************************************#
+#                                   Class TestAugmentrumPipeline                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test pipeline functionality.                                                                     #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestAugmentrumPipeline:
     """Test pipeline functionality."""
 
@@ -90,6 +104,13 @@ class TestAugmentrumPipeline:
         assert len(augmenter.pipelines['train'].steps) == 0
 
 
+#**************************************************************************************************#
+#                               Class TestAugmentrumParameterRanges                                #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test tuple range support for parameters (NEW in v0.0.1).                                         #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestAugmentrumParameterRanges:
     """Test tuple range support for parameters (NEW in v0.0.1)."""
 
@@ -191,6 +212,13 @@ class TestAugmentrumParameterRanges:
         assert augmenter is not None
 
 
+#**************************************************************************************************#
+#                                 Class TestAugmentrumDataloaders                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test dataloader generation.                                                                      #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestAugmentrumDataloaders:
     """Test dataloader generation."""
 
@@ -256,6 +284,13 @@ class TestAugmentrumDataloaders:
         assert test_loader is not None
 
 
+#**************************************************************************************************#
+#                                 Class TestAugmentrumIntegration                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Integration tests for complete workflows.                                                        #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestAugmentrumIntegration:
     """Integration tests for complete workflows."""
 
@@ -276,6 +311,13 @@ class TestAugmentrumIntegration:
         assert loader is not None
 
 
+#**************************************************************************************************#
+#                                  Class TestAugmentrumEdgeCases                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test edge cases and error handling.                                                              #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestAugmentrumEdgeCases:
     """Test edge cases and error handling."""
 
@@ -298,6 +340,13 @@ class TestAugmentrumEdgeCases:
         assert len(augmenter.splits['train'][1]) == 2
 
 
+#**************************************************************************************************#
+#                                     Class TestAugmentrumRepr                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test string representation.                                                                      #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestAugmentrumRepr:
     """Test string representation."""
 

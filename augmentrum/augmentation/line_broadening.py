@@ -11,6 +11,9 @@
 #                                                                                                  #
 ####################################################################################################
 
+#*************#
+#   imports   #
+#*************#
 import math
 import numpy as np
 from typing import Optional, List
@@ -19,6 +22,13 @@ from augmentrum.core.base_module import BaseModule
 from augmentrum.utils.tensor_ops import match_backend
 
 
+#**************************************************************************************************#
+#                                       Class LineBroadening                                       #
+#**************************************************************************************************#
+#                                                                                                  #
+# Apply line broadening to MRS data.                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class LineBroadening(BaseModule):
     """
     Apply line broadening to MRS data.
@@ -128,15 +138,14 @@ class LineBroadening(BaseModule):
 
         return result, water_array
 
-    # ------------------------------------------------------------------
-    # Envelope helpers — fully backend-agnostic via keras.ops
-    #
+    #*************************************************************#
+    #   envelope helpers — fully backend-agnostic via keras.ops   #
+    #*************************************************************#
     # The time axis `t` is a plain numpy array (no gradients needed for
     # coordinates).  The envelope is also numpy.  The final multiplication
     # `fid * envelope` is handled by the framework's own __mul__, which
     # auto-promotes the numpy envelope to the correct backend and keeps
     # the fid tensor on its original device / graph.
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _make_time_envelope(fid, sw_hz, lb_hz, gb_hz):

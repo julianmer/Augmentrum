@@ -241,6 +241,14 @@ def test_gaussian_noise_snr_mode(backend_enum, backend_name, single_coil_nifti_l
 
 # ── SpatialAugmentations (uses 4-D/5-D image tensors, not MRS FIDs) ──────────
 
+
+#**************************************************************************************************#
+#                              Class TestSpatialAugmentationsBackends                              #
+#**************************************************************************************************#
+#                                                                                                  #
+# SpatialAugmentations — native on NIFTI_LIST / NUMPY / PYTORCH only.                              #
+#                                                                                                  #
+#**************************************************************************************************#
 @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch required")
 class TestSpatialAugmentationsBackends:
     """SpatialAugmentations — native on NIFTI_LIST / NUMPY / PYTORCH only."""

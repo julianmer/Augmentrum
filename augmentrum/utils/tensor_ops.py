@@ -6,52 +6,47 @@
 #                                                                                                  #
 # Created: 2026-03-27                                                                              #
 #                                                                                                  #
-# Purpose: Backend-agnostic tensor operations for MRS signal processing.                           #
-#                                                                                                  #
-# Follows the zea philosophy: write once, works with any backend.                                  #
-# Detects the array library from the tensor type and dispatches                                    #
-# to numpy / torch / jax transparently.  No keras dependency.                                      #
-#                                                                                                  #
-# Module authors just write:                                                                       #
-#     from augmentrum.utils.tensor_ops import fft, ifft, fftshift, ifftshift                       #
-#                                                                                                  #
-#     spectrum = fftshift(ifft(fid))   # works with ANY tensor type                                #
-#     fid_out  = fft(ifftshift(spectrum))                                                          #
+# Purpose: Backend-agnostic tensor operations for MRS signal processing. Detects the array         #
+#          library from the tensor type and dispatches to numpy / torch / jax transparently,       #
+#          so callers write one expression that works with any tensor type.                        #
 #                                                                                                  #
 # The dispatch happens *once* per call inside these helpers — callers never                        #
 # need to check tensor types themselves.                                                           #
 #                                                                                                  #
 ####################################################################################################
 
+
+#*************#
+#   imports   #
+#*************#
 import numpy as np
 
 
-# ============================================================================
-# Backend detection
-# ============================================================================
+#***********************#
+#   backend detection   #
+#***********************#
 
-def _is_torch(x):
+def is_torch(x):
     """True if *x* is a PyTorch tensor."""
     return type(x).__module__.split(".")[0] == "torch"
 
 
-def _is_jax(x):
+def is_jax(x):
     """True if *x* is a JAX array."""
     return type(x).__module__.split(".")[0] in ("jax", "jaxlib")
 
 
-def _is_tf(x):
+def is_tf(x):
     """True if *x* is a TensorFlow tensor."""
     return type(x).__module__.split(".")[0] == "tensorflow"
 
 
-# ============================================================================
-# Complex FFT / IFFT
-#
+#************************#
+#   complex fft / ifft   #
+#************************#
 # All three backends (numpy, torch >= 1.7, jax) support native complex-valued
 # FFT with the same semantics, so we just dispatch to the right module.
 # No need for the keras (real, imag)-tuple workaround.
-# ============================================================================
 
 def fft(x):
     """Complex-to-complex FFT along the last axis (any backend).
@@ -64,10 +59,10 @@ def fft(x):
     Returns:
         Complex tensor with the same shape as *x*.
     """
-    if _is_torch(x):
+    if is_torch(x):
         import torch
         return torch.fft.fft(x)
-    if _is_jax(x):
+    if is_jax(x):
         import jax.numpy as jnp
         return jnp.fft.fft(x)
     return np.fft.fft(x)
@@ -84,20 +79,19 @@ def ifft(x):
     Returns:
         Complex tensor with the same shape as *x*.
     """
-    if _is_torch(x):
+    if is_torch(x):
         import torch
         return torch.fft.ifft(x)
-    if _is_jax(x):
+    if is_jax(x):
         import jax.numpy as jnp
         return jnp.fft.ifft(x)
     return np.fft.ifft(x)
 
 
-# ============================================================================
-# fftshift / ifftshift
-#
+#**************************#
+#   fftshift / ifftshift   #
+#**************************#
 # numpy / jax use ``axes=`` keyword; torch uses ``dim=``.
-# ============================================================================
 
 def fftshift(x, axis=-1):
     """Shift zero-frequency component to the centre (like ``np.fft.fftshift``).
@@ -109,10 +103,10 @@ def fftshift(x, axis=-1):
     Returns:
         Shifted tensor.
     """
-    if _is_torch(x):
+    if is_torch(x):
         import torch
         return torch.fft.fftshift(x, dim=axis)
-    if _is_jax(x):
+    if is_jax(x):
         import jax.numpy as jnp
         return jnp.fft.fftshift(x, axes=axis)
     return np.fft.fftshift(x, axes=axis)
@@ -128,18 +122,18 @@ def ifftshift(x, axis=-1):
     Returns:
         Shifted tensor.
     """
-    if _is_torch(x):
+    if is_torch(x):
         import torch
         return torch.fft.ifftshift(x, dim=axis)
-    if _is_jax(x):
+    if is_jax(x):
         import jax.numpy as jnp
         return jnp.fft.ifftshift(x, axes=axis)
     return np.fft.ifftshift(x, axes=axis)
 
 
-# ============================================================================
-# Conversion helpers
-# ============================================================================
+#************************#
+#   conversion helpers   #
+#************************#
 
 def to_numpy(x):
     """Convert *any* backend tensor to a NumPy ``ndarray``.
@@ -155,7 +149,7 @@ def to_numpy(x):
     """
     if isinstance(x, np.ndarray):
         return x
-    if _is_torch(x):
+    if is_torch(x):
         return x.detach().cpu().numpy()
     # JAX, TF, and anything with __array__ protocol
     return np.asarray(x)
@@ -186,18 +180,16 @@ def match_backend(param, ref):
     if isinstance(param, np.ndarray):
         if isinstance(ref, np.ndarray):
             return param                             # no-op: numpy handles mixed dtypes
-        if _is_torch(ref):
+        if is_torch(ref):
             import torch
             return torch.as_tensor(param, device=ref.device)
-        if _is_jax(ref):
+        if is_jax(ref):
             import jax.numpy as jnp
             return jnp.array(param)
-        if _is_tf(ref):
+        if is_tf(ref):
             import tensorflow as tf
             # TF is strict: complex64 tensor * complex128 constant raises.
             # Cast param to match ref's dtype before wrapping.
             return tf.constant(param, dtype=ref.dtype)
     # Already same backend, or unknown → return as-is
     return param
-
-

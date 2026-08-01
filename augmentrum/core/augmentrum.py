@@ -12,7 +12,11 @@
 #                                                                                                  #
 ####################################################################################################
 
-from typing import List, Optional, Union, Dict, Any
+#*************#
+#   imports   #
+#*************#
+import warnings
+from typing import List, Optional, Sequence, Union, Dict, Any
 from augmentrum import __version__
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 from augmentrum.core.pipeline import AugmentationPipeline
@@ -29,6 +33,7 @@ from augmentrum.sampling.subject_splitter import SubjectSplitter
 # Processing modules
 from augmentrum.processing.nifti_raw_processor import NIfTI_RawProcessor
 from augmentrum.sampling.coil_average_sampler import CoilAverageSampler
+from augmentrum.sampling.kspace_sampling import KspaceUndersampling
 
 # Augmentation modules
 from augmentrum.augmentation.gaussian_noise import GaussianNoise
@@ -47,6 +52,13 @@ from augmentrum.augmentation.zero_fill import ZeroFill
 __all__ = ['Augmentrum']
 
 
+#**************************************************************************************************#
+#                                         Class Augmentrum                                         #
+#**************************************************************************************************#
+#                                                                                                  #
+# Main Augmentrum class - backend-agnostic MRS data augmentation.                                  #
+#                                                                                                  #
+#**************************************************************************************************#
 class Augmentrum:
     """
     Main Augmentrum class - backend-agnostic MRS data augmentation.
@@ -187,6 +199,10 @@ class Augmentrum:
         # Spatial
         'spatial': SpatialAugmentations,
         'spatial_augmentations': SpatialAugmentations,
+
+        # k-space
+        'undersampling': KspaceUndersampling,
+        'kspace_undersampling': KspaceUndersampling,
     }
 
     def __init__(
@@ -196,6 +212,7 @@ class Augmentrum:
 
         # Splitting
         split_fractions: Optional[Dict[str, float]] = None,  # e.g., {'val': 0.1, 'test': 0.1}
+        split_indices: Optional[Dict[str, Sequence[int]]] = None,  # explicit, overrides fractions
         seed: int = 42,
 
         # Pre-processing (applied once and cached)
@@ -309,7 +326,9 @@ class Augmentrum:
             self.water_all = None
 
         # Handle splitting
-        if split_fractions is not None:
+        if split_indices is not None:
+            self._create_splits_from_indices(split_indices)
+        elif split_fractions is not None:
             self._create_splits(split_fractions, seed)
         else:
             # No splitting - all data goes to train, but create empty val/test
@@ -358,6 +377,65 @@ class Augmentrum:
             data_plus = NIfTI_MRS_Plus(nifti_list=data_list, backend=self.backend, volatile=self.volatile)
             water_plus = NIfTI_MRS_Plus(nifti_list=water_list, backend=self.backend, volatile=self.volatile) if water_list else None
             self.splits[split_name] = (data_plus, water_plus)
+
+    def _create_splits_from_indices(self, split_indices: Dict[str, Sequence[int]]):
+        """
+        Build splits from explicit subject indices instead of random fractions.
+
+        Use this whenever membership is a property of the data rather than
+        something to draw — held-out test subjects defined by a challenge or a
+        study protocol, a site-wise split, a pinned reproduction of an earlier
+        run. Split names are free-form, so a dataset with two separate test sets
+        can keep them apart:
+
+            Augmentrum(data=all_subjects,
+                       split_indices={'train': range(0, 19), 'val': range(19, 24),
+                                      'test_track1': [24, 25, 26, 27, 28],
+                                      'test_track2': [29, 30, 31]})
+
+        and each is reachable via ``dataloader(split='test_track1')``.
+        """
+        n_total = len(self.data_all)
+        data_list = self.data_all.list()
+        water_list = self.water_all.list() if self.water_all is not None else None
+
+        seen: Dict[int, str] = {}
+        self.splits = {}
+        for split_name, indices in split_indices.items():
+            idx = [int(i) for i in indices]
+
+            for i in idx:
+                if not (0 <= i < n_total):
+                    raise IndexError(
+                        f"split_indices['{split_name}'] contains index {i}, but there "
+                        f"are only {n_total} subjects."
+                    )
+                if i in seen:
+                    raise ValueError(
+                        f"Subject {i} appears in both '{seen[i]}' and '{split_name}'. "
+                        "Overlapping splits would leak data between them."
+                    )
+                seen[i] = split_name
+
+            data_plus = NIfTI_MRS_Plus(
+                nifti_list=[data_list[i] for i in idx],
+                backend=self.backend, volatile=self.volatile,
+            )
+            water_plus = None
+            if water_list is not None:
+                water_plus = NIfTI_MRS_Plus(
+                    nifti_list=[water_list[i] for i in idx],
+                    backend=self.backend, volatile=self.volatile,
+                )
+            self.splits[split_name] = (data_plus, water_plus)
+
+        unassigned = n_total - len(seen)
+        if unassigned:
+            warnings.warn(
+                f"{unassigned} of {n_total} subjects are not in any split and will "
+                f"never be sampled.",
+                RuntimeWarning, stacklevel=3,
+            )
 
     def _create_pre_pipeline(self, pre_pipeline):
         """
@@ -516,6 +594,14 @@ class Augmentrum:
             'gaussian_noise': {'sigma_frac': 0.02},
         }
 
+        # Parameters that are alternative ways to say the same thing. A module
+        # given two members of a group cannot tell which the caller meant and
+        # rightly refuses, so a user-supplied member must suppress the default
+        # for every other member rather than arriving alongside it.
+        EXCLUSIVE_GROUPS = [
+            {'snr', 'snr_db', 'sigma', 'sigma_frac'},   # GaussianNoise
+        ]
+
         for name in module_names:
             if name not in self.AVAILABLE_MODULES:
                 raise ValueError(f"Unknown module '{name}'. Available: {list(self.AVAILABLE_MODULES.keys())}")
@@ -539,7 +625,13 @@ class Augmentrum:
                 if k in init_param_names and isinstance(v, (bool, int, float, str))
             }
 
-            construct_params = {**DEFAULT_PARAMS.get(name, {}), **scalar_kwargs}
+            defaults = dict(DEFAULT_PARAMS.get(name, {}))
+            for group in EXCLUSIVE_GROUPS:
+                if group & set(scalar_kwargs):
+                    for key in group:
+                        defaults.pop(key, None)
+
+            construct_params = {**defaults, **scalar_kwargs}
             modules.append(module_class(**construct_params))
 
         # Pass ALL user kwargs to Pipeline — it handles parameter extraction/sampling
@@ -609,18 +701,20 @@ class Augmentrum:
         # Wrap for framework
         return wrap_generator_for_framework(generator, self.backend, framework)
 
-    def dataloader(self, framework: str = None, **kwargs):
+    def dataloader(self, framework: str = None, split: str = 'train', shuffle: bool = None):
         """
-        Get dataloader (for single dataset without splitting).
+        Get dataloader for any split (defaults to 'train').
 
         Args:
             framework: 'pytorch', 'numpy', 'tensorflow', 'keras', 'jax'
-            **kwargs: Additional arguments (e.g., shuffle=True)
+            split: Split name. Any key of ``self.splits`` — including custom
+                   names created via ``split_indices`` (e.g. 'test_track1').
+            shuffle: Whether to shuffle (only honoured in 'fixed' mode)
 
         Returns:
             Framework-specific dataloader/generator
         """
-        return self._get_dataloader('train', framework, **kwargs)
+        return self._get_dataloader(split, framework, shuffle)
 
     def train_dataloader(self, framework: str = None, **kwargs):
         """Get training dataloader."""

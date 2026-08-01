@@ -15,6 +15,13 @@ import numpy as np
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 
 
+#**************************************************************************************************#
+#                                  Class TestNIfTIMRSPlusCreation                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test NIfTI_MRS_Plus object creation.                                                             #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIMRSPlusCreation:
     """Test NIfTI_MRS_Plus object creation."""
 
@@ -64,6 +71,13 @@ class TestNIfTIMRSPlusCreation:
             NIfTI_MRS_Plus(nifti_list=[1, 2, 3])
 
 
+#**************************************************************************************************#
+#                                   Class TestNIfTIMRSPlusShape                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test shape and dimension properties.                                                             #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIMRSPlusShape:
     """Test shape and dimension properties."""
 
@@ -105,6 +119,13 @@ class TestNIfTIMRSPlusShape:
         assert nifti_mrs_plus.n_subjects == 5
 
 
+#**************************************************************************************************#
+#                                Class TestNIfTIMRSPlusProxyMethods                                #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test proxy methods that delegate to first NIfTI-MRS.                                             #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIMRSPlusProxyMethods:
     """Test proxy methods that delegate to first NIfTI-MRS."""
 
@@ -148,6 +169,13 @@ class TestNIfTIMRSPlusProxyMethods:
         assert hdr_ext is not None
 
 
+#**************************************************************************************************#
+#                                  Class TestNIfTIMRSPlusBackends                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test backend support and conversion.                                                             #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIMRSPlusBackends:
     """Test backend support and conversion."""
 
@@ -255,6 +283,13 @@ class TestNIfTIMRSPlusBackends:
         assert len(data) == 5
 
 
+#**************************************************************************************************#
+#                             Class TestNIfTIMRSPlusBackendConversions                             #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test backend conversions and compatibility.                                                      #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIMRSPlusBackendConversions:
     """Test backend conversions and compatibility."""
 
@@ -402,6 +437,13 @@ class TestNIfTIMRSPlusBackendConversions:
             pass
 
 
+#**************************************************************************************************#
+#                                  Class TestNIfTIMRSPlusIndexing                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test indexing and slicing.                                                                       #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIMRSPlusIndexing:
     """Test indexing and slicing."""
 
@@ -435,6 +477,13 @@ class TestNIfTIMRSPlusIndexing:
         assert subset.volatile == True
 
 
+#**************************************************************************************************#
+#                                  Class TestNIfTIMRSPlusMetadata                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test metadata handling.                                                                          #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIMRSPlusMetadata:
     """Test metadata handling."""
 
@@ -473,6 +522,13 @@ class TestNIfTIMRSPlusMetadata:
         assert nifti_plus.metadata_common == {}
 
 
+#**************************************************************************************************#
+#                                    Class TestNIfTIMRSPlusCopy                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test copy functionality.                                                                         #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIMRSPlusCopy:
     """Test copy functionality."""
 
@@ -496,6 +552,13 @@ class TestNIfTIMRSPlusCopy:
                    len(nifti_mrs_plus.metadata_common.get('common_provenance', []))
 
 
+#**************************************************************************************************#
+#                                    Class TestNIfTIMRSPlusRepr                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test string representation.                                                                      #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIMRSPlusRepr:
     """Test string representation."""
 
@@ -509,6 +572,13 @@ class TestNIfTIMRSPlusRepr:
         assert 'volatile=' in repr_str
 
 
+#**************************************************************************************************#
+#                                 Class TestNIfTIMRSPlusEdgeCases                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test edge cases and error handling.                                                              #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIMRSPlusEdgeCases:
     """Test edge cases and error handling."""
 
@@ -549,6 +619,13 @@ class TestNIfTIMRSPlusEdgeCases:
         # Should not raise error
 
 
+#**************************************************************************************************#
+#                                  Class TestNIfTIMRSPlusSetItem                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test __setitem__ functionality.                                                                  #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIMRSPlusSetItem:
     """Test __setitem__ functionality."""
 
@@ -743,6 +820,13 @@ class TestNIfTIMRSPlusSetItem:
         assert np.allclose(updated_data[0, :, :, :, 0:10, :, :], new_values[0])
 
 
+#**************************************************************************************************#
+#                              Class TestNIfTIMRSPlusSetItemEdgeCases                              #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test edge cases for __setitem__.                                                                 #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIMRSPlusSetItemEdgeCases:
     """Test edge cases for __setitem__."""
 

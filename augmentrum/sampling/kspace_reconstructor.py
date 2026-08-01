@@ -1,275 +1,269 @@
 ####################################################################################################
-#                                 kspace_reconstructor.py                                          #
+#                                     kspace_reconstructor.py                                      #
 ####################################################################################################
 #                                                                                                  #
 # Authors: J. T. LaMaster (john.t.lamaster@gmail.com)                                              #
+#          J. P. Merkofer (j.p.merkofer@tue.nl)                                                    #
 #                                                                                                  #
 # Created: 2025-10-22                                                                              #
 #                                                                                                  #
-# Purpose: Implements reconstruct_with_masking which accepts subsampled k-space data and its       #
-#          trajectory coordinates to perform density compesnation and regridding.                  #
+# Purpose: Regrids non-Cartesian k-space samples back onto an image grid: density compensation     #
+#          followed by an adjoint NUFFT. The adjoint half of the pair whose forward half is        #
+#          processing.interpolating. Torch only; needs the optional torchkbnufft dependency.       #
 #                                                                                                  #
 ####################################################################################################
 
+
+#*************#
+#   imports   #
+#*************#
+from typing import Optional, Sequence, Tuple, Union
+
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torchkbnufft as tkbn
-from typing import Union, List, Tuple
 
 
-__all__ = ['reconstruct_with_masking']
+__all__ = ['KspaceReconstructor']
 
 
-# --- Constants for normalization ---
-# TorchKbNufft expects coordinates in the range [-pi, pi]
-PI = torch.pi
-
-
-def prepare_data_and_coords(
-    coords: torch.Tensor, 
-    kdata: Optional[torch.Tensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
+#**************************************************************************************************#
+#                                    Class KspaceReconstructor                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# Regrid non-Cartesian k-space samples onto an image grid.                                         #
+#                                                                                                  #
+#**************************************************************************************************#
+class KspaceReconstructor:
     """
-    Reshapes coordinates and k-data to the format required by TorchKbNufft:
-    Coords: [B, D, N_total], Kdata: [B, C, N_total]
-    N_total = S * L (shots x length).
-    """
-    # Assuming input coords shape: [B, S, D, L] (e.g., [4, 10, 3, 100])
-    B, S, D, L = coords.shape
-    N_total = S * L
+    Regrid non-Cartesian k-space samples onto an image grid.
 
-    # 1. Normalize Coordinates (if not already done)
-    # The NUFFT forward/adjoint operators typically assume coordinates in [-pi, pi].
-    # We assume your input coords are normalized to [-1, 1] relative to k-space extent.
-    coords_normalized = coords * PI 
+    Reconstruction is the three steps below, which :meth:`__call__` runs in order
+    and which are also usable individually:
 
-    # 2. Flatten Trajectory: [B, S, D, L] -> [B, D, S, L] -> [B, D, N_total]
-    k_traj_flat = coords_normalized.permute(0, 2, 1, 3).reshape(B, D, N_total)
+    1. zero out the shots an undersampling mask discards,
+    2. weight the survivors by a Pipe-style density compensation function, since
+       most trajectories sample the centre of k-space far more densely than the
+       edge,
+    3. apply the adjoint NUFFT onto an oversampled grid.
 
-    kdata_flat = None
-    if kdata is not None:
-        # Assuming input kdata shape: [B, S, C, L] (e.g., [4, 10, 1, 100])
-        B_k, S_k, C, L_k = kdata.shape
-        
-        # Flatten K-data: [B, S, C, L] -> [B, C, S, L] -> [B, C, N_total]
-        kdata_flat = kdata.permute(0, 2, 1, 3).reshape(B, C, N_total)
+    Shapes follow the rest of the package: coordinates are ``[B, S, D, L]``
+    (batch, shots, dimensions, samples per shot), k-space data is ``[B, S, C, L]``
+    with ``C`` coils, and the reconstruction is ``[B, C, *image_size]``.
 
-    return k_traj_flat, kdata_flat
-
-def calculate_nufft_dcf_weights(
-    coords: torch.Tensor,
-    image_size: Union[List[int], Tuple[int]],
-    oversampling_factor: Union[List[float], Tuple[float]]
-) -> torch.Tensor:
-    """
-    Calculates Density Compensation Function (DCF) weights using the
-    iterative Pipe-style method from torchkbnufft.
-    """
-    device = coords.device
-    B, S, D, L = coords.shape
-    
-    # 1. Prepare Trajectory Coordinates
-    k_traj_flat, _ = prepare_data_and_coords(coords) # [B, D, N_total]
-
-    # 2. Determine Grid Size based on Image Size and Oversampling
-    # Ensure all sizes are determined on the CPU and converted to a list/tuple of native types
-    
-    # Get sizes as native types (no longer need to keep them as tensors)
-    image_size_list = list(image_size)
-    oversampling_factor_tensor = torch.tensor(oversampling_factor, dtype=torch.float32)
-    
-    # Grid size = floor(Image Size * Oversampling Factor)
-    grid_size_tensor = torch.floor(torch.tensor(image_size) * oversampling_factor_tensor).to(torch.long)
-    grid_size_list = grid_size_tensor.tolist() # <--- Pass native list/tuple
-
-    # 3. Calculate DCF (Iterative Pipe-style)
-    # Pass 'im_size' and 'grid_size' as separate arguments, not the KbNufft object.
-    with torch.no_grad():
-        dcf_flat = tkbn.calc_density_compensation_function(
-            k_traj_flat, 
-            im_size=image_size_list,     # <--- FIX 1: Pass im_size
-            grid_size=grid_size_list     # <--- FIX 2: Pass grid_size
-        ).detach() # [B, 1, N_total]
-
-    # 4. Reshape DCF for easy multiplication with k-data: [B, 1, S*L] -> [B, S, L]
-    dcf_weights = dcf_flat.view(B, S, L)
-
-    return dcf_weights
-
-
-def regrid_kdata_to_image(
-    weighted_kdata: torch.Tensor,
-    coords: torch.Tensor,
-    image_size: Union[List[int], Tuple[int]],
-    oversampling_factor: Union[List[float], Tuple[float]]
-) -> torch.Tensor:
-    """
-    Performs Adjoint NUFFT (regridding) to map weighted k-space data to the image domain.
+    Coordinates must be normalised to ``[-1, 1]``; :meth:`normalise_trajectory`
+    converts the cycles-per-metre output of ``kspace_sampling`` for you.
 
     Args:
-        weighted_kdata (torch.Tensor): Density-compensated k-space data, shape [B, S, C, L].
-        coords (torch.Tensor): K-space trajectory coordinates, shape [B, S, D, L].
-        image_size (Union[List[int], Tuple[int]]): Target image dimensions (Nx, Ny, Nz).
-        oversampling_factor (Union[List[float], Tuple[float]]): Oversampling factors 
-                                                                for the regridding grid (rho_x, rho_y, rho_z).
+        image_size: target volume shape, 2- or 3-D.
+        oversampling_factor: NUFFT grid oversampling, scalar or per axis.
+        device: torch device for the NUFFT operators; defaults to the data's.
 
-    Returns:
-        torch.Tensor: Reconstructed complex image volume, shape [B, C, Nx, Ny, Nz].
+    Note:
+        Requires the optional ``torchkbnufft`` dependency, imported on first use
+        so that importing this module never fails on its account.
+
+    Note:
+        Deliberately NOT a :class:`BaseModule`. A module is a pipeline stage,
+        called as ``module(nifti_plus, water)`` and returning a dataset of the
+        same shape; this is an operator over k-space samples, called as
+        ``(coords, kdata, mask)`` and returning an image. Inheriting would mean
+        implementing ``process_tensor(data_array, water_array, ...)`` and
+        smuggling the trajectory in through ``**kwargs``, which would satisfy
+        the pipeline's isinstance check while remaining unusable in a pipeline.
+        It sits with ``KspaceGeometry``, ``GridMask`` and ``KspaceSampler`` —
+        building blocks that modules are assembled from. The module that reaches
+        for this one is ``KspaceUndersampling``.
     """
-    device = weighted_kdata.device
-    
-    # 1. Prepare Coords and K-data for NUFFT
-    # k_traj_flat: [B, D, N_total], kdata_flat: [B, C, N_total]
-    k_traj_flat, kdata_flat = prepare_data_and_coords(coords, weighted_kdata)
-    
-    # 2. Determine Grid Size
-    image_size = torch.tensor(image_size, dtype=torch.long, device=device)
-    oversampling_factor = torch.tensor(oversampling_factor, dtype=torch.float32, device=device)
-    
-    # Grid size = floor(Image Size * Oversampling Factor)
-    grid_size = torch.floor(image_size * oversampling_factor).to(torch.long)
 
-    # 3. Instantiate Adjoint NUFFT Operator (Regridding)
-    adj_op = tkbn.KbNufftAdjoint(
-        im_size=image_size.tolist(),  # [Nx, Ny, Nz]
-        grid_size=grid_size.tolist()  # [Grid_Nx, Grid_Ny, Grid_Nz]
-    ).to(device)
+    def __init__(self, image_size: Sequence[int],
+                 oversampling_factor: Union[float, Sequence[float]] = 1.5,
+                 device: Optional[torch.device] = None):
+        self.image_size = [int(n) for n in image_size]
+        if len(self.image_size) not in (2, 3):
+            raise ValueError(
+                f"image_size must be 2- or 3-D, got {len(self.image_size)} axes."
+            )
 
-    # 4. Perform Regridding
-    # The operation is: Adjoint(k_data) -> IFFT -> Image
-    image_domain_output = adj_op(kdata_flat, k_traj_flat)
+        if isinstance(oversampling_factor, (int, float)):
+            factors = [float(oversampling_factor)] * len(self.image_size)
+        else:
+            factors = [float(f) for f in oversampling_factor]
+        if len(factors) != len(self.image_size):
+            raise ValueError(
+                f"oversampling_factor must be a scalar or one value per axis; got "
+                f"{len(factors)} for a {len(self.image_size)}-D image."
+            )
+        if any(f < 1.0 for f in factors):
+            raise ValueError(f"oversampling factors must be >= 1, got {factors}.")
 
-    # Output shape: [B, C, Nx, Ny, Nz]
-    return image_domain_output
+        self.oversampling_factor = factors
+        self.grid_size = [int(n * f) for n, f in zip(self.image_size, factors)]
+        self.device = device
 
+    def __repr__(self) -> str:
+        return (f"{type(self).__name__}(image_size={self.image_size}, "
+                f"oversampling_factor={self.oversampling_factor})")
 
-def reconstruct_with_masking(
-    coords: torch.Tensor,
-    kdata: torch.Tensor,
-    undersampling_mask: torch.Tensor,
-    image_size: Union[List[int], Tuple[int]],
-    oversampling_factor: Union[List[float], Tuple[float]]
-) -> torch.Tensor:
-    """
-    High-level wrapper to apply undersampling mask, calculate DCF, and perform regridding.
+    #*************#
+    #   backend   #
+    #*************#
 
-    Args:
-        coords (torch.Tensor): K-space trajectory coordinates, shape [B, S, D, L].
-        kdata (torch.Tensor): Raw k-space data, shape [B, S, C, L].
-        undersampling_mask (torch.Tensor): Boolean mask indicating which shots to KEEP. 
-                                           Shape: [B, S].
-        image_size (Union[List[int], Tuple[int]]): Target image dimensions (Nx, Ny, Nz).
-        oversampling_factor (Union[List[float], Tuple[float]]): Oversampling factors 
-                                                                for the regridding grid (rho_x, rho_y, rho_z).
+    @staticmethod
+    def _tkbn():
+        """The torchkbnufft module, with an actionable error when it is absent."""
+        try:
+            import torchkbnufft as tkbn
+        except ImportError as exc:                                # pragma: no cover
+            raise ImportError(
+                "KspaceReconstructor needs the optional dependency torchkbnufft. "
+                "Install it with `pip install torchkbnufft`."
+            ) from exc
+        return tkbn
 
-    Returns:
-        torch.Tensor: Reconstructed complex image volume, shape [B, C, Nx, Ny, Nz].
-    """    
-    # --- 1. Apply Undersampling Mask (Zero-Filling) ---
-    # The mask is [B, S]. We need to expand it to [B, S, C, L] to multiply with kdata.
-    B, S, C, L = kdata.shape
-    
-    # Expand mask to match kdata shape: [B, S] -> [B, S, 1, 1] -> [B, S, C, L]
-    # Invert the boolean mask to create a float mask (True -> 0, False -> 1)
-    # Since the mask is for samples to KEEP (conventionally True), 
-    # we zero the kdata samples where the mask is False (discard).
-    
-    # Convert mask to float tensor (0 or 1) and expand
-    mask_float = undersampling_mask.to(dtype=kdata.real.dtype).unsqueeze(2).unsqueeze(3) 
-    
-    # Expand across Coil (C) and Length (L) dimensions
-    mask_bcast = mask_float.expand(B, S, C, L)
-    
-    # Apply mask (zero out discarded k-space samples/shots)
-    masked_kdata = kdata * mask_bcast
+    #*****************#
+    #   coordinates   #
+    #*****************#
 
-    # --- 2. Calculate DCF Weights ---
-    # DCF calculation should use ALL coordinates to reflect the desired density.
-    dcf_weights = calculate_nufft_dcf_weights(
-        coords=coords, 
-        image_size=image_size, 
-        oversampling_factor=oversampling_factor
-    )
-    
-    # Reshape DCF for multiplication: [B, S, L] -> [B, S, 1, L]
-    dcf_bcast = dcf_weights.unsqueeze(2) 
-    
-    # --- 3. Apply DCF to Masked K-space Data ---
-    weighted_kdata = masked_kdata * dcf_bcast 
-    
-    # --- 4. Perform Regridding (Adjoint NUFFT) ---
-    reconstructed_image = regrid_kdata_to_image(
-        weighted_kdata=weighted_kdata,
-        coords=coords,
-        image_size=image_size,
-        oversampling_factor=oversampling_factor
-    )
-    
-    return reconstructed_image
+    @staticmethod
+    def normalise_trajectory(coords: torch.Tensor,
+                            k_max: Union[float, Sequence[float]]) -> torch.Tensor:
+        """
+        Scale a trajectory from cycles per metre to the ``[-1, 1]`` box.
 
+        Trajectories are generated in physical units, where the Nyquist edge sits
+        at ``k_max = 1 / (2 * voxel_size)``. Both this module and
+        ``processing.interpolating`` work in normalised coordinates, so this is
+        the bridge between them.
 
-if __name__ == "__ main __":
-    # Define parameters for a 3D example
-    B, S, D, L, C = 4, 10, 3, 100, 1 # Batch, Shots, Dimensions, Length, Channels
-    Target_Image_Size = (64, 64, 64)
-    Oversampling_Factor = (1.5, 1.5, 1.5)
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        ``k_max`` is per axis whenever the voxels are anisotropic, which is how
+        trajectory metadata reports it. A scalar is accepted and applied to every
+        axis; a sequence must give one value per dimension of *coords*.
 
-    # Dummy Data: Coords must be float, Kdata must be complex
-    coords_in = (torch.rand(B, S, D, L) * 2 - 1).to(dtype=torch.float32, device=device) # [-1, 1] range
-    kdata_in = torch.randn(B, S, C, L, dtype=torch.complex64, device=device) 
-    
-    # --- NEW: Create an Undersampling Mask ---
-    # Mask [B, S] (e.g., keeping only 50% of the shots randomly per batch sample)
-    undersampling_mask_in = torch.rand(B, S) < 0.5
-    undersampling_mask_in = undersampling_mask_in.to(device)
+        Args:
+            coords: trajectory coordinates in cycles per metre, ``[B, S, D, L]``.
+            k_max: k-space half-extent, scalar or one value per axis. Trajectory
+                metadata carries it as ``meta['kmax']``.
+        """
+        ndim = coords.shape[2]
+        values = [float(k_max)] * ndim if isinstance(k_max, (int, float)) \
+            else [float(k) for k in k_max]
+        if len(values) != ndim:
+            raise ValueError(
+                f"k_max must be a scalar or one value per axis; got {len(values)} "
+                f"for {ndim}-D coordinates."
+            )
+        if any(k <= 0 for k in values):
+            raise ValueError(f"k_max values must be positive, got {values}.")
 
-    # --- 1. Full Reconstruction Pipeline with Masking ---
-    print("--- Starting Full Reconstruction Pipeline (Masked) ---")
-    reconstructed_image_masked = reconstruct_with_masking(
-        coords=coords_in,
-        kdata=kdata_in,
-        undersampling_mask=undersampling_mask_in,
-        image_size=Target_Image_Size,
-        oversampling_factor=Oversampling_Factor
-    )
-    
-    print(f"Masked Reconstruction successful. Final Image Shape: {reconstructed_image_masked.shape}")
-    print(f"Shots kept per batch: {undersampling_mask_in.sum(dim=1).tolist()}")
-    print(f"Expected Final Image Shape: [{B}, {C}, {Target_Image_Size[0]}, {Target_Image_Size[1]}, {Target_Image_Size[2]}]")
+        scale = torch.tensor(values, dtype=coords.dtype, device=coords.device)
+        return coords / scale.view(1, 1, ndim, 1)
 
-    # The reconstructed image is now a complex tensor [B, C, Nx, Ny, Nz]
+    @staticmethod
+    def flatten(coords: torch.Tensor,
+                kdata: Optional[torch.Tensor] = None
+                ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Collapse the shot axis into the sample axis, as torchkbnufft expects.
 
-    # Define parameters for a 2D example
-    B, S, D, L, C = 4, 10, 2, 100, 1 # Batch, Shots, Dimensions, Length, Channels
-    Target_Image_Size = (64, 64)
-    Oversampling_Factor = (1.5, 1.5)
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
-    # Dummy Data: Coords must be float, Kdata must be complex
-    coords_in = (torch.rand(B, S, D, L) * 2 - 1).to(dtype=torch.float32, device=device) # [-1, 1] range
-    kdata_in = torch.randn(B, S, C, L, dtype=torch.complex64, device=device) 
-    
-    # --- NEW: Create an Undersampling Mask ---
-    # Mask [B, S] (e.g., keeping only 50% of the shots randomly per batch sample)
-    undersampling_mask_in = torch.rand(B, S) < 0.5
-    undersampling_mask_in = undersampling_mask_in.to(device)
-    
-    # --- 1. Full Reconstruction Pipeline with Masking ---
-    print("--- Starting Full Reconstruction Pipeline (Masked) ---")
-    reconstructed_image_masked = reconstruct_with_masking(
-        coords=coords_in,
-        kdata=kdata_in,
-        undersampling_mask=undersampling_mask_in,
-        image_size=Target_Image_Size,
-        oversampling_factor=Oversampling_Factor
-    )
-    
-    print(f"Masked Reconstruction successful. Final Image Shape: {reconstructed_image_masked.shape}")
-    print(f"Shots kept per batch: {undersampling_mask_in.sum(dim=1).tolist()}")
-    print("Expected Final Image Shape: [{}, {}, {}]".format(B, C, [x for x in Target_Image_Size]))
-    
-    # The reconstructed image is now a complex tensor [B, C, Nx, Ny]
+        Coordinates go ``[B, S, D, L] -> [B, D, S * L]`` and, when given, k-space
+        data goes ``[B, S, C, L] -> [B, C, S * L]``. Coordinates are also scaled
+        from ``[-1, 1]`` to the ``[-pi, pi]`` convention the NUFFT uses.
+        """
+        if coords.dim() != 4:
+            raise ValueError(f"coords must be [B, S, D, L], got {tuple(coords.shape)}.")
+
+        B, S, D, L = coords.shape
+        k_traj = (coords * torch.pi).permute(0, 2, 1, 3).reshape(B, D, S * L)
+
+        kdata_flat = None
+        if kdata is not None:
+            if kdata.dim() != 4:
+                raise ValueError(
+                    f"kdata must be [B, S, C, L], got {tuple(kdata.shape)}."
+                )
+            if kdata.shape[0] != B or kdata.shape[1] != S or kdata.shape[3] != L:
+                raise ValueError(
+                    f"kdata {tuple(kdata.shape)} does not match coords "
+                    f"{tuple(coords.shape)} on the batch, shot or sample axis."
+                )
+            C = kdata.shape[2]
+            kdata_flat = kdata.permute(0, 2, 1, 3).reshape(B, C, S * L)
+
+        return k_traj, kdata_flat
+
+    #********************************#
+    #   density compensation (dcf)   #
+    #********************************#
+
+    def density_weights(self, coords: torch.Tensor) -> torch.Tensor:
+        """
+        Pipe-style iterative density compensation weights, shaped ``[B, S, L]``.
+
+        Computed from the *full* trajectory rather than the retained shots: the
+        weights describe how densely the trajectory was designed to cover k-space,
+        which undersampling does not change.
+        """
+        B, S, _, L = coords.shape
+        k_traj, _ = self.flatten(coords)
+
+        with torch.no_grad():
+            dcf = self._tkbn().calc_density_compensation_function(
+                k_traj, im_size=self.image_size, grid_size=self.grid_size,
+            ).detach()
+
+        return dcf.view(B, S, L)
+
+    #**************************#
+    #   regridding (adjoint)   #
+    #**************************#
+
+    def adjoint(self, kdata: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
+        """
+        Adjoint NUFFT of *kdata* along *coords*, giving ``[B, C, *image_size]``.
+
+        Args:
+            kdata: density-compensated k-space samples, ``[B, S, C, L]``.
+            coords: normalised trajectory coordinates, ``[B, S, D, L]``.
+        """
+        ndim = coords.shape[2]
+        if ndim != len(self.image_size):
+            raise ValueError(
+                f"coords are {ndim}-D but image_size is {len(self.image_size)}-D."
+            )
+
+        k_traj, kdata_flat = self.flatten(coords, kdata)
+        device = self.device or kdata.device
+
+        adjoint = self._tkbn().KbNufftAdjoint(
+            im_size=self.image_size, grid_size=self.grid_size,
+        ).to(device)
+
+        return adjoint(kdata_flat.to(device), k_traj.to(device))
+
+    #********************#
+    #   reconstruction   #
+    #********************#
+
+    def __call__(self, coords: torch.Tensor, kdata: torch.Tensor,
+                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Mask, density-compensate and regrid in one call.
+
+        Args:
+            coords: normalised trajectory coordinates, ``[B, S, D, L]``.
+            kdata: k-space samples, ``[B, S, C, L]``.
+            mask: boolean shots to keep, ``[B, S]``; all shots when omitted.
+
+        Returns:
+            Complex reconstruction, ``[B, C, *image_size]``.
+        """
+        if mask is not None:
+            if mask.shape != kdata.shape[:2]:
+                raise ValueError(
+                    f"mask must be [B, S] = {tuple(kdata.shape[:2])}, got "
+                    f"{tuple(mask.shape)}."
+                )
+            keep = mask.to(dtype=kdata.real.dtype, device=kdata.device)
+            kdata = kdata * keep.unsqueeze(2).unsqueeze(3)
+
+        weighted = kdata * self.density_weights(coords).unsqueeze(2)
+        return self.adjoint(weighted, coords)

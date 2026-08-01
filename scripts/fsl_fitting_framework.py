@@ -32,14 +32,9 @@ from fsl_mrs.utils import fitting, mrs_io, plotting, quantify
 from scipy.io import loadmat
 
 
-#**************************************************************************************************#
-#                                      Basis Loading Utilities                                     #
-#**************************************************************************************************#
-#                                                                                                  #
-# Adapted from the MRS project loadBasis.py to support all basis set formats:                      #
-# .json (FSL), .raw (LCModel), .mat (FID-A / INSPECTOR), .txt (JMRUI), .basis (LCModel)            #
-#                                                                                                  #
-#**************************************************************************************************#
+#*****************************#
+#   basis loading utilities   #
+#*****************************#
 
 def read_LCModel_raw(filename, conjugate=True):
     """
@@ -249,11 +244,10 @@ def load_basis_any_format(path2basis, bw=None, cf=None, fmt=None):
 
 
 #**************************************************************************************************#
-#                                     Class FSLFittingFramework                                    #
+#                                    Class FSLFittingFramework                                     #
 #**************************************************************************************************#
 #                                                                                                  #
-# FSL-MRS spectral fitting framework designed to work with Augmentrum's data pipeline.             #
-# Extracts concentrations AND signal parameters (Lorentzian/Voigt lineshape per basis function).   #
+# FSL-MRS fitting wrapper for use with Augmentrum.                                                 #
 #                                                                                                  #
 #**************************************************************************************************#
 class FSLFittingFramework:
@@ -728,9 +722,9 @@ class FSLFittingFramework:
         print("═" * 70)
 
 
-    #**********************************#
-    #   extract signal parameters      #
-    #**********************************#
+    #*******************************#
+    #   extract signal parameters   #
+    #*******************************#
     def _extract_signal_params(self, fit_result):
         """
         Extract ALL signal parameters from an FSL-MRS fit result.
@@ -806,9 +800,9 @@ class FSLFittingFramework:
 
         return all_params, param_names
 
-    #*********************************#
-    #   save individual fit result    #
-    #*********************************#
+    #********************************#
+    #   save individual fit result   #
+    #********************************#
     def _save_individual_fit(self, fit_result, mrs_obj, idx, name, failures=None):
         """Save individual fit result to disk. Tracks errors in failures dict."""
         save_dir = os.path.join(self.save_path, 'individual_fits')
@@ -849,9 +843,9 @@ class FSLFittingFramework:
             if failures is not None:
                 failures['save_errors'].append((name, msg))
 
-    #*********************************#
-    #   save all results to folder    #
-    #*********************************#
+    #********************************#
+    #   save all results to folder   #
+    #********************************#
     def save_results(self, results, save_path):
         """
         Save complete fitting results to a structured folder.
@@ -918,9 +912,9 @@ class FSLFittingFramework:
             print(f"  - params.npy ({results['params'].shape})")
         print(f"  - parameter_ranges.json (min/max per parameter)")
 
-    #***********************************#
-    #   compute parameter ranges        #
-    #***********************************#
+    #******************************#
+    #   compute parameter ranges   #
+    #******************************#
     def compute_parameter_ranges(self, results):
         """
         Compute min/max/mean/std ranges for all fitted parameters.
@@ -1023,9 +1017,9 @@ class FSLFittingFramework:
 
         return ranges
 
-    #*********************************#
-    #   build JSON summary            #
-    #*********************************#
+    #************************#
+    #   build JSON summary   #
+    #************************#
     def _build_json_summary(self, results):
         """Build a human-readable JSON summary of fit results."""
         concs = results['concentrations']
@@ -1058,9 +1052,9 @@ class FSLFittingFramework:
 
         return summary
 
-    #*********************************#
-    #   load saved results            #
-    #*********************************#
+    #************************#
+    #   load saved results   #
+    #************************#
     @staticmethod
     def load_results(save_path):
         """
@@ -1114,9 +1108,9 @@ class FSLFittingFramework:
 
         return loaded
 
-    #*********************************#
-    #   ranges to simulation defs     #
-    #*********************************#
+    #*******************************#
+    #   ranges to simulation defs   #
+    #*******************************#
     @staticmethod
     def ranges_to_simulation_defs(ranges, margin=0.1):
         """

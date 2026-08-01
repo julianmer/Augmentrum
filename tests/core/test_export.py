@@ -18,6 +18,13 @@ except ImportError:
     HDF5_AVAILABLE = False
 
 
+#**************************************************************************************************#
+#                                     Class TestNIfTIMRSExport                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test NIFTI-MRS export functionality.                                                             #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIMRSExport:
     """Test NIFTI-MRS export functionality."""
 
@@ -163,6 +170,13 @@ class TestNIfTIMRSExport:
             assert filename.endswith('.nii.gz')
 
 
+#**************************************************************************************************#
+#                                       Class TestHDF5Export                                       #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test HDF5 export functionality.                                                                  #
+#                                                                                                  #
+#**************************************************************************************************#
 @pytest.mark.skipif(not HDF5_AVAILABLE, reason="h5py not installed")
 class TestHDF5Export:
     """Test HDF5 export functionality."""
@@ -289,6 +303,13 @@ class TestHDF5Export:
             assert f['data'].compression == 'gzip'
 
 
+#**************************************************************************************************#
+#                                    Class TestNIfTIMRSPlusSave                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test NIfTI_MRS_Plus save methods.                                                                #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNIfTIMRSPlusSave:
     """Test NIfTI_MRS_Plus save methods."""
 
@@ -368,6 +389,13 @@ class TestNIfTIMRSPlusSave:
             assert f['data'].compression_opts == 9
 
 
+#**************************************************************************************************#
+#                                      Class TestExportErrors                                      #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test error handling in export functions.                                                         #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestExportErrors:
     """Test error handling in export functions."""
 

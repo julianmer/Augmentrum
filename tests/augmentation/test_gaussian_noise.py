@@ -16,6 +16,13 @@ from augmentrum.augmentation.gaussian_noise import GaussianNoise
 from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 
 
+#**************************************************************************************************#
+#                                 Class TestGaussianNoiseCreation                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test GaussianNoise initialization.                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestGaussianNoiseCreation:
     """Test GaussianNoise initialization."""
 
@@ -56,6 +63,13 @@ class TestGaussianNoiseCreation:
         assert noise.SUPPORTED_BACKENDS == []
 
 
+#**************************************************************************************************#
+#                                  Class TestGaussianNoiseSNRMode                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test SNR-based noise addition.                                                                   #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestGaussianNoiseSNRMode:
     """Test SNR-based noise addition."""
 
@@ -100,6 +114,13 @@ class TestGaussianNoiseSNRMode:
         assert diff_low >= diff_high * 0.9  # 10% tolerance
 
 
+#**************************************************************************************************#
+#                                 Class TestGaussianNoiseSigmaMode                                 #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test sigma-based noise addition.                                                                 #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestGaussianNoiseSigmaMode:
     """Test sigma-based noise addition."""
 
@@ -128,6 +149,13 @@ class TestGaussianNoiseSigmaMode:
         assert np.allclose(result1[0][:], result2[0][:])
 
 
+#**************************************************************************************************#
+#                               Class TestGaussianNoiseSigmaFracMode                               #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test sigma-fraction based noise addition.                                                        #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestGaussianNoiseSigmaFracMode:
     """Test sigma-fraction based noise addition."""
 
@@ -156,6 +184,13 @@ class TestGaussianNoiseSigmaFracMode:
         assert result_data is not None
 
 
+#**************************************************************************************************#
+#                             Class TestGaussianNoiseMultipleSubjects                              #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test processing multiple subjects.                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestGaussianNoiseMultipleSubjects:
     """Test processing multiple subjects."""
 
@@ -181,6 +216,13 @@ class TestGaussianNoiseMultipleSubjects:
         assert not np.allclose(data1, data2)
 
 
+#**************************************************************************************************#
+#                              Class TestGaussianNoiseWaterReference                               #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test water reference handling.                                                                   #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestGaussianNoiseWaterReference:
     """Test water reference handling."""
 
@@ -209,6 +251,13 @@ class TestGaussianNoiseWaterReference:
         assert result_water is None
 
 
+#**************************************************************************************************#
+#                                  Class TestGaussianNoiseLogging                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test automatic logging/provenance.                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestGaussianNoiseLogging:
     """Test automatic logging/provenance."""
 
@@ -229,6 +278,13 @@ class TestGaussianNoiseLogging:
         assert result_data.metadata_common == {}
 
 
+#**************************************************************************************************#
+#                                 Class TestGaussianNoiseEdgeCases                                 #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test edge cases.                                                                                 #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestGaussianNoiseEdgeCases:
     """Test edge cases."""
 
@@ -241,6 +297,13 @@ class TestGaussianNoiseEdgeCases:
         assert len(result_data) == 1
 
 
+#**************************************************************************************************#
+#                                Class TestGaussianNoiseIntegration                                #
+#**************************************************************************************************#
+#                                                                                                  #
+# Integration tests.                                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestGaussianNoiseIntegration:
     """Integration tests."""
 

@@ -11,6 +11,9 @@
 #                                                                                                  #
 ####################################################################################################
 
+#*************#
+#   imports   #
+#*************#
 import numpy as np
 from typing import Optional, List
 from augmentrum.core.base_module import BaseModule
@@ -19,6 +22,13 @@ from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 from augmentrum.utils.tensor_ops import match_backend
 
 
+#**************************************************************************************************#
+#                                        Class Apodization                                         #
+#**************************************************************************************************#
+#                                                                                                  #
+# Apply apodization (truncation or exponential weighting) to MRS data.                             #
+#                                                                                                  #
+#**************************************************************************************************#
 class Apodization(BaseModule):
     """
     Apply apodization (truncation or exponential weighting) to MRS data.

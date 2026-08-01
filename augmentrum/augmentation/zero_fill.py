@@ -11,14 +11,24 @@
 #                                                                                                  #
 ####################################################################################################
 
+#*************#
+#   imports   #
+#*************#
 import numpy as np
 from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
-from augmentrum.utils.tensor_ops import _is_torch, _is_jax, _is_tf
+from augmentrum.utils.tensor_ops import is_torch, is_jax, is_tf
 from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 
 
+#**************************************************************************************************#
+#                                          Class ZeroFill                                          #
+#**************************************************************************************************#
+#                                                                                                  #
+# Zero-pad (or crop) the FID to a fixed target number of spectral points.                          #
+#                                                                                                  #
+#**************************************************************************************************#
 class ZeroFill(BaseModule):
     """
     Zero-pad (or crop) the FID to a fixed target number of spectral points.
@@ -122,17 +132,17 @@ class ZeroFill(BaseModule):
         pad_shape = list(data_array.shape)
         pad_shape[-1] = pad_n
 
-        if _is_torch(data_array):
+        if is_torch(data_array):
             import torch
             zeros = torch.zeros(pad_shape, dtype=data_array.dtype, device=data_array.device)
             return torch.cat([data_array, zeros], dim=-1), water_array
 
-        if _is_jax(data_array):
+        if is_jax(data_array):
             import jax.numpy as jnp
             zeros = jnp.zeros(pad_shape, dtype=data_array.dtype)
             return jnp.concatenate([data_array, zeros], axis=-1), water_array
 
-        if _is_tf(data_array):
+        if is_tf(data_array):
             import tensorflow as tf
             zeros = tf.zeros(pad_shape, dtype=data_array.dtype)
             return tf.concat([data_array, zeros], axis=-1), water_array

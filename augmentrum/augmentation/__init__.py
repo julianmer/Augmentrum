@@ -1,7 +1,24 @@
+####################################################################################################
+#                                     augmentation/__init__.py                                     #
+####################################################################################################
+#                                                                                                  #
+# Authors: K. C. Igwe (kci2104@columbia.edu)                                                       #
+#          J. P. Merkofer (j.p.merkofer@tue.nl)                                                    #
+#                                                                                                  #
+# Created: 2026-02-13                                                                              #
+#                                                                                                  #
+# Purpose: Re-exports the augmentation modules, each a BaseModule that perturbs MRS data in a      #
+#          physically motivated way.                                                               #
+#                                                                                                  #
+####################################################################################################
+
 """
 Augmentation modules for MRS data.
 """
 
+#*************#
+#   imports   #
+#*************#
 from augmentrum.augmentation.gaussian_noise import GaussianNoise
 from augmentrum.augmentation.line_broadening import LineBroadening
 from augmentrum.augmentation.baseline_augmentation import BaselineAugmentation

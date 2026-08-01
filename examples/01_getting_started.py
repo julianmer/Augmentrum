@@ -153,9 +153,9 @@ def plot_comparison(nifti_list, labels, title, ppmlim=(0.2, 4.2)):
     return fig
 
 
-# ============================================================================
-# PART 1: LOADING REAL MRS DATA
-# ============================================================================
+#***********************************#
+#   part 1: loading real mrs data   #
+#***********************************#
 
 print("\n" + "="*80)
 print(" PART 1: LOADING REAL MRS DATA")
@@ -224,9 +224,9 @@ plt.gcf().suptitle("Raw MRS Spectrum - Before Any Processing", fontsize=12, font
 plt.show()
 
 
-# ============================================================================
-# PART 2: BUILDING YOUR FIRST AUGMENTATION PIPELINE
-# ============================================================================
+#*******************************************************#
+#   part 2: building your first augmentation pipeline   #
+#*******************************************************#
 
 print("\n" + "="*80)
 print(" PART 2: BUILDING YOUR FIRST AUGMENTATION PIPELINE")
@@ -313,9 +313,9 @@ plot_comparison(
 )
 
 
-# ============================================================================
-# PART 3: UNDERSTANDING PARAMETERS - FIXED VS. RANDOM
-# ============================================================================
+#*********************************************************#
+#   part 3: understanding parameters - fixed vs. random   #
+#*********************************************************#
 
 print("\n" + "="*80)
 print(" PART 3: UNDERSTANDING PARAMETERS - THE KEY TO AUGMENTATION")
@@ -432,9 +432,9 @@ print("  • Use tuples (e.g., (0, 45)) for random, varied augmentations")
 print("  • Random ranges + mode='on-the-fly' = infinite training data!")
 
 
-# ============================================================================
-# PART 4: COMBINING MULTIPLE AUGMENTATIONS
-# ============================================================================
+#**********************************************#
+#   part 4: combining multiple augmentations   #
+#**********************************************#
 
 print("\n" + "="*80)
 print(" PART 4: COMBINING MULTIPLE AUGMENTATIONS")
@@ -549,9 +549,9 @@ plot_comparison(
 )
 
 
-# ============================================================================
-# PART 5: CREATING YOUR OWN CUSTOM MODULE
-# ============================================================================
+#*********************************************#
+#   part 5: creating your own custom module   #
+#*********************************************#
 
 print("\n" + "="*80)
 print(" PART 5: CREATING YOUR OWN CUSTOM AUGMENTATION MODULE")
@@ -589,6 +589,14 @@ class MyCustomModule(BaseModule):
         return data_list, water_list
 """)
 
+
+#**************************************************************************************************#
+#                                      Class AmplitudeScaling                                      #
+#**************************************************************************************************#
+#                                                                                                  #
+# Custom module: Scale FID amplitude by a random factor.                                           #
+#                                                                                                  #
+#**************************************************************************************************#
 class AmplitudeScaling(BaseModule):
     """
     Custom module: Scale FID amplitude by a random factor.
@@ -670,9 +678,9 @@ print("  • Support parameter ranges with isinstance(param, tuple) check")
 print("  • Mix custom modules with built-ins freely!")
 
 
-# ============================================================================
-# PART 6: PUTTING IT ALL TOGETHER - REALISTIC TRAINING SETUP
-# ============================================================================
+#****************************************************************#
+#   part 6: putting it all together - realistic training setup   #
+#****************************************************************#
 
 print("\n" + "="*80)
 print(" PART 6: PUTTING IT ALL TOGETHER FOR TRAINING")
@@ -762,9 +770,9 @@ for epoch in range(num_epochs):
 """)
 
 
-# ============================================================================
-# PART 7: PRE-PIPELINE - CACHING EXPENSIVE OPERATIONS
-# ============================================================================
+#*********************************************************#
+#   part 7: pre-pipeline - caching expensive operations   #
+#*********************************************************#
 
 print("\n" + "="*80)
 print(" PART 7: PRE-PIPELINE - EFFICIENT PREPROCESSING")
@@ -956,9 +964,9 @@ Result: Fast training with infinite variety! 🎉
 """)
 
 
-# ============================================================================
-# SUMMARY AND NEXT STEPS
-# ============================================================================
+#****************************#
+#   summary and next steps   #
+#****************************#
 
 print("\n" + "="*80)
 print(" 🎉 TUTORIAL COMPLETE!")

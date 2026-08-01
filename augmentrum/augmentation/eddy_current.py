@@ -11,6 +11,9 @@
 #                                                                                                  #
 ####################################################################################################
 
+#*************#
+#   imports   #
+#*************#
 import numpy as np
 from typing import Optional, List
 from scipy.signal import butter, filtfilt
@@ -20,6 +23,13 @@ from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from augmentrum.utils.tensor_ops import to_numpy, match_backend
 
 
+#**************************************************************************************************#
+#                                        Class EddyCurrent                                         #
+#**************************************************************************************************#
+#                                                                                                  #
+# Add eddy current phase distortions to MRS data.                                                  #
+#                                                                                                  #
+#**************************************************************************************************#
 class EddyCurrent(BaseModule):
     """
     Add eddy current phase distortions to MRS data.

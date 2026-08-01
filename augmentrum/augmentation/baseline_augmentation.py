@@ -1,5 +1,5 @@
 ####################################################################################################
-#                                  baseline_augmentation.py                                       #
+#                                     baseline_augmentation.py                                     #
 ####################################################################################################
 #                                                                                                  #
 # Authors: J. T. LaMaster (jlamaste@gmail.com)                                                     #
@@ -12,6 +12,9 @@
 #                                                                                                  #
 ####################################################################################################
 
+#*************#
+#   imports   #
+#*************#
 import numpy as np
 from typing import Optional, List, Tuple
 from scipy.signal import convolve
@@ -21,175 +24,13 @@ from augmentrum.core.base_module import BaseModule
 from augmentrum.utils.tensor_ops import to_numpy, match_backend
 
 
-# ============================================================================
-# Helper Functions (from original augment_mrs.py lines 329-366)
-# ============================================================================
-
-def moving_average(x, w):
-    """Apply moving average smoothing."""
-    if w <= 1:
-        return x
-    kernel = np.ones(int(w), float) / float(w)
-    return convolve(x, kernel, mode="same")
-
-
-def bounded_random_walk(n, *, step_sd=1e-3, lo=-1.0, hi=1.0, seed=None):
-    """
-    Reflecting bounded random walk of length n (real-valued).
-
-    Args:
-        n: Number of points
-        step_sd: Standard deviation of step size
-        lo: Lower bound
-        hi: Upper bound
-        seed: Random seed
-
-    Returns:
-        Array of random walk values
-    """
-    rng = np.random.default_rng(seed)
-    y = np.empty(n, float)
-    v = 0.0
-    for i in range(n):
-        v += rng.normal(0.0, step_sd)
-        # Reflect at the bounds
-        if v < lo:
-            v = lo + (lo - v)
-        if v > hi:
-            v = hi - (v - hi)
-        y[i] = v
-    return y
-
-
-def make_rw_baseline_freq(n_points, *, step_sd=1e-3, bounds_amp=1.0,
-                          smooth_pts=101, seed=123):
-    """
-    Create a smooth, bounded RW baseline (real) in frequency domain.
-
-    Args:
-        n_points: Number of spectral points
-        step_sd: Step size standard deviation (smaller = smoother)
-        bounds_amp: Amplitude bounds [-bounds_amp, +bounds_amp]
-        smooth_pts: Moving average window size (bigger = smoother)
-        seed: Random seed
-
-    Returns:
-        Baseline array (fftshifted order)
-    """
-    raw = bounded_random_walk(n_points, step_sd=step_sd,
-                              lo=-bounds_amp, hi=bounds_amp, seed=seed)
-    base = moving_average(raw, smooth_pts)
-    return base
-
-
-def scale_baseline_to_spec(baseline, spec, frac=0.05):
-    """
-    Scale baseline to a fraction of the spectrum's real peak (visibility).
-
-    Args:
-        baseline: Raw baseline array
-        spec: Complex spectrum
-        frac: Fraction of spectrum peak (e.g., 0.05 = 5%)
-
-    Returns:
-        Scaled baseline
-    """
-    scale = frac * np.max(np.abs(np.real(spec)))
-    return baseline * scale
-
-
-# B-spline helpers (from augment_mrs.py lines 688-713)
-def _cubic_bspline_basis(x, knots, degree=3):
-    """Return B-spline basis (design) matrix for given x and knot vector."""
-    # Open uniform knot vector with clamped ends for cubic splines
-    k = degree
-    # Pad end knots (k+1 repeats) for clamping
-    t0, t1 = knots[0], knots[-1]
-    t = np.r_[t0*np.ones(k), knots, t1*np.ones(k)]
-    n_b = len(t) - (k + 1)  # number of basis funcs
-    B = np.empty((x.size, n_b))
-    # coefficient vectors are unit vectors to evaluate each basis function
-    for j in range(n_b):
-        c = np.zeros(n_b)
-        c[j] = 1.0
-        B[:, j] = BSpline(t, c, k, extrapolate=True)(x)
-    return B
-
-
-def _diff_matrix_2(n):
-    """Second-order finite-difference matrix (n-2 rows by n cols)."""
-    D = np.zeros((n-2, n))
-    r = np.arange(n-2)
-    D[r,   r  ] = 1.0
-    D[r, r+1] = -2.0
-    D[r, r+2] = 1.0
-    return D
-
-
-# Polynomial helpers (from augment_mrs.py lines 633-685)
-def auto_baseline_windows(ppm, margin_ppm=0.5):
-    """
-    Suggests two baseline windows near the edges of the spectral range.
-    """
-    ppm_min, ppm_max = ppm.min(), ppm.max()
-
-    # Ensure the windows are returned in an intuitive, increasing (or decreasing) order
-    # based on the natural flow of the ppm axis.
-    if ppm_min < ppm_max:
-        # Example: [0 ppm, 10 ppm] -> [0, 0.5] and [9.5, 10]
-        return [
-            (ppm_min, ppm_min + margin_ppm),  # lower edge window (e.g., ~0.0 to 0.5 ppm)
-            (ppm_max - margin_ppm, ppm_max)   # upper edge window (e.g., ~9.5 to 10.0 ppm)
-        ]
-    else:
-        # Example: [10 ppm, 0 ppm] -> [10, 9.5] and [0.5, 0]
-        return [
-            (ppm_min, ppm_min - margin_ppm),  # lower edge window (e.g., ~10.0 to 9.5 ppm)
-            (ppm_max + margin_ppm, ppm_max)   # upper edge window (e.g., ~0.5 to 0.0 ppm)
-        ]
-
-
-def calculate_ppm_and_mask(fid, sw_hz, sf_hz, ref_ppm, ppm_windows):
-    """Internal function to transform FID, calculate PPM axis, and create the baseline mask.
-
-    Note: ``sf_hz`` is the Larmor frequency in **MHz** (matching NIfTI-MRS convention).
-    It is converted to Hz internally for the ppm calculation, exactly as in the legacy
-    ``augment_mrs.py`` implementation.
-    """
-    spec = np.fft.fftshift(np.fft.ifft(fid))
-    N = spec.size
-
-    # Larmor frequency in Hz (sf_hz is passed in MHz, hence *1e6)
-    sf_hz_abs = sf_hz * 1e6
-
-    # Calculate frequency offset (in Hz), centered at 0
-    freq_offset_hz = np.fft.fftshift(np.fft.fftfreq(N, d=1.0/sw_hz))
-
-    # Calculate ppm axis: ref_ppm - (f - f_ref) / sf_hz_abs
-    ppm = ref_ppm - freq_offset_hz / sf_hz_abs
-    ppm = np.asarray(ppm)
-
-    mask_baseline = np.zeros_like(ppm, dtype=bool)
-
-    if ppm_windows is None:
-        ppm_windows = auto_baseline_windows(ppm)
-
-    # Iterate through all defined ppm windows
-    for (p1, p2) in ppm_windows:
-        # Determine the low and high ppm values for masking, regardless of p1/p2 order
-        p_low = min(p1, p2)
-        p_high = max(p1, p2)
-
-        region_mask = (ppm >= p_low) & (ppm <= p_high)
-        mask_baseline = np.logical_or(mask_baseline, region_mask)
-
-    return spec, N, mask_baseline
-
-
-# ============================================================================
-# BaselineAugmentation Module
-# ============================================================================
-
+#**************************************************************************************************#
+#                                    Class BaselineAugmentation                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# Add baseline distortions to MRS data.                                                            #
+#                                                                                                  #
+#**************************************************************************************************#
 class BaselineAugmentation(BaseModule):
     """
     Add baseline distortions to MRS data.
@@ -247,6 +88,103 @@ class BaselineAugmentation(BaseModule):
     """
 
     SUPPORTED_BACKENDS = []  # Supports all backends
+
+    #*****************#
+    #   helper math   #
+    #*****************#
+
+    @staticmethod
+    def _moving_average(x, w):
+        """Apply moving average smoothing."""
+        if w <= 1:
+            return x
+        kernel = np.ones(int(w), float) / float(w)
+        return convolve(x, kernel, mode="same")
+
+    @staticmethod
+    def _cubic_bspline_basis(x, knots, degree=3):
+        """Return B-spline basis (design) matrix for given x and knot vector."""
+        # Open uniform knot vector with clamped ends for cubic splines
+        k = degree
+        # Pad end knots (k+1 repeats) for clamping
+        t0, t1 = knots[0], knots[-1]
+        t = np.r_[t0*np.ones(k), knots, t1*np.ones(k)]
+        n_b = len(t) - (k + 1)  # number of basis funcs
+        B = np.empty((x.size, n_b))
+        # coefficient vectors are unit vectors to evaluate each basis function
+        for j in range(n_b):
+            c = np.zeros(n_b)
+            c[j] = 1.0
+            B[:, j] = BSpline(t, c, k, extrapolate=True)(x)
+        return B
+
+    @staticmethod
+    def _diff_matrix_2(n):
+        """Second-order finite-difference matrix (n-2 rows by n cols)."""
+        D = np.zeros((n-2, n))
+        r = np.arange(n-2)
+        D[r,   r  ] = 1.0
+        D[r, r+1] = -2.0
+        D[r, r+2] = 1.0
+        return D
+
+    @staticmethod
+    def _auto_baseline_windows(ppm, margin_ppm=0.5):
+        """
+        Suggests two baseline windows near the edges of the spectral range.
+        """
+        ppm_min, ppm_max = ppm.min(), ppm.max()
+
+        # Ensure the windows are returned in an intuitive, increasing (or decreasing) order
+        # based on the natural flow of the ppm axis.
+        if ppm_min < ppm_max:
+            # Example: [0 ppm, 10 ppm] -> [0, 0.5] and [9.5, 10]
+            return [
+                (ppm_min, ppm_min + margin_ppm),  # lower edge window (e.g., ~0.0 to 0.5 ppm)
+                (ppm_max - margin_ppm, ppm_max)   # upper edge window (e.g., ~9.5 to 10.0 ppm)
+            ]
+        else:
+            # Example: [10 ppm, 0 ppm] -> [10, 9.5] and [0.5, 0]
+            return [
+                (ppm_min, ppm_min - margin_ppm),  # lower edge window (e.g., ~10.0 to 9.5 ppm)
+                (ppm_max + margin_ppm, ppm_max)   # upper edge window (e.g., ~0.5 to 0.0 ppm)
+            ]
+
+    @staticmethod
+    def _calculate_ppm_and_mask(fid, sw_hz, sf_hz, ref_ppm, ppm_windows):
+        """Internal function to transform FID, calculate PPM axis, and create the baseline mask.
+
+        Note: ``sf_hz`` is the Larmor frequency in **MHz** (matching NIfTI-MRS convention).
+        It is converted to Hz internally for the ppm calculation.
+        """
+        spec = np.fft.fftshift(np.fft.ifft(fid))
+        N = spec.size
+
+        # Larmor frequency in Hz (sf_hz is passed in MHz, hence *1e6)
+        sf_hz_abs = sf_hz * 1e6
+
+        # Calculate frequency offset (in Hz), centered at 0
+        freq_offset_hz = np.fft.fftshift(np.fft.fftfreq(N, d=1.0/sw_hz))
+
+        # Calculate ppm axis: ref_ppm - (f - f_ref) / sf_hz_abs
+        ppm = ref_ppm - freq_offset_hz / sf_hz_abs
+        ppm = np.asarray(ppm)
+
+        mask_baseline = np.zeros_like(ppm, dtype=bool)
+
+        if ppm_windows is None:
+            ppm_windows = BaselineAugmentation._auto_baseline_windows(ppm)
+
+        # Iterate through all defined ppm windows
+        for (p1, p2) in ppm_windows:
+            # Determine the low and high ppm values for masking, regardless of p1/p2 order
+            p_low = min(p1, p2)
+            p_high = max(p1, p2)
+
+            region_mask = (ppm >= p_low) & (ppm <= p_high)
+            mask_baseline = np.logical_or(mask_baseline, region_mask)
+
+        return spec, N, mask_baseline
 
     def __init__(self, mode: str = 'random_walk', baseline_frac: float = 0.05,
                  # Random walk params
@@ -402,7 +340,7 @@ class BaselineAugmentation(BaseModule):
     def _make_rw_baseline(self, n_points: int) -> np.ndarray:
         """Create smooth, bounded random walk baseline."""
         raw = self._bounded_random_walk(n_points)
-        baseline = moving_average(raw, self.smooth_pts)
+        baseline = BaselineAugmentation._moving_average(raw, self.smooth_pts)
         return baseline
 
     def _bounded_random_walk(self, n: int) -> np.ndarray:
@@ -423,7 +361,7 @@ class BaselineAugmentation(BaseModule):
 
     def _add_bspline_baseline(self, fid: np.ndarray, sw_hz: float, sf_mhz: float,
                               ref_ppm: float = 4.7) -> np.ndarray:
-        """Add B-spline baseline to FID (uses exact code from augment_mrs.py)."""
+        """Add a penalised B-spline baseline to the FID."""
         original_shape = fid.shape
         N = original_shape[-1]
         fid_2d = fid.reshape(-1, N)
@@ -432,7 +370,7 @@ class BaselineAugmentation(BaseModule):
         for i in range(fid_2d.shape[0]):
             fid_1d = fid_2d[i]
 
-            # ---- Go to (shifted) frequency domain (EXACT from augment_mrs.py) ----
+            # Go to the (shifted) frequency domain
             spec = np.fft.fftshift(np.fft.ifft(fid_1d))
             dt = 1.0 / float(sw_hz)
             freq_hz = np.fft.fftshift(np.fft.fftfreq(N, d=dt))
@@ -443,11 +381,11 @@ class BaselineAugmentation(BaseModule):
             span_ppm = float(ppm_max - ppm_min)
             n_knots = max(8, int(np.ceil(span_ppm * self.knots_per_ppm)))  # interior knots
             knots = np.linspace(ppm_min, ppm_max, n_knots)
-            B = _cubic_bspline_basis(ppm, knots, degree=3)            # [N x n_b]
+            B = BaselineAugmentation._cubic_bspline_basis(ppm, knots, degree=3)            # [N x n_b]
             n_b = B.shape[1]
 
             # ---- P-spline penalty (2nd-diff on coefficients) ----
-            D = _diff_matrix_2(n_b)
+            D = BaselineAugmentation._diff_matrix_2(n_b)
 
             # ---- Choose lambda from desired ED/ppm (rough heuristic) ----
             target_ED = max(2.0, self.ed_per_ppm * span_ppm)  # lower bound 2 for straight line with 2 dof
@@ -499,7 +437,6 @@ class BaselineAugmentation(BaseModule):
 
         Fits a polynomial to the actual spectrum values at baseline-region points,
         then adds the resulting smooth polynomial curve to the full spectrum.
-        This reproduces the behaviour of augment_mrs.py ``baseline_add_poly``.
         """
         original_shape = fid.shape
         N = original_shape[-1]
@@ -510,7 +447,7 @@ class BaselineAugmentation(BaseModule):
             fid_1d = fid_2d[i]
 
             # calculate_ppm_and_mask uses ifft internally (correct for FID→spectrum)
-            spec, N_pts, mask_baseline = calculate_ppm_and_mask(fid_1d, sw_hz, sf_mhz, ref_ppm, self.ppm_windows)
+            spec, N_pts, mask_baseline = BaselineAugmentation._calculate_ppm_and_mask(fid_1d, sw_hz, sf_mhz, ref_ppm, self.ppm_windows)
 
             idx = np.flatnonzero(mask_baseline)
             x = np.arange(N_pts)

@@ -30,13 +30,9 @@ from augmentrum import Augmentrum
 from augmentrum.utils.philips import read_Philips_data
 
 
-#**************************************************************************************************#
-#                                    Function: fMRSinPainData                                      #
-#**************************************************************************************************#
-#                                                                                                  #
-# Helper function to load the fMRSinPain dataset and create an Augmentrum instance.                #
-#                                                                                                  #
-#**************************************************************************************************#
+#****************************#
+#   fmrsinpain data loader   #
+#****************************#
 def fMRSinPainData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
                    n_coils=(1, None), n_averages=(1, None), pipelines=None,
                    modes=None, backend='pytorch', volatile=False, **kwargs):
@@ -111,11 +107,7 @@ def fMRSinPainData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
 
 
 #**************************************************************************************************#
-#                                       Class InVivoNSAModule                                      #
-#**************************************************************************************************#
-#                                                                                                  #
-# The data module to load in-vivo data with individual NSA.                                        #
-#                                                                                                  #
+#                                      Class InVivoNSAModule                                       #
 #**************************************************************************************************#
 class InVivoNSAModule:
 

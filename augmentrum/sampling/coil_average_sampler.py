@@ -25,11 +25,10 @@ from augmentrum.core import Backend
 
 
 #**************************************************************************************************#
-#                                        Class CoilAverageSampler                                  #
+#                                     Class CoilAverageSampler                                     #
 #**************************************************************************************************#
 #                                                                                                  #
-# Samples coils and averages from raw MRS data. Supports random/deterministic selection            #
-# and reweighting.                                                                                 #
+# Samples coils and averages from raw MRS data.                                                    #
 #                                                                                                  #
 #**************************************************************************************************#
 class CoilAverageSampler(BaseModule):

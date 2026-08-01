@@ -15,6 +15,13 @@ from augmentrum import Augmentrum
 from augmentrum.core import Backend
 
 
+#**************************************************************************************************#
+#                                 Class TestParameterRangeSupport                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test that all parameters support tuple ranges.                                                   #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestParameterRangeSupport:
     """Test that all parameters support tuple ranges."""
 
@@ -130,6 +137,13 @@ class TestParameterRangeSupport:
         assert augmenter is not None
 
 
+#**************************************************************************************************#
+#                                  Class TestDistributionSampling                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test different distribution types.                                                               #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestDistributionSampling:
     """Test different distribution types."""
 
@@ -196,6 +210,13 @@ class TestDistributionSampling:
             assert augmenter is not None
 
 
+#**************************************************************************************************#
+#                               Class TestPerParameterDistributions                                #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test per-parameter distribution control.                                                         #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestPerParameterDistributions:
     """Test per-parameter distribution control."""
 
@@ -252,6 +273,13 @@ class TestPerParameterDistributions:
         assert augmenter is not None
 
 
+#**************************************************************************************************#
+#                                      Class TestNestedRanges                                      #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test nested tuple ranges for complex augmentations.                                              #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestNestedRanges:
     """Test nested tuple ranges for complex augmentations."""
 
@@ -334,6 +362,13 @@ class TestNestedRanges:
         assert augmenter is not None
 
 
+#**************************************************************************************************#
+#                              Class TestParameterSamplingIntegration                              #
+#**************************************************************************************************#
+#                                                                                                  #
+# Integration tests for parameter sampling.                                                        #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestParameterSamplingIntegration:
     """Integration tests for parameter sampling."""
 
