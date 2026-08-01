@@ -36,6 +36,7 @@ from augmentrum.sampling.coil_average_sampler import CoilAverageSampler
 from augmentrum.sampling.kspace_sampling import KspaceUndersampling
 
 # Augmentation modules
+from augmentrum.augmentation.amplitude_scaling import AmplitudeScaling
 from augmentrum.augmentation.gaussian_noise import GaussianNoise
 from augmentrum.augmentation.line_broadening import LineBroadening
 from augmentrum.augmentation.baseline_augmentation import BaselineAugmentation
@@ -164,6 +165,10 @@ class Augmentrum:
         # Noise
         'noise': GaussianNoise,
         'gaussian_noise': GaussianNoise,
+
+        # Amplitude
+        'amplitude': AmplitudeScaling,
+        'amplitude_scaling': AmplitudeScaling,
 
         # Line broadening
         'line_broadening': LineBroadening,

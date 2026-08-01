@@ -35,6 +35,7 @@ from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 
 from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 from augmentrum.core.base_module import BaseModule
+from tests.module_specs import SPECS
 
 # ── augmentation imports ──────────────────────────────────────────────────────
 from augmentrum.augmentation import (
@@ -115,13 +116,15 @@ class ModuleEntry:
         factory:          Zero-arg callable returning a fresh module instance.
         note:             Free-text note shown in the summary for known issues.
         needs_multicoil:  Use multi-coil NIfTI fixture (needs DIM_COIL + DIM_DYN).
-        spatial:          Special-case: image-tensor module (SpatialAugmentations).
+        spatial:          Special-case: 2-D image-tensor module (SpatialAugmentations).
+        volume:           Special-case: 5-D volume module (KspaceUndersampling).
     """
     name:            str
     factory:         Callable
     note:            str  = ""
     needs_multicoil: bool = False
     spatial:         bool = False
+    volume:          bool = False
 
 
 #****************************************************#
@@ -129,98 +132,10 @@ class ModuleEntry:
 #****************************************************#
 
 _REGISTRY: list[ModuleEntry] = [
-
-    # ── amplitude ─────────────────────────────────────────────────────────────
-    ModuleEntry("AmplitudeScaling[uniform]",
-                lambda: AmplitudeScaling(scale_factor=0.8)),
-    ModuleEntry("AmplitudeScaling[range]",
-                lambda: AmplitudeScaling(scale_factor=(0.7, 1.3))),
-
-    # ── apodization ───────────────────────────────────────────────────────────
-    ModuleEntry("Apodization[exponential]",
-                lambda: Apodization(mode="exponential", lb_hz=5.0)),
-    ModuleEntry("Apodization[truncate]",
-                lambda: Apodization(mode="truncate", n_pts=256)),
-
-    # ── artificial peaks ──────────────────────────────────────────────────────
-    ModuleEntry("ArtificialPeaks",     lambda: ArtificialPeaks()),
-
-    # ── baseline ──────────────────────────────────────────────────────────────
-    ModuleEntry("BaselineAugmentation[random_walk]",
-                lambda: BaselineAugmentation(mode="random_walk")),
-    ModuleEntry("BaselineAugmentation[bspline]",
-                lambda: BaselineAugmentation(mode="bspline"),
-                note="float32 precision → bspline solver NaN/overflow (TODO)"),
-    ModuleEntry("BaselineAugmentation[polynomial]",
-                lambda: BaselineAugmentation(mode="polynomial")),
-
-    # ── eddy currents ─────────────────────────────────────────────────────────
-    ModuleEntry("EddyCurrent[synthetic]",
-                lambda: EddyCurrent(mode="synthetic")),
-
-    # ── frequency / phase ─────────────────────────────────────────────────────
-    ModuleEntry("FrequencyShift",
-                lambda: FrequencyShift(shift_hz=5.0)),
-    ModuleEntry("PhaseShift[zero_order]",
-                lambda: PhaseShift(zero_order_deg=30.0)),
-    ModuleEntry("PhaseShift[first_order]",
-                lambda: PhaseShift(first_order_deg=45.0)),
-
-    # ── noise ─────────────────────────────────────────────────────────────────
-    ModuleEntry("GaussianNoise[sigma]",
-                lambda: GaussianNoise(sigma=0.01)),
-    ModuleEntry("GaussianNoise[snr_db]",
-                lambda: GaussianNoise(snr_db=20.0)),
-    ModuleEntry("GaussianNoise[sigma_frac]",
-                lambda: GaussianNoise(sigma_frac=0.02)),
-
-    # ── line broadening ───────────────────────────────────────────────────────
-    ModuleEntry("LineBroadening[lorentzian]",
-                lambda: LineBroadening(lb_hz=5.0, mode="lorentzian")),
-    ModuleEntry("LineBroadening[gaussian]",
-                lambda: LineBroadening(gb_hz=5.0, mode="gaussian")),
-    ModuleEntry("LineBroadening[voigt]",
-                lambda: LineBroadening(lb_hz=3.0, gb_hz=2.0, mode="voigt")),
-
-    # ── residual water ────────────────────────────────────────────────────────
-    ModuleEntry("ResidualWater",       lambda: ResidualWater()),
-
-    # ── spurious echoes ───────────────────────────────────────────────────────
-    ModuleEntry("SpuriousEchoes[replica]",
-                lambda: SpuriousEchoes(mode="replica")),
-    ModuleEntry("SpuriousEchoes[hybrid]",
-                lambda: SpuriousEchoes(mode="hybrid")),
-
-    # ── zero fill ─────────────────────────────────────────────────────────────
-    ModuleEntry("ZeroFill[pad]",
-                lambda: ZeroFill(target_pts=1024)),   # 512 → 1024 (double)
-    ModuleEntry("ZeroFill[crop]",
-                lambda: ZeroFill(target_pts=256)),    # 512 → 256  (half)
-
-    # ── spatial ───────────────────────────────────────────────────────────────
-    ModuleEntry("SpatialAugmentations",
-                lambda: SpatialAugmentations(dim=2, prob=1.0),
-                note="Image module — NIfTI/NumPy convert to PyTorch (F.grid_sample) internally",
-                spatial=True),
-
-    # ── processing ────────────────────────────────────────────────────────────
-    ModuleEntry("NIfTI_RawProcessor",
-                lambda: NIfTI_RawProcessor(
-                    conj=False, coil=False, align=False, remove_outliers=False,
-                    average=False, ecc=False, truncate=False, remove_water=False,
-                    shift_ref=False, phase_correct=False,
-                ),
-                note="NIfTI-native; non-NIfTI auto-route; all steps disabled for speed",
-                needs_multicoil=True),
-
-    # ── sampling ──────────────────────────────────────────────────────────────
-    ModuleEntry("CoilAverageSampler",
-                lambda: CoilAverageSampler(mode="random", n_coils=2, n_averages=4),
-                note="NIfTI-native; non-NIfTI auto-route; needs DIM_COIL data",
-                needs_multicoil=True),
-
-    # ── KspaceReconstructor: standalone function — tested in class below ───────
-    # (not a BaseModule, PyTorch-only, needs torchkbnufft)
+    ModuleEntry(spec.label, spec.factory, note=spec.note,
+                needs_multicoil=spec.needs_multicoil, spatial=spec.spatial,
+                volume=spec.volume)
+    for spec in SPECS
 ]
 
 
@@ -298,6 +213,25 @@ def _run_mrs_module(module, nifti_list, backend_enum) -> float:
     return (time.perf_counter() - t0) * 1000.0
 
 
+def _run_volume_module(module, backend_enum) -> float:
+    """
+    Modules that take a 5-D MRSI volume ``(batch, X, Y, Z, T)``.
+
+    The spectra fixtures cannot exercise these — ``KspaceUndersampling`` masks
+    k-space across the spatial axes, so handing it a ``(1, 1, 1, N_PTS)`` spectrum
+    raises on the layout check rather than telling you anything about backend
+    support.
+    """
+    x_np = (np.random.randn(1, 8, 8, 4, 16)
+            + 1j * np.random.randn(1, 8, 8, 4, 16)).astype(np.complex64)
+    t0 = time.perf_counter()
+    if backend_enum == PYTORCH and TORCH_AVAILABLE:
+        module.process_tensor(torch.from_numpy(x_np))
+    else:
+        module.process_tensor(x_np)
+    return (time.perf_counter() - t0) * 1000.0
+
+
 def _run_spatial_module(module, backend_enum) -> float:
     x_np = np.random.randn(2, 1, 32, 32).astype(np.float32)
     t0 = time.perf_counter()
@@ -340,9 +274,14 @@ def test_discover_backend_support(
             pytest.skip(f"{pkg} not installed")
 
     # ── choose runner ─────────────────────────────────────────────────────────
-    runner   = _run_spatial_module if entry.spatial else _run_mrs_module
+    if entry.volume:
+        runner = _run_volume_module
+    elif entry.spatial:
+        runner = _run_spatial_module
+    else:
+        runner = _run_mrs_module
     run_args = (entry.factory(),) + (
-        (backend_enum,) if entry.spatial
+        (backend_enum,) if (entry.spatial or entry.volume)
         else (multi_coil_nifti_list if entry.needs_multicoil else single_coil_nifti_list,
               backend_enum)
     )

@@ -20,7 +20,7 @@ from typing import List, Optional, Union, Tuple
 import numpy as np
 from fsl_mrs.core import NIFTI_MRS
 
-from augmentrum.core.base_module import BaseModule
+from augmentrum.core.base_module import BaseModule, init_params
 from augmentrum.core.nifti_mrs_plus import Backend
 from augmentrum.utils.tensor_ops import match_backend
 
@@ -77,7 +77,7 @@ class AmplitudeScaling(BaseModule):
         **kwargs
     ):
         """Initialize AmplitudeScaling module."""
-        super().__init__(**kwargs)
+        super().__init__(**init_params(locals()))
 
         self.scale_factor = scale_factor
         self.distribution = distribution

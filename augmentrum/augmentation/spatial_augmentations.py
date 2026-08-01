@@ -23,7 +23,7 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, List, Dict, Any, Union
 
 import numpy as np
-from augmentrum.core.base_module import BaseModule
+from augmentrum.core.base_module import BaseModule, init_params
 from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from augmentrum.utils.geometry import Affine
 
@@ -86,8 +86,6 @@ class SpatialAugmentations(BaseModule):
                  zoom_min: float = 0.9,
                  zoom_max: float = 1.1,
                  shear_max: float = 0.15,
-                 scale_min: float = 0.9,
-                 scale_max: float = 1.1,
                  translation_prob: Optional[float] = None,
                  # csm-pipeline overrides (if None, fall back to the data-pipeline value)
                  csm_max_z_angle_deg: Optional[float] = 359.0,
@@ -113,7 +111,6 @@ class SpatialAugmentations(BaseModule):
         max_random_angle_deg: max random rotation angle (degrees)
         zoom_min, zoom_max: bounds of the zoom factor range
         shear_max: max shear magnitude
-        scale_min, scale_max: bounds of the anisotropic scale factor range
         translation_prob: probability of applying translation. None (default) uses
                 `prob`, like every other augmentation. Setting it makes translation
                 more or less likely than the rest; `prob=0` still disables
@@ -146,8 +143,7 @@ class SpatialAugmentations(BaseModule):
         for per-batch sampling in on-the-fly mode — e.g. zoom_min=(0.85, 0.95)
         means the lower zoom bound is sampled uniformly from [0.85, 0.95] each batch.
         """
-        super().__init__(dim=dim, prob=prob, min_coils=min_coils,
-                         max_coils=max_coils, pipeline=pipeline)
+        super().__init__(**init_params(locals()))
         assert dim in (2, 3)
         self.dim = dim
         self.prob = float(prob)
@@ -176,8 +172,6 @@ class SpatialAugmentations(BaseModule):
         self.zoom_min = zoom_min
         self.zoom_max = zoom_max
         self.shear_max = shear_max
-        self.scale_min = scale_min
-        self.scale_max = scale_max
         self.translation_prob = translation_prob
         self.csm_max_z_angle_deg = csm_max_z_angle_deg if csm_max_z_angle_deg is not None else max_z_angle_deg
 
@@ -203,7 +197,6 @@ class SpatialAugmentations(BaseModule):
             'max_random_angle_deg': self.max_random_angle_deg,
             'zoom_range': (self.zoom_min, self.zoom_max),
             'shear_max': self.shear_max,
-            'scale_range': (self.scale_min, self.scale_max),
             'translation_prob': self.translation_prob,
         }
         ranges.update(self._extra_data_ranges)
@@ -218,7 +211,6 @@ class SpatialAugmentations(BaseModule):
             'max_random_angle_deg': self.max_random_angle_deg,
             'zoom_range': (self.zoom_min, self.zoom_max),
             'shear_max': self.shear_max,
-            'scale_range': (self.scale_min, self.scale_max),
             'translation_prob': self.translation_prob,
         }
         ranges.update(self._extra_csm_ranges)
@@ -297,11 +289,14 @@ class SpatialAugmentations(BaseModule):
             if do_rot90:
                 k_rot90 = torch.randint(1, 4, (1,), generator=rng).item()
 
-            # zoom factor
-            zoom_factor = 1.0
-            if do_zoom:
+            # Zoom, per axis. One range feeds both behaviours: do_anisotropic
+            # draws each axis independently, do_zoom draws once and broadcasts —
+            # isotropic being the special case ax = ay = az. They used to be two
+            # separate parameters that multiplied, so the reachable maximum was
+            # zoom_max * scale_max = 1.21 rather than the 1.1 either one implied.
+            def _draw_zoom():
                 lo, hi = ranges['zoom_range']
-                zoom_factor = lo + (hi - lo) * torch.rand(1, generator=rng).item()
+                return lo + (hi - lo) * torch.rand(1, generator=rng).item()
 
             # shear
             shx = 0.0
@@ -324,16 +319,14 @@ class SpatialAugmentations(BaseModule):
                 if self.dim == 3:
                     flip_z = bool(torch.rand(1, generator=rng).item() < 0.5)
 
-            # anisotropic scaling
-            scale_x = 1.0
-            scale_y = 1.0
-            scale_z = 1.0
+            # anisotropic wins when both are set: it is the general case
+            zoom_x = zoom_y = zoom_z = 1.0
             if do_anisotropic:
-                lo, hi = ranges['scale_range']
-                scale_x = lo + (hi - lo) * torch.rand(1, generator=rng).item()
-                scale_y = lo + (hi - lo) * torch.rand(1, generator=rng).item()
+                zoom_x, zoom_y = _draw_zoom(), _draw_zoom()
                 if self.dim == 3:
-                    scale_z = lo + (hi - lo) * torch.rand(1, generator=rng).item()
+                    zoom_z = _draw_zoom()
+            elif do_zoom:
+                zoom_x = zoom_y = zoom_z = _draw_zoom()
 
             # coil subsampling
             coil_keep = None
@@ -354,14 +347,13 @@ class SpatialAugmentations(BaseModule):
                 'random_rot_deg': random_rot_deg,
                 'rot_axis': rot_axis,
                 'do_zoom': do_zoom,
-                'zoom_factor': zoom_factor,
                 'do_shear': do_shear,
                 'shear_xy': (shx, shy),
                 'shear_z': shz,
                 'do_flip': do_flip,
                 'flip_x': flip_x, 'flip_y': flip_y, 'flip_z': flip_z,
                 'do_anisotropic': do_anisotropic,
-                'scale_xyz': (scale_x, scale_y, scale_z),
+                'zoom_xyz': (zoom_x, zoom_y, zoom_z),
                 'do_coil_sub': do_coil_sub,
                 'coil_keep': coil_keep,
                 'pipeline': pipeline,  # Track which pipeline was used
@@ -390,9 +382,7 @@ class SpatialAugmentations(BaseModule):
                 # random rotation
                 if spec['do_random_csm_rot']:
                     rot_rad += math.radians(spec['random_rot_deg'])
-                sx, sy, _ = spec['scale_xyz']
-                sx *= spec['zoom_factor']
-                sy *= spec['zoom_factor']
+                sx, sy, _ = spec['zoom_xyz']
                 shx, shy = spec['shear_xy']
                 tx = spec['tx']
                 ty = spec['ty']
@@ -436,10 +426,7 @@ class SpatialAugmentations(BaseModule):
                     [0.0, shz, 1.0]
                 ], dtype=torch.float32)
                 # scale
-                sx, sy, sz = spec['scale_xyz']
-                sx *= spec['zoom_factor']
-                sy *= spec['zoom_factor']
-                sz *= spec['zoom_factor']
+                sx, sy, sz = spec['zoom_xyz']
                 tx = spec['tx']
                 ty = spec['ty']
                 tz = spec['tz']

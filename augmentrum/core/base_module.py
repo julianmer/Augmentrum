@@ -14,12 +14,37 @@
 #   imports   #
 #*************#
 from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 
 
+#*****************#
+#   init params   #
+#*****************#
+def init_params(local_vars: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    A constructor's arguments as a flat dict, for the provenance record.
+
+    Call it as the FIRST statement of ``__init__``, where ``locals()`` still holds
+    exactly the parameters::
+
+        super().__init__(**init_params(locals()))
+
+    Modules used to name a hand-picked subset in their ``super().__init__`` call,
+    or to forward only ``**kwargs``. Both silently under-record: what reaches the
+    NIfTI header is ``self.params``, so an argument left out of that call is an
+    argument the dataset cannot tell you about. Four of sixteen modules were
+    affected, two of them recording nothing at all. Passing ``locals()`` cannot
+    drift out of step with the signature the way a hand-written list does.
+    """
+    params = {k: v for k, v in local_vars.items()
+              if k not in ('self', '__class__', 'kwargs')}
+    params.update(local_vars.get('kwargs') or {})
+    return params
+
+
 #**************************************************************************************************#
-#                                         Class BaseModule                                         #
+#                                        Class BaseModule                                          #
 #**************************************************************************************************#
 #                                                                                                  #
 # Unified base class for ALL augmentation/processing pipeline modules.                             #

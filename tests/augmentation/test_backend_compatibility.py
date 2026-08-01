@@ -21,6 +21,7 @@ import numpy as np
 from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 
 from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
+from tests.module_specs import SPECS
 from augmentrum.augmentation import (
     GaussianNoise,
     LineBroadening,
@@ -81,30 +82,20 @@ N_PTS      = 2048   # spectral points
 DWELLTIME  = 1 / 2000   # → sw_hz = 2000 Hz
 SPEC_FREQ  = 123.0  # MHz (3T ¹H)
 
-# ── Module registry: (display_name, class, constructor_kwargs) ────────────────
+# Derived from the shared spec table, filtered to the variants this file's
+# fixtures can actually exercise: single- or multi-coil SPECTRA. Modules taking
+# 2-D images or 5-D volumes are swept in test_readme_table instead, and the
+# guard in test_module_registry is what stops a new module escaping both.
 MRS_MODULES = [
-    ("GaussianNoise[sigma]",         GaussianNoise,        {"sigma": 0.01}),
-    ("GaussianNoise[snr_db]",        GaussianNoise,        {"snr_db": 20.0}),
-    ("GaussianNoise[sigma_frac]",    GaussianNoise,        {"sigma_frac": 0.02}),
-    ("LineBroadening[lorentzian]",   LineBroadening,       {"lb_hz": 5.0, "mode": "lorentzian"}),
-    ("LineBroadening[gaussian]",     LineBroadening,       {"gb_hz": 3.0, "mode": "gaussian"}),
-    ("LineBroadening[voigt]",        LineBroadening,       {"lb_hz": 3.0, "gb_hz": 2.0, "mode": "voigt"}),
-    ("PhaseShift[zero]",             PhaseShift,           {"zero_order_deg": 30.0}),
-    ("PhaseShift[first]",            PhaseShift,           {"first_order_deg": 45.0}),
-    ("FrequencyShift",               FrequencyShift,       {"shift_hz": 10.0}),
-    ("AmplitudeScaling[fixed]",      AmplitudeScaling,     {"scale_factor": 0.8}),
-    ("AmplitudeScaling[range]",      AmplitudeScaling,     {"scale_factor": (0.7, 1.3)}),
-    ("BaselineAugmentation[rw]",     BaselineAugmentation, {"mode": "random_walk"}),
-    ("BaselineAugmentation[bspline]",BaselineAugmentation, {"mode": "bspline"}),
-    ("BaselineAugmentation[poly]",   BaselineAugmentation, {"mode": "polynomial"}),
-    ("EddyCurrent[synthetic]",       EddyCurrent,          {"mode": "synthetic"}),
-    ("SpuriousEchoes[replica]",      SpuriousEchoes,       {"mode": "replica"}),
-    ("SpuriousEchoes[hybrid]",       SpuriousEchoes,       {"mode": "hybrid"}),
-    ("ArtificialPeaks",              ArtificialPeaks,      {}),
-    ("ResidualWater",                ResidualWater,        {}),
-    ("Apodization[exp]",             Apodization,          {"mode": "exponential", "lb_hz": 5.0}),
-    ("Apodization[trunc]",           Apodization,          {"mode": "truncate", "n_pts": 1024}),
+    (spec.label, spec.cls, spec.kwargs)
+    for spec in SPECS
+    if not (spec.spatial or spec.volume or spec.needs_multicoil)
 ]
+
+# Variants that rewrite the spectral length, so the shape-preservation assertion
+# below does not apply to them. Keyed off the spec flag rather than matched on the
+# module name, which previously exempted anything with 'trunc' in its label.
+LENGTH_CHANGING = {spec.label for spec in SPECS if spec.changes_length}
 
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
@@ -178,13 +169,15 @@ def test_module_on_backend(
 
     assert result is not None, f"{module_name} returned None on {backend_name}"
 
-    # Apodization[trunc] reduces N_PTS — just check subject count survived
-    if "trunc" in module_name.lower():
+    # Length-changing modules: the spectral axis is meant to differ, so only the
+    # subject count and the fact that the length actually moved are checked.
+    if module_name in LENGTH_CHANGING:
         assert len(result) == N_SUBJECTS, (
-            f"{module_name}/{backend_name}: lost subjects after truncation"
+            f"{module_name}/{backend_name}: lost subjects after resizing"
         )
-        # spectral points must be reduced
-        assert result[0][:].shape[-1] < N_PTS
+        assert result[0][:].shape[-1] != N_PTS, (
+            f"{module_name}/{backend_name}: spectral length unchanged at {N_PTS}"
+        )
         return
 
     # All other modules: shape must be identical and data must have changed

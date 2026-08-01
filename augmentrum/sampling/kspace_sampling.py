@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
-from augmentrum.core.base_module import BaseModule
+from augmentrum.core.base_module import BaseModule, init_params
 from augmentrum.core.nifti_mrs_plus import Backend
 from augmentrum.utils.tensor_ops import is_torch
 from augmentrum.utils.backends import (
@@ -3279,9 +3279,7 @@ class KspaceUndersampling(BaseModule):
                 shape the trajectory. Normally left None — geometry is read off
                 the NIfTI-MRS data by BaseModule and passed in automatically.
         """
-        super().__init__(ksp_mode=ksp_mode, acceleration_factor=acceleration_factor,
-                         trajectory=trajectory, undersampling=undersampling,
-                         nufft_osf=nufft_osf)
+        super().__init__(**init_params(locals()))
 
         if ksp_mode not in self.MODES:
             raise ValueError(f"ksp_mode must be one of {self.MODES}, got {ksp_mode!r}")

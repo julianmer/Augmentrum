@@ -399,13 +399,13 @@ SPATIAL_ABLATIONS = (
     ('translate y',   dict(do_translate=True, ty=0.15)),
     ('translate z',   dict(do_translate=True, tz=0.25)),
     ('rotate 20 deg', dict(do_z_rot=True, z_angle_deg=20.0)),
-    ('zoom in 1.25x', dict(do_zoom=True, zoom_factor=1.25)),
-    ('zoom out 0.8x', dict(do_zoom=True, zoom_factor=0.8)),
+    ('zoom in 1.25x', dict(do_zoom=True, zoom_xyz=(1.25, 1.25, 1.25))),
+    ('zoom out 0.8x', dict(do_zoom=True, zoom_xyz=(0.8, 0.8, 0.8))),
     ('shear xy 0.15', dict(do_shear=True, shear_xy=(0.15, 0.0))),
     ('flip x',        dict(do_flip=True, flip_x=True)),
     ('flip y',        dict(do_flip=True, flip_y=True)),
     ('flip z',        dict(do_flip=True, flip_z=True)),
-    ('anisotropic',   dict(do_anisotropic=True, scale_xyz=(1.2, 0.85, 1.0))),
+    ('anisotropic',   dict(do_anisotropic=True, zoom_xyz=(1.2, 0.85, 1.0))),
 )
 
 

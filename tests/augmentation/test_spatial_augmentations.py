@@ -61,10 +61,10 @@ def make_spec(**overrides):
         'do_rot90': False, 'k_rot90': 0,
         'do_random_csm_rot': False, 'random_rot_deg': 0.0,
         'rot_axis': (0.0, 0.0, 1.0),
-        'do_zoom': False, 'zoom_factor': 1.0,
+        'do_zoom': False,
         'do_shear': False, 'shear_xy': (0.0, 0.0), 'shear_z': 0.0,
         'do_flip': False, 'flip_x': False, 'flip_y': False, 'flip_z': False,
-        'do_anisotropic': False, 'scale_xyz': (1.0, 1.0, 1.0),
+        'do_anisotropic': False, 'zoom_xyz': (1.0, 1.0, 1.0),
         'do_coil_sub': False, 'coil_keep': None,
         'pipeline': 'data',
     }
@@ -190,8 +190,6 @@ class TestSpatialCreation:
         assert aug.pipeline == 'data'
         assert aug.zoom_min == 0.9
         assert aug.zoom_max == 1.1
-        assert aug.scale_min == 0.9
-        assert aug.scale_max == 1.1
 
     def test_new_geometry_defaults(self):
         """The resampling defaults are part of the public contract."""
@@ -293,10 +291,10 @@ class TestSpatialSampling:
             'do_z_rot', 'z_angle_deg',
             'do_rot90', 'k_rot90',
             'do_random_csm_rot', 'random_rot_deg', 'rot_axis',
-            'do_zoom', 'zoom_factor',
+            'do_zoom',
             'do_shear', 'shear_xy', 'shear_z',
             'do_flip', 'flip_x', 'flip_y', 'flip_z',
-            'do_anisotropic', 'scale_xyz',
+            'do_anisotropic', 'zoom_xyz',
             'do_coil_sub', 'coil_keep',
             'pipeline',
         }
@@ -346,20 +344,43 @@ class TestSpatialSampling:
             assert s['do_shear']
             assert s['do_flip']
 
-    def test_zoom_factor_within_range(self):
+    def test_zoom_within_range_on_every_axis(self):
         aug = SpatialAugmentations(prob=1.0, zoom_min=0.8, zoom_max=1.2)
-        specs = aug.sample_augmentations(100)
-        for s in specs:
-            assert 0.8 <= s['zoom_factor'] <= 1.2
+        for s in aug.sample_augmentations(100):
+            for v in s['zoom_xyz']:
+                assert 0.8 <= v <= 1.2
 
-    def test_scale_within_range(self):
-        aug = SpatialAugmentations(prob=1.0, scale_min=0.7, scale_max=1.3)
-        specs = aug.sample_augmentations(100)
-        for s in specs:
-            sx, sy, sz = s['scale_xyz']
-            assert 0.7 <= sx <= 1.3
-            assert 0.7 <= sy <= 1.3
-            assert 0.7 <= sz <= 1.3
+    def test_zoom_does_not_compound_past_its_range(self):
+        """
+        Zoom and anisotropic scaling used to be separate multiplicative
+        parameters, so zoom_max=1.1 with scale_max=1.1 reached 1.21. One per-axis
+        range now bounds the whole transform.
+        """
+        aug = SpatialAugmentations(prob=1.0, zoom_min=0.9, zoom_max=1.1)
+        peak = max(v for s in aug.sample_augmentations(300) for v in s['zoom_xyz'])
+        assert peak <= 1.1 + 1e-9, f"reachable zoom {peak} exceeds zoom_max"
+
+    def test_isotropic_zoom_is_the_special_case(self):
+        """
+        do_zoom alone draws once and broadcasts (ax = ay = az); do_anisotropic
+        draws each axis. Sampled at prob=0.5 so both branches occur, then split
+        on the flags rather than forced, which is what the sampler actually does.
+        """
+        aug = SpatialAugmentations(dim=3, prob=0.5, zoom_min=0.8, zoom_max=1.2)
+        specs = aug.sample_augmentations(600)
+
+        iso = [s for s in specs if s['do_zoom'] and not s['do_anisotropic']]
+        aniso = [s for s in specs if s['do_anisotropic']]
+        assert iso and aniso, "prob=0.5 should produce both branches"
+
+        for s in iso:
+            assert len(set(s['zoom_xyz'])) == 1, f"isotropic branch gave {s['zoom_xyz']}"
+        assert any(len(set(s['zoom_xyz'])) > 1 for s in aniso), \
+            "anisotropic branch never produced differing axes"
+
+        off = [s for s in specs if not s['do_zoom'] and not s['do_anisotropic']]
+        for s in off:
+            assert s['zoom_xyz'] == (1.0, 1.0, 1.0)
 
     def test_allow_rot90_false_never_samples_rot90(self):
         aug = SpatialAugmentations(dim=3, prob=1.0, allow_rot90=False)
