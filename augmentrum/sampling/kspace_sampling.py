@@ -3370,7 +3370,8 @@ class KspaceUndersampling(BaseModule):
         Runs on whatever backend the data is on and keeps its gradients, so a
         non-Cartesian acquisition can sit inside a training loop.
         """
-        from augmentrum.sampling.gridding_nufft import GriddingNUFFT
+        from augmentrum.processing.interpolating import LinearInterpolator
+        from augmentrum.sampling.kspace_reconstructor import GriddingNUFFT
 
         # Gridding takes the trajectory in [-0.5, 0.5) per axis
         coords = (pts / (2.0 * kmax[None, :])).astype(np.float32)
@@ -3388,16 +3389,19 @@ class KspaceUndersampling(BaseModule):
             im_size = (nx, ny, nz)
             stack = ops.transpose(vol, (0, 4, 1, 2, 3))
 
-        nufft = GriddingNUFFT(im_size, self.nufft_osf)
+        # 'interp' is the same operator read with a cheaper interpolator
+        interpolator = LinearInterpolator() if self.nufft_impl == 'interp' else None
+        nufft = GriddingNUFFT(im_size, self.nufft_osf, interpolator=interpolator)
+        gridder = (GriddingNUFFT(im_size, self.nufft_osf)
+                   if interpolator is not None else nufft)
 
         recon = []
         for b in range(n_batch):
             plane = ops.reshape(ops.take(stack, np.array([b]), axis=0),
                                 (-1,) + im_size)
-            measured = (nufft.forward_interp(plane, coords)
-                        if self.nufft_impl == 'interp'
-                        else nufft.forward(plane, coords))
-            recon.append(nufft.adjoint(measured, coords))
+            # Measure with the chosen interpolator, always reconstruct with
+            # Kaiser-Bessel: the point is to study the forward approximation.
+            recon.append(gridder.adjoint(nufft.forward(plane, coords), coords))
         out = ops.stack(recon, axis=0)
 
         if ndim == 2:

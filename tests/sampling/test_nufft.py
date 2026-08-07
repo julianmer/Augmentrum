@@ -1,5 +1,5 @@
 ####################################################################################################
-#                                    test_gridding_nufft.py                                        #
+#                                         test_nufft.py                                            #
 ####################################################################################################
 #                                                                                                  #
 # Authors: J. P. Merkofer (j.p.merkofer@tue.nl)                                                    #
@@ -27,7 +27,7 @@ import numpy as np
 import pytest
 
 from nifti_mrs_plus import ops
-from augmentrum.sampling.gridding_nufft import GriddingNUFFT
+from augmentrum.sampling.kspace_reconstructor import GriddingNUFFT
 
 try:
     import torch

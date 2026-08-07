@@ -7,9 +7,10 @@
 #                                                                                                  #
 # Created: 2025-10-22                                                                              #
 #                                                                                                  #
-# Purpose: Regrids non-Cartesian k-space samples back onto an image grid: density compensation     #
-#          followed by an adjoint NUFFT. The adjoint half of the pair whose forward half is        #
-#          processing.interpolating. Backend-agnostic: built on the gridding NUFFT.                 #
+# Purpose: Non-Cartesian k-space reconstruction. Holds the gridding NUFFT itself - forward,        #
+#          adjoint and density compensation - and the batched adapter that drives it from the      #
+#          shot-organised layout the pipeline uses. Backend-agnostic throughout; the grid is       #
+#          read by an interpolator from processing.interpolating.                                  #
 #                                                                                                  #
 ####################################################################################################
 
@@ -17,14 +18,241 @@
 #*************#
 #   imports   #
 #*************#
+import math
+
 import numpy as np
 
 from nifti_mrs_plus import ops
+from augmentrum.processing.interpolating import (
+    Interpolator, KaiserBesselInterpolator, kaiser_bessel_deapodization,
+)
 from typing import Any, Optional, Sequence, Tuple, Union
 
 
 
 __all__ = ['KspaceReconstructor']
+
+
+#**************************************************************************************************#
+#                                       Class GriddingNUFFT                                        #
+#**************************************************************************************************#
+#                                                                                                  #
+# Non-uniform FFT by gridding, backend-agnostic and differentiable.                                #
+#                                                                                                  #
+#**************************************************************************************************#
+class GriddingNUFFT:
+    """
+    Non-uniform FFT by gridding, backend-agnostic and differentiable.
+
+    Everything a non-Cartesian acquisition needs:
+
+    "forward"
+        image -> samples along a trajectory.
+    "adjoint"
+        samples -> image.
+    "density_weights"
+        how much each sample should count, given how densely the trajectory
+        covers k-space.
+
+    The transform itself is only a pad, an FFT and a crop. What distinguishes
+    one NUFFT from another is the interpolator that reads the trajectory off the
+    grid, so that is supplied rather than built in: Kaiser-Bessel by default,
+    or a cheaper one when the trade is worth making.
+
+    Both directions are a gather or scatter against the kernel, so they run
+    wherever "nifti_mrs_plus.ops" runs and gradients reach the data.
+
+    Trajectory coordinates are normalised to [-0.5, 0.5) per axis, the
+    convention that maps directly onto grid bins.
+
+    Args:
+        im_size: Image matrix, "(nx, ny)" or "(nx, ny, nz)".
+        osf: Grid oversampling factor.
+        width: Kaiser-Bessel kernel width, when the default interpolator is used.
+        interpolator: Interpolator to read the grid with. Defaults to
+            Kaiser-Bessel at this object's oversampling.
+
+    Examples:
+        >>> nufft = GriddingNUFFT((16, 16))
+        >>> nufft.grid_size
+        (32, 32)
+    """
+
+    def __init__(self, im_size: Sequence[int], osf: float = 2.0, width: float = 4.0,
+                 interpolator: Optional[Interpolator] = None):
+        self.im_size = tuple(int(n) for n in im_size)
+        self.ndim = len(self.im_size)
+        if self.ndim not in (2, 3):
+            raise ValueError(f"GriddingNUFFT supports 2-D and 3-D, got {self.ndim}-D.")
+
+        self.osf = float(osf)
+        self.width = float(width)
+        self.grid_size = tuple(int(math.ceil(self.osf * n)) for n in self.im_size)
+
+        self.interpolator = interpolator or KaiserBesselInterpolator(
+            self.grid_size, osf=self.osf, width=self.width)
+
+        # Gridding tapers the image by the kernel's transform. Only a kernel
+        # that tapers needs undoing, so this is asked of the interpolator rather
+        # than assumed.
+        self._deapod = self._build_deapodization()
+
+    def _build_deapodization(self) -> Optional[np.ndarray]:
+        """The image-domain correction for this interpolator's kernel, or None."""
+        if not isinstance(self.interpolator, KaiserBesselInterpolator):
+            return None
+
+        factors = [kaiser_bessel_deapodization(n, g, self.interpolator.width,
+                                               self.interpolator.beta)
+                   for n, g in zip(self.im_size, self.grid_size)]
+        deapod = factors[0]
+        for f in factors[1:]:
+            deapod = np.multiply.outer(deapod, f)
+        return deapod.astype(np.float32)
+
+    #***************#
+    #   adjoint     #
+    #***************#
+
+    def adjoint(self, kdata, coords: np.ndarray):
+        """
+        Grid non-Cartesian samples back onto an image.
+
+        Args:
+            kdata: Samples, "[C, K]", on any backend.
+            coords: Trajectory in [-0.5, 0.5), "[K, ndim]" (NumPy).
+
+        Returns:
+            Image "[C, *im_size]" on kdata's backend.
+        """
+        if not hasattr(self.interpolator, "spread"):
+            raise TypeError(
+                f"{type(self.interpolator).__name__} can read the grid but not write to "
+                f"it, so it cannot run the adjoint. Use KaiserBesselInterpolator."
+            )
+
+        grid = self.interpolator.spread(kdata, np.asarray(coords))
+
+        axes = tuple(range(1, self.ndim + 1))
+        image = ops.ifftn(ops.ifftshift(grid, axis=axes), axes, norm="ortho")
+        image = ops.fftshift(image, axis=axes)
+
+        return self._deapodize(self._crop(image))
+
+    #***************#
+    #   forward     #
+    #***************#
+
+    def forward(self, image, coords: np.ndarray):
+        """
+        Sample an image along a trajectory.
+
+        The adjoint's mirror: correct for the kernel, transform to an
+        oversampled grid, then read the trajectory off it.
+
+        Args:
+            image: "[C, *im_size]", on any backend.
+            coords: Trajectory in [-0.5, 0.5), "[K, ndim]" (NumPy).
+
+        Returns:
+            Samples "[C, K]" on image's backend.
+        """
+        padded = self._pad(self._deapodize(image))
+
+        axes = tuple(range(1, self.ndim + 1))
+        grid = ops.fftshift(
+            ops.fftn(ops.ifftshift(padded, axis=axes), axes, norm="ortho"), axis=axes)
+
+        return self.interpolator.sample(grid, self._for_interpolator(coords))
+
+    def _for_interpolator(self, coords: np.ndarray) -> np.ndarray:
+        """
+        Coordinates in the convention this object's interpolator expects.
+
+        Kaiser-Bessel addresses grid bins directly and so takes [-0.5, 0.5);
+        every other interpolator works in the [-1, 1] box that
+        :class:"Interpolator" specifies.
+        """
+        coords = np.asarray(coords)
+        if isinstance(self.interpolator, KaiserBesselInterpolator):
+            return coords
+        return 2.0 * coords
+
+    #*******************#
+    #   grid geometry   #
+    #*******************#
+
+    def _deapodize(self, image):
+        """Undo the kernel's image-domain taper, if it has one."""
+        if self._deapod is None:
+            return image
+        deapod = ops.cast_like(ops.match_backend(self._deapod, image), image)
+        return image / deapod
+
+    def _pad(self, image, grid_n=None):
+        """Centre-pad the image up to *grid_n*, or to this object's grid."""
+        grid_n = self.grid_size if grid_n is None else grid_n
+        out = image
+        for d, (n, g) in enumerate(zip(self.im_size, grid_n)):
+            if g == n:
+                continue
+            before = (g - n) // 2
+            width = [(0, 0)] * (self.ndim + 1)
+            width[d + 1] = (before, g - n - before)
+            out = ops.pad(out, width)
+        return out
+
+    def _crop(self, grid):
+        """Centre-crop the oversampled grid back to the image matrix."""
+        out = grid
+        for d, (n, g) in enumerate(zip(self.im_size, self.grid_size)):
+            start = (g - n) // 2
+            index = np.arange(start, start + n)
+            out = ops.take(out, index, axis=d + 1)
+        return out
+
+    #***********************#
+    #   density weights     #
+    #***********************#
+
+    def density_weights(self, coords: np.ndarray, iterations: int = 15) -> np.ndarray:
+        """
+        Pipe-style density compensation weights for *coords*.
+
+        Non-Cartesian trajectories visit the centre of k-space far more often
+        than the edges, so an unweighted adjoint is dominated by the centre.
+        The Pipe iteration drives the weights towards those that make gridding
+        followed by de-gridding the identity.
+
+        The weights depend only on the trajectory, never on the data, so this is
+        computed in NumPy once and promoted wherever it is applied.
+
+        Args:
+            coords: Trajectory in [-0.5, 0.5), "[K, ndim]".
+            iterations: Pipe iterations; converges quickly, 10-20 is plenty.
+
+        Returns:
+            Weights "[K]".
+        """
+        kernel = self.interpolator
+        if not hasattr(kernel, "neighbours"):
+            # Density is a property of the trajectory and the grid, not of
+            # whichever interpolator happens to be reading it.
+            kernel = KaiserBesselInterpolator(self.grid_size, osf=self.osf, width=self.width)
+
+        idx, weight = kernel.neighbours(np.asarray(coords))
+        n_cells = int(np.prod(self.grid_size))
+        flat_idx = idx.reshape(-1)
+
+        w = np.ones(len(coords), dtype=np.float64)
+        for _ in range(iterations):
+            spread = np.repeat(w[:, None], idx.shape[1], axis=1) * weight
+            grid = np.zeros(n_cells, dtype=np.float64)
+            np.add.at(grid, flat_idx, spread.reshape(-1))
+            back = (grid[flat_idx].reshape(idx.shape) * weight).sum(axis=1)
+            w = w / np.maximum(back, 1e-12)
+
+        return (w / w.max()).astype(np.float32)
 
 
 #**************************************************************************************************#
@@ -111,8 +339,6 @@ class KspaceReconstructor:
 
     def _gridder(self):
         """The backend-agnostic NUFFT this reconstructor is built on."""
-        from augmentrum.sampling.gridding_nufft import GriddingNUFFT
-
         osf = max(self.oversampling_factor)
         return GriddingNUFFT(self.image_size, osf=osf)
 
