@@ -173,7 +173,7 @@ def render_figures(augmenter, module, batches, config, save_dir):
     # would compare two different people and attribute the difference to the
     # augmentation, so the training pipeline is run explicitly on one training
     # subject and shown against that subject's own clean volume.
-    from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
+    from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 
     train_plus, _ = augmenter.splits['train']
     subject = NIfTI_MRS_Plus(nifti_list=[train_plus.list()[0]],
@@ -252,8 +252,8 @@ def run_training_demo(augmenter, n_batches=3):
     """
     Feed a few batches through a small network, to show the loader is trainable.
 
-    Complex data is fed as two real channels via ``torch.view_as_real`` rather
-    than cast with ``.float()``, which silently discards the imaginary part.
+    Complex data is fed as two real channels via "torch.view_as_real" rather
+    than cast with ".float()", which silently discards the imaginary part.
     """
     import torch
     import torch.nn as nn

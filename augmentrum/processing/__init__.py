@@ -11,30 +11,10 @@
 #                                                                                                  #
 ####################################################################################################
 
-"""
-Processing modules for Augmentrum.
-
-Covers what happens to data *after* acquisition:
-
-``nifti_raw_processor``
-    FSL-MRS raw preprocessing — coil combination, alignment, averaging, eddy
-    current correction, water removal, phase correction.
-
-``interpolating``
-    Hermite modified-Akima resampling of gridded volumes at off-grid
-    coordinates, i.e. evaluating a volume along a non-Cartesian trajectory.
-
-``utils``
-    MRS helper functions shared by the above.
-"""
-
 #*************#
 #   imports   #
 #*************#
 from augmentrum.processing.nifti_raw_processor import NIfTI_RawProcessor
-from augmentrum.processing.interpolating import (
-    HermiteMAkimaInterpolator, BicubicHermiteMAkima2D, TricubicHermiteMAkima3D,
-)
 
 __all__ = [
     'NIfTI_RawProcessor',
@@ -42,3 +22,25 @@ __all__ = [
     'BicubicHermiteMAkima2D',
     'TricubicHermiteMAkima3D',
 ]
+
+
+#*******************#
+#   lazy exports    #
+#*******************#
+
+_INTERPOLATORS = ("HermiteMAkimaInterpolator", "BicubicHermiteMAkima2D",
+                  "TricubicHermiteMAkima3D")
+
+
+def __getattr__(name):
+    """
+    Import the Hermite interpolators only when they are asked for.
+
+    They are PyTorch modules and nothing in the augmentation pipeline uses them,
+    so importing them eagerly would make "import augmentrum" pull in torch for
+    everyone.
+    """
+    if name in _INTERPOLATORS:
+        from augmentrum.processing import interpolating
+        return getattr(interpolating, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

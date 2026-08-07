@@ -7,10 +7,10 @@
 #                                                                                                  #
 # Created: 2025-10-22                                                                              #
 #                                                                                                  #
-# Purpose: Hermite modified-Akima interpolation of gridded volumes at arbitrary off-grid           #
-#          coordinates, for sampling k-space along non-Cartesian trajectories. The forward half    #
-#          of the pair whose adjoint is sampling.kspace_reconstructor; coordinates are             #
-#          normalised to [-1, 1] per axis, as they are there.                                      #
+# Purpose: Sampling gridded arrays at arbitrary off-grid coordinates. Defines the Interpolator     #
+#          contract and its implementations - linear, Kaiser-Bessel and Hermite modified-Akima -   #
+#          which are what a non-Cartesian trajectory needs to read k-space off a grid.             #
+#          Coordinates are normalised to [-1, 1] per axis throughout.                              #
 #                                                                                                  #
 ####################################################################################################
 
@@ -18,14 +18,240 @@
 #*************#
 #   imports   #
 #*************#
+from __future__ import annotations           # so torch annotations never evaluate
+
+import math
 from abc import ABC, abstractmethod
-from typing import Tuple
+from typing import Sequence, Tuple
 
-import torch
-import torch.nn as nn
+import numpy as np
+
+from nifti_mrs_plus import ops
 
 
-__all__ = ['HermiteMAkimaInterpolator', 'BicubicHermiteMAkima2D', 'TricubicHermiteMAkima3D']
+__all__ = ['Interpolator', 'LinearInterpolator', 'KaiserBesselInterpolator',
+           'beatty_beta', 'kaiser_bessel', 'kaiser_bessel_deapodization',
+           'HermiteMAkimaInterpolator', 'BicubicHermiteMAkima2D', 'TricubicHermiteMAkima3D']
+
+
+#***********************#
+#   kaiser-bessel       #
+#***********************#
+# The kernel and its transform depend only on the grid geometry, never on the
+# data, so they are built once in NumPy and promoted to the caller's backend.
+
+def beatty_beta(width: float, osf: float) -> float:
+    """
+    Kaiser-Bessel shape parameter, from Beatty et al. (2005).
+
+    Chosen to minimise aliasing energy for a given kernel width and
+    oversampling factor.
+    """
+    return math.pi * math.sqrt((width / osf) ** 2 * (osf - 0.5) ** 2 - 0.8)
+
+
+def kaiser_bessel(offsets: np.ndarray, width: float, beta: float) -> np.ndarray:
+    """Kaiser-Bessel kernel evaluated at *offsets* in grid units."""
+    from scipy.special import i0
+
+    r = 2.0 * offsets / width
+    inside = np.abs(r) <= 1.0
+    arg = beta * np.sqrt(np.clip(1.0 - r ** 2, 0.0, None))
+    return np.where(inside, i0(arg) / width, 0.0)
+
+
+def kaiser_bessel_deapodization(n: int, grid: int, width: float, beta: float) -> np.ndarray:
+    """
+    Reciprocal of the kernel's transform over the image axis.
+
+    Gridding convolves with the Kaiser-Bessel kernel, which tapers the image;
+    dividing by the kernel's transform undoes exactly that taper.
+    """
+    x = (np.arange(n) - n // 2) / float(grid)
+    arg = (math.pi * width * x) ** 2 - beta ** 2
+
+    # Real above the root, imaginary below it, where sin becomes sinh
+    positive = arg > 0
+    root_pos = np.sqrt(np.clip(arg, 0.0, None))
+    root_neg = np.sqrt(np.clip(-arg, 0.0, None))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.where(positive,
+                       np.sin(root_pos) / np.where(root_pos == 0, 1.0, root_pos),
+                       np.sinh(root_neg) / np.where(root_neg == 0, 1.0, root_neg))
+    return np.where(root_pos + root_neg == 0, 1.0, out)
+
+
+#**************************************************************************************************#
+#                                        Class Interpolator                                        #
+#**************************************************************************************************#
+#                                                                                                  #
+# Contract for sampling a gridded array at arbitrary coordinates.                                  #
+#                                                                                                  #
+#**************************************************************************************************#
+class Interpolator(ABC):
+    """
+    Contract for sampling a gridded array at arbitrary coordinates.
+
+    Reading a non-Cartesian trajectory off a Cartesian grid is one job with
+    several answers, differing in accuracy and cost. Stating it as a contract
+    lets a caller swap between them - which is exactly what an accuracy study
+    of the k-space forward operator varies.
+
+    Coordinates are normalised to [-1, 1] per axis. Implementations take
+    "grid" shaped "[C, *grid_shape]" and return "[C, K]".
+    """
+
+    @abstractmethod
+    def sample(self, grid, coords):
+        """
+        Sample *grid* at *coords*.
+
+        Args:
+            grid: Gridded values, "[C, *grid_shape]", on any backend.
+            coords: Normalised coordinates in [-1, 1], "[K, ndim]" (NumPy).
+
+        Returns:
+            Values "[C, K]" on grid's backend.
+        """
+
+
+#**************************************************************************************************#
+#                                     Class LinearInterpolator                                     #
+#**************************************************************************************************#
+#**************************************************************************************************#
+class LinearInterpolator(Interpolator):
+    """Bilinear or trilinear sampling. The cheapest option, and the least accurate."""
+
+    def sample(self, grid, coords):
+        """Sample by linear interpolation between neighbouring bins."""
+        n_chan = int(ops.shape(grid)[0])
+        coords = np.asarray(coords)
+
+        # grid_sample wants [N, C, ...] and coordinates ordered x, y[, z],
+        # which is the reverse of the spatial axes
+        stack = ops.reshape(grid, (1,) + tuple(ops.shape(grid)))
+        view = (1,) * (len(ops.shape(grid)) - 1) + (len(coords), coords.shape[1])
+        sample_grid = ops.match_backend(
+            np.ascontiguousarray(coords[..., ::-1]).astype(np.float32).reshape(view),
+            ops.real(grid))
+
+        if ops.is_complex(grid):
+            out = ops.complex_from(
+                ops.grid_sample(ops.real(stack), sample_grid, padding_mode="border"),
+                ops.grid_sample(ops.imag(stack), sample_grid, padding_mode="border"))
+        else:
+            out = ops.grid_sample(stack, sample_grid, padding_mode="border")
+
+        return ops.reshape(out, (n_chan, len(coords)))
+
+
+#**************************************************************************************************#
+#                                  Class KaiserBesselInterpolator                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Kaiser-Bessel gridding kernel: the interpolator a NUFFT is built on.                             #
+#                                                                                                  #
+#**************************************************************************************************#
+class KaiserBesselInterpolator(Interpolator):
+    """
+    Kaiser-Bessel gridding kernel: the interpolator a NUFFT is built on.
+
+    Unlike the others it is tied to a grid geometry, because the kernel width
+    and shape are chosen against the oversampling factor. It also provides the
+    reverse direction, :meth:"spread", which is what makes a NUFFT adjoint
+    possible - scattering a sample across the bins it touches rather than
+    gathering from them.
+
+    Args:
+        grid_size: Oversampled grid the kernel addresses.
+        osf: Oversampling factor the grid represents.
+        width: Kernel width in oversampled grid units.
+    """
+
+    def __init__(self, grid_size: Sequence[int], osf: float = 2.0, width: float = 4.0):
+        self.grid_size = tuple(int(n) for n in grid_size)
+        self.ndim = len(self.grid_size)
+        self.osf = float(osf)
+        self.width = float(width)
+        self.beta = beatty_beta(self.width, self.osf)
+
+    def neighbours(self, coords: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Bins each sample touches, and the kernel weight for each.
+
+        Args:
+            coords: Trajectory in [-0.5, 0.5), "[K, ndim]".
+
+        Returns:
+            "(indices, weights)", both "[K, taps**ndim]", indices flat into the grid.
+        """
+        half = int(math.ceil(self.width / 2.0))
+        taps = np.arange(-half, half + 1)
+
+        per_axis_idx, per_axis_w = [], []
+        for d in range(self.ndim):
+            centre = (coords[:, d] + 0.5) * self.grid_size[d]      # bins
+            base = np.floor(centre)
+            idx = base[:, None] + taps[None, :]                    # [K, T]
+            per_axis_w.append(kaiser_bessel(centre[:, None] - idx, self.width, self.beta))
+            per_axis_idx.append(np.mod(idx, self.grid_size[d]).astype(np.int64))
+
+        # Outer product over axes, flattened to [K, T**ndim]
+        flat_idx, flat_w = None, None
+        for d in range(self.ndim):
+            stride = int(np.prod(self.grid_size[d + 1:])) if d + 1 < self.ndim else 1
+            idx_d = per_axis_idx[d] * stride
+            if flat_idx is None:
+                flat_idx, flat_w = idx_d, per_axis_w[d]
+            else:
+                flat_idx = (flat_idx[:, :, None] + idx_d[:, None, :]).reshape(len(coords), -1)
+                flat_w = (flat_w[:, :, None] * per_axis_w[d][:, None, :]).reshape(len(coords), -1)
+        return flat_idx, flat_w.astype(np.float32)
+
+    def sample(self, grid, coords):
+        """Gather each sample from the bins its kernel touches."""
+        idx, weight = self.neighbours(np.asarray(coords))
+        n_chan = int(ops.shape(grid)[0])
+        n_taps = idx.shape[1]
+
+        flat = ops.reshape(grid, (n_chan, -1))
+        weight_b = ops.cast_like(ops.match_backend(weight, flat), flat)
+
+        rows = []
+        for c in range(n_chan):
+            plane = ops.reshape(ops.take(flat, np.array([c]), axis=0), (-1,))
+            taps = ops.reshape(ops.take(plane, idx.reshape(-1), axis=0),
+                               (len(coords), n_taps))
+            rows.append(ops.sum(taps * weight_b, axis=-1))
+        return ops.stack(rows, axis=0)
+
+    def spread(self, values, coords):
+        """
+        Scatter samples onto the grid: the reverse of :meth:"sample".
+
+        Args:
+            values: Samples "[C, K]", on any backend.
+            coords: Trajectory in [-0.5, 0.5), "[K, ndim]".
+
+        Returns:
+            Grid "[C, *grid_size]" on values' backend.
+        """
+        idx, weight = self.neighbours(np.asarray(coords))
+        n_chan = int(ops.shape(values)[0])
+        n_cells = int(np.prod(self.grid_size))
+        n_taps = idx.shape[1]
+
+        weight_b = ops.cast_like(ops.match_backend(weight.reshape(-1), values), values)
+        idx_flat = idx.reshape(-1)
+
+        planes = []
+        for c in range(n_chan):
+            # One sample feeds every tap it touches, so repeat it across them
+            samples = ops.reshape(ops.take(values, np.array([c]), axis=0), (-1,))
+            spread = ops.reshape(ops.stack([samples] * n_taps, axis=-1), (-1,))
+            planes.append(ops.scatter_add((n_cells,), idx_flat, spread * weight_b))
+
+        return ops.reshape(ops.stack(planes, axis=0), (n_chan,) + self.grid_size)
 
 
 #**************************************************************************************************#
@@ -35,7 +261,7 @@ __all__ = ['HermiteMAkimaInterpolator', 'BicubicHermiteMAkima2D', 'TricubicHermi
 # Base for N-dimensional Hermite modified-Akima interpolators.                                     #
 #                                                                                                  #
 #**************************************************************************************************#
-class HermiteMAkimaInterpolator(nn.Module, ABC):
+class HermiteMAkimaInterpolator(Interpolator):
     """
     Base for N-dimensional Hermite modified-Akima interpolators.
 
@@ -44,9 +270,9 @@ class HermiteMAkimaInterpolator(nn.Module, ABC):
     coordinate lookup. A subclass supplies its dimension count and the tensor
     contraction over the neighbourhood.
 
-    Signal layout is ``[B, S, *grid]``; a signal given without the shot axis
-    gets ``S = 1`` inserted. Coordinates are ``[B, S, NDIM, L]``, normalised to
-    ``[-1, 1]``, and the result is ``[B, S, 1, L]``.
+    Signal layout is "[B, S, *grid]"; a signal given without the shot axis
+    gets "S = 1" inserted. Coordinates are "[B, S, NDIM, L]", normalised to
+    "[-1, 1]", and the result is "[B, S, 1, L]".
 
     >>> interp = BicubicHermiteMAkima2D(torch.zeros(1, 1, 8, 8))
     >>> tuple(interp(torch.zeros(1, 2, 2, 5)).shape)
@@ -59,10 +285,12 @@ class HermiteMAkimaInterpolator(nn.Module, ABC):
     def __init__(self, signal: torch.Tensor):
         """
         Args:
-            signal: gridded values, ``[B, S, *grid]`` or ``[B, *grid]``
+            signal: gridded values, "[B, S, *grid]" or "[B, *grid]"
                 (the shot axis is inserted when absent).
         """
-        super().__init__()
+        import torch                       # deferred: this branch is torch-only
+        self._torch = torch
+
         expected = self.NDIM + 2
         if signal.dim() == expected - 1:
             signal = signal.unsqueeze(1)
@@ -98,7 +326,7 @@ class HermiteMAkimaInterpolator(nn.Module, ABC):
     #*******************#
 
     def _axis_view(self, d: int) -> torch.Tensor:
-        """Axis *d* broadcast against the signal, i.e. ``[1, 1, ..., n_d, ..., 1]``."""
+        """Axis *d* broadcast against the signal, i.e. "[1, 1, ..., n_d, ..., 1]"."""
         shape = [1, 1] + [1] * self.NDIM
         shape[2 + d] = self.grid_shape[d]
         return self.axes[d].view(*shape)
@@ -108,10 +336,10 @@ class HermiteMAkimaInterpolator(nn.Module, ABC):
         """
         Modified-Akima slopes of *signal* along *dim*.
 
-        The 3-D copy of this used to call ``axis.unsqueeze(0).diff(dim=dim)``,
+        The 3-D copy of this used to call "axis.unsqueeze(0).diff(dim=dim)",
         which differences the wrong dimension and raised on any input — the
         tricubic interpolator could never be constructed. The axis is already
-        broadcast to the signal's rank by :meth:`_axis_view`, so it is
+        broadcast to the signal's rank by "_axis_view", so it is
         differenced directly.
         """
         def slc(start=None, end=None):
@@ -141,7 +369,7 @@ class HermiteMAkimaInterpolator(nn.Module, ABC):
 
     @staticmethod
     def h_poly(t: torch.Tensor) -> Tuple[torch.Tensor, ...]:
-        """Cubic Hermite basis functions ``h00, h10, h01, h11``."""
+        """Cubic Hermite basis functions "h00, h10, h01, h11"."""
         h00 = 2 * t ** 3 - 3 * t ** 2 + 1
         h10 = t ** 3 - 2 * t ** 2 + t
         h01 = -2 * t ** 3 + 3 * t ** 2
@@ -153,13 +381,13 @@ class HermiteMAkimaInterpolator(nn.Module, ABC):
         Hermite basis stacked to match the coefficient tensor's block layout.
 
         The basis functions come in interleaved order — value, derivative,
-        value, derivative — while ``P`` is built in blocks: function values at
-        ``0:2`` and scaled derivatives at ``2:4``. Both interpolators used to
-        stack the basis interleaved and contract it against the blocked ``P``,
+        value, derivative — while "P" is built in blocks: function values at
+        "0:2" and scaled derivatives at "2:4". Both interpolators used to
+        stack the basis interleaved and contract it against the blocked "P",
         so the two orderings disagreed and the contraction picked the wrong
         coefficients: sampled exactly on a grid node the result came out as the
         cross-derivative term rather than the node's value. Stacking as
-        ``(h00, h01, h10, h11)`` puts the value weights against the value block
+        "(h00, h01, h10, h11)" puts the value weights against the value block
         and the derivative weights against the derivative block.
         """
         h00, h10, h01, h11 = self.h_poly(t)
@@ -174,7 +402,7 @@ class HermiteMAkimaInterpolator(nn.Module, ABC):
         return idx, (coord - ax[idx]) / width, width
 
     def _neighbours(self, idx: torch.Tensor, d: int) -> torch.Tensor:
-        """The four sample indices ``i-1, i, i+1, i+2`` clamped to axis *d*."""
+        """The four sample indices "i-1, i, i+1, i+2" clamped to axis *d*."""
         return torch.stack([idx - 1, idx, idx + 1, idx + 2],
                            dim=-1).clamp(0, self.grid_shape[d] - 1)
 
@@ -183,17 +411,17 @@ class HermiteMAkimaInterpolator(nn.Module, ABC):
     #*******************#
     @abstractmethod
     def _interpolate(self, idx, t, width) -> torch.Tensor:
-        """Contract the Hermite bases against the coefficient tensor. ``[B, S, L]``."""
+        """Contract the Hermite bases against the coefficient tensor. "[B, S, L]"."""
 
     def forward(self, coords: torch.Tensor) -> torch.Tensor:
         """
         Interpolate the signal at *coords*.
 
         Args:
-            coords: ``[B, S, NDIM, L]``, normalised to ``[-1, 1]``.
+            coords: "[B, S, NDIM, L]", normalised to "[-1, 1]".
 
         Returns:
-            ``[B, S, 1, L]`` interpolated values.
+            "[B, S, 1, L]" interpolated values.
         """
         if coords.dim() != 4 or coords.shape[2] != self.NDIM:
             raise ValueError(
@@ -232,11 +460,11 @@ class HermiteMAkimaInterpolator(nn.Module, ABC):
 #                                   Class BicubicHermiteMAkima2D                                   #
 #**************************************************************************************************#
 #                                                                                                  #
-# Bicubic Hermite modified-Akima interpolation on a 2-D grid ``[B, S, Nx, Ny]``.                   #
+# Bicubic Hermite modified-Akima interpolation on a 2-D grid "[B, S, Nx, Ny]".                   #
 #                                                                                                  #
 #**************************************************************************************************#
 class BicubicHermiteMAkima2D(HermiteMAkimaInterpolator):
-    """Bicubic Hermite modified-Akima interpolation on a 2-D grid ``[B, S, Nx, Ny]``."""
+    """Bicubic Hermite modified-Akima interpolation on a 2-D grid "[B, S, Nx, Ny]"."""
 
     NDIM = 2
 
@@ -272,11 +500,11 @@ class BicubicHermiteMAkima2D(HermiteMAkimaInterpolator):
 #                                  Class TricubicHermiteMAkima3D                                   #
 #**************************************************************************************************#
 #                                                                                                  #
-# Tricubic Hermite modified-Akima interpolation on a 3-D grid ``[B, S, Nx, Ny, Nz]``.              #
+# Tricubic Hermite modified-Akima interpolation on a 3-D grid "[B, S, Nx, Ny, Nz]".              #
 #                                                                                                  #
 #**************************************************************************************************#
 class TricubicHermiteMAkima3D(HermiteMAkimaInterpolator):
-    """Tricubic Hermite modified-Akima interpolation on a 3-D grid ``[B, S, Nx, Ny, Nz]``."""
+    """Tricubic Hermite modified-Akima interpolation on a 3-D grid "[B, S, Nx, Ny, Nz]"."""
 
     NDIM = 3
 

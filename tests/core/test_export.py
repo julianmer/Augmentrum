@@ -8,8 +8,9 @@ from pathlib import Path
 import tempfile
 import shutil
 
+import augmentrum
 from augmentrum import Augmentrum
-from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus
+from nifti_mrs_plus import NIfTI_MRS_Plus
 
 try:
     import h5py
@@ -318,7 +319,7 @@ class TestNIfTIMRSPlusSave:
         """Create a NIfTI_MRS_Plus object with multiple subjects."""
         # Create multiple copies with slight variations
         nifti_list = [dummy_nifti_mrs] * 3
-        from augmentrum.core.nifti_mrs_plus import Backend
+        from nifti_mrs_plus import Backend
         return NIfTI_MRS_Plus(nifti_list, backend=Backend.NUMPY, volatile=True)
 
     def test_save_nifti_basic(self, nifti_plus_batch, tmp_path):
@@ -369,7 +370,10 @@ class TestNIfTIMRSPlusSave:
         with h5py.File(hdf5_file, 'r') as f:
             assert 'data' in f
             assert f.attrs['n_subjects'] == 3
-            assert 'augmentrum_version' in f.attrs
+            # The container records its writer generically via set_provenance,
+            # which augmentrum/__init__.py claims on import.
+            assert f.attrs['program'] == 'Augmentrum'
+            assert f.attrs['program_version'] == augmentrum.__version__
 
     @pytest.mark.skipif(not HDF5_AVAILABLE, reason="h5py not installed")
     def test_save_hdf5_compression(self, nifti_plus_batch, tmp_path):

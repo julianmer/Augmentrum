@@ -19,7 +19,6 @@ import numpy as np
 import pytest
 
 from augmentrum.sampling import KspaceReconstructor, TrajectoryRegistry
-from augmentrum.utils.backends import NumpyBackend
 
 torch = pytest.importorskip("torch")
 tkbn = pytest.importorskip("torchkbnufft",
@@ -37,8 +36,8 @@ HEADER = {"dim": [4, N, N, 1, 1, 1, 1, 1],
 #*************#
 
 def _trajectory(name, **params):
-    """Trajectory as normalised ``[1, S, D, L]`` coordinates, plus its metadata."""
-    shots, meta = TrajectoryRegistry.generate(name, HEADER, params, NumpyBackend())
+    """Trajectory as normalised "[1, S, D, L]" coordinates, plus its metadata."""
+    shots, meta = TrajectoryRegistry.generate(name, HEADER, params)
     coords = np.stack([np.asarray(s) for s in shots]).transpose(0, 2, 1)   # [S, D, L]
     coords = torch.from_numpy(coords).float().unsqueeze(0)
     return KspaceReconstructor.normalise_trajectory(coords, meta["kmax"]), meta
@@ -52,7 +51,7 @@ def _phantom():
 
 
 def _sample(img, coords):
-    """Forward NUFFT: what a scanner would measure along *coords*. ``[1, S, C, L]``."""
+    """Forward NUFFT: what a scanner would measure along *coords*. "[1, S, C, L]"."""
     S, L = coords.shape[1], coords.shape[3]
     ktraj, _ = KspaceReconstructor.flatten(coords)
     flat = tkbn.KbNufft(im_size=(N, N), grid_size=(2 * N, 2 * N))(
@@ -206,9 +205,9 @@ def test_mask_shape_is_validated():
 
 class TestKspaceUndersamplingNufft:
     """
-    ``ksp_mode='nufft'``: the honest counterpart to ``gridded``.
+    "ksp_mode='nufft'": the honest counterpart to "gridded".
 
-    ``gridded`` uses the trajectory only to pick Cartesian bins and then masks
+    "gridded" uses the trajectory only to pick Cartesian bins and then masks
     the data's own FFT, so it never leaves the grid. This mode measures at the
     coordinates the trajectory actually visits and inverts from there.
     """

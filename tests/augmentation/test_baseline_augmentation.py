@@ -12,7 +12,7 @@ Tests cover:
 import pytest
 import numpy as np
 from augmentrum.augmentation.baseline_augmentation import BaselineAugmentation
-from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
+from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 
 
 #**************************************************************************************************#

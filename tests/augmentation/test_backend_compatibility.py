@@ -20,7 +20,7 @@ import pytest
 import numpy as np
 from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 
-from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
+from nifti_mrs_plus import NIfTI_MRS_Plus, Backend, ops
 from tests.module_specs import SPECS
 from augmentrum.augmentation import (
     GaussianNoise,
@@ -130,7 +130,7 @@ def _run_module(module, nifti_list, backend_enum) -> tuple:
     """Instantiate NIfTI_MRS_Plus, call module, return (result, elapsed_s).
 
     Deep-copies the nifti_list so the shared module-scoped fixture is never
-    mutated in-place by the augmentation (modules do ``nifti[:] = processed``
+    mutated in-place by the augmentation (modules do "nifti[:] = processed"
     which would otherwise corrupt subsequent tests in this session).
     """
     from copy import deepcopy
@@ -264,13 +264,10 @@ class TestSpatialAugmentationsBackends:
 
     def test_supported_backends_are_correct(self):
         aug = SpatialAugmentations(dim=2, prob=1.0)
-        assert Backend.NIFTI_LIST in aug.SUPPORTED_BACKENDS
-        assert Backend.NUMPY      in aug.SUPPORTED_BACKENDS
-        assert Backend.PYTORCH    in aug.SUPPORTED_BACKENDS
-        # These should NOT be in SUPPORTED_BACKENDS (require implicit conversion)
-        assert Backend.TENSORFLOW not in aug.SUPPORTED_BACKENDS
-        assert Backend.JAX        not in aug.SUPPORTED_BACKENDS
-        assert Backend.KERAS      not in aug.SUPPORTED_BACKENDS
+        for backend in Backend:
+            assert backend in aug.SUPPORTED_BACKENDS, (
+                f"SpatialAugmentations no longer claims {backend.value}"
+            )
 
     @pytest.mark.skipif(not TF_AVAILABLE, reason="TF not installed")
     def test_tensorflow_runs_via_fallback(self, single_coil_nifti_list):
@@ -321,16 +318,45 @@ def test_all_backends_claim_requires_process_tensor(name, factory):
         )
 
 
-def test_spatial_augmentations_does_not_claim_tf_jax_keras():
-    """SpatialAugmentations must NOT claim TF/JAX/Keras as natively supported."""
-    aug = SpatialAugmentations(dim=2, prob=0.5)
-    restricted = {Backend.TENSORFLOW, Backend.JAX, Backend.KERAS}
-    claimed    = set(aug.SUPPORTED_BACKENDS)
-    overlap    = restricted & claimed
-    assert not overlap, (
-        f"SpatialAugmentations claims TF/JAX/Keras as native but always converts "
-        f"to PyTorch internally. Found: {[b.value for b in overlap]}"
-    )
+def test_spatial_augmentations_is_native_on_every_backend():
+    """
+    The resampling must run on the tensor's own backend and give the same answer.
+
+    Claiming a backend is not enough: the same augmentation spec is replayed on
+    each one and the results are compared, so a module that silently converted
+    would still be caught by the type check.
+    """
+    rng = np.random.default_rng(0)
+    arr = (rng.standard_normal((1, 12, 12, 2))
+           + 1j * rng.standard_normal((1, 12, 12, 2))).astype(np.complex64)
+
+    # one real spec, replayed everywhere
+    _, spec = SpatialAugmentations(dim=2, prob=1.0, pixdim=(1.0, 1.0)).apply(arr.copy())
+
+    cases = [("numpy", lambda a: a, lambda v: isinstance(v, np.ndarray))]
+    if TORCH_AVAILABLE:
+        import torch
+        cases.append(("torch", torch.from_numpy, ops.is_torch))
+    if JAX_AVAILABLE:
+        import jax.numpy as jnp
+        cases.append(("jax", jnp.array, ops.is_jax))
+    if TF_AVAILABLE:
+        import tensorflow as tf
+        cases.append(("tensorflow", tf.constant, ops.is_tf))
+
+    reference = None
+    for name, convert, is_native in cases:
+        out, _ = SpatialAugmentations(dim=2, prob=1.0, pixdim=(1.0, 1.0)).apply(
+            convert(arr), aug_spec_list=spec)
+        assert is_native(out), f"{name}: result left its backend"
+
+        result = ops.to_numpy(out)
+        if reference is None:
+            reference = result
+        else:
+            assert np.allclose(result, reference, atol=1e-5), (
+                f"{name}: resampling disagrees with the NumPy result"
+            )
 
 
 # ── Timing benchmark (separate class so it can be run selectively) ────────────

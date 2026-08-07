@@ -21,7 +21,8 @@ from scipy.signal import convolve
 from scipy.interpolate import BSpline
 
 from augmentrum.core.base_module import BaseModule
-from augmentrum.utils.tensor_ops import to_numpy, match_backend
+from nifti_mrs_plus import Backend
+from nifti_mrs_plus.ops import to_numpy, match_backend
 
 
 #**************************************************************************************************#
@@ -87,7 +88,7 @@ class BaselineAugmentation(BaseModule):
     >>> result_data, _ = baseline(nifti_plus, None)
     """
 
-    SUPPORTED_BACKENDS = []  # Supports all backends
+    SUPPORTED_BACKENDS = tuple(Backend)
 
     #*****************#
     #   helper math   #
@@ -154,7 +155,7 @@ class BaselineAugmentation(BaseModule):
     def _calculate_ppm_and_mask(fid, sw_hz, sf_hz, ref_ppm, ppm_windows):
         """Internal function to transform FID, calculate PPM axis, and create the baseline mask.
 
-        Note: ``sf_hz`` is the Larmor frequency in **MHz** (matching NIfTI-MRS convention).
+        Note: "sf_hz" is the Larmor frequency in **MHz** (matching NIfTI-MRS convention).
         It is converted to Hz internally for the ppm calculation.
         """
         spec = np.fft.fftshift(np.fft.ifft(fid))
@@ -196,10 +197,7 @@ class BaselineAugmentation(BaseModule):
                  # General
                  seed: Optional[int] = None):
         """Initialize baseline augmentation module."""
-        super().__init__(mode=mode, baseline_frac=baseline_frac, step_sd=step_sd,
-                        bounds_amp=bounds_amp, smooth_pts=smooth_pts,
-                        knots_per_ppm=knots_per_ppm, ed_per_ppm=ed_per_ppm,
-                        phase_deg=phase_deg, order=order, ppm_windows=ppm_windows, seed=seed)
+        super().__init__()
 
         if mode not in ['random_walk', 'bspline', 'polynomial']:
             raise ValueError(f"mode must be 'random_walk', 'bspline', or 'polynomial', got '{mode}'")
@@ -265,14 +263,14 @@ class BaselineAugmentation(BaseModule):
         Add baseline to tensor/array data (**any backend**).
 
         Baseline generation uses NumPy/SciPy (non-differentiable), but the
-        final addition is backend-agnostic: ``data_tensor + numpy_baseline``
+        final addition is backend-agnostic: "data_tensor + numpy_baseline"
         auto-promotes to the correct backend and preserves gradients.
 
         Args:
-            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            data_array: Input tensor of shape "(batch, ..., n_points)"
             water_array: Optional water reference tensor (unchanged)
             backend: Backend enum (unused — ops dispatch automatically)
-            **kwargs: Must contain ``'sw_hz'`` and ``'sf_mhz'``
+            **kwargs: Must contain "'sw_hz'" and "'sf_mhz'"
 
         Returns:
             Tuple of (processed_data, water_array)
@@ -345,7 +343,7 @@ class BaselineAugmentation(BaseModule):
 
     def _bounded_random_walk(self, n: int) -> np.ndarray:
         """Generate bounded random walk."""
-        rng = np.random.default_rng(self.seed)
+        rng = self.rng.numpy_rng()
         y = np.empty(n, dtype=float)
         v = 0.0
 
@@ -409,7 +407,7 @@ class BaselineAugmentation(BaseModule):
             Ainv = np.linalg.pinv(A)
 
             # z must be length N to match B.T @ z
-            rng = np.random.default_rng(self.seed)
+            rng = self.rng.numpy_rng()
             z = rng.normal(size=N)                 # N-length white noise
             a = Ainv @ (B.T @ z)                   # n_b-length smooth coefficient vector
 

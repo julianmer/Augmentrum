@@ -19,8 +19,9 @@
 import numpy as np
 from typing import Optional, List, Tuple, Union
 from augmentrum.core.base_module import BaseModule
-from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
-from augmentrum.utils.tensor_ops import to_numpy, match_backend
+from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
+from nifti_mrs_plus import ops
+from nifti_mrs_plus.ops import match_backend
 
 
 #**************************************************************************************************#
@@ -86,7 +87,7 @@ class SpuriousEchoes(BaseModule):
     >>> result_data, _ = se(nifti_plus, None)
     """
 
-    SUPPORTED_BACKENDS = []  # Supports all backends
+    SUPPORTED_BACKENDS = tuple(Backend)
 
     def __init__(self, echoes=None,
                  mode: str = 'replica',
@@ -97,9 +98,7 @@ class SpuriousEchoes(BaseModule):
             echoes = [{'delay_s': 0.1, 'amp': 0.2, 'phase_deg': 0.0,
                        'decay_hz': 5.0, 'freq_hz': 0.0}]
 
-        super().__init__(echoes=echoes, mode=mode,
-                         global_phase_deg=global_phase_deg,
-                         alpha_reference=alpha_reference)
+        super().__init__()
 
         self.mode = mode.lower()
         if self.mode not in ('replica', 'hybrid'):
@@ -159,19 +158,19 @@ class SpuriousEchoes(BaseModule):
         """
         Add spurious echo artifacts to tensor/array data (**any backend**).
 
-        **Replica mode**: echo envelopes are data-independent (pure numpy)
-        and applied via ``data + data * match_backend(envelope, data)`` —
-        fully backend-native multiply/add.
+        **Replica mode**: the echo envelope depends only on time, so it is
+        built in NumPy once and applied as "data + data * envelope".
 
-        **Hybrid mode**: echo amplitude is referenced to ``max|FID|`` which
-        requires a scalar pull to numpy; the additive ghost is then applied
-        via ``data + match_backend(ghost_additive, data)``.
+        **Hybrid mode**: a delayed copy of the FID, scaled by an amplitude
+        taken from the data and shaped by a time-only envelope. The delay and
+        the amplitude both run on the data's own backend, so nothing is
+        converted and gradients survive.
 
         Args:
-            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            data_array: Input tensor of shape "(batch, ..., n_points)"
             water_array: Optional water reference (unchanged)
             backend: Backend enum (unused)
-            **kwargs: Must contain ``'sw_hz'`` (spectral width in Hz)
+            **kwargs: Must contain "'sw_hz'" (spectral width in Hz)
 
         Returns:
             Tuple of (processed_data, water_array)
@@ -213,18 +212,65 @@ class SpuriousEchoes(BaseModule):
             # Apply: fid_out = fid + fid * sum_of_envelopes  (backend-native)
             return data_array + data_array * match_backend(echo_sum, data_array), water_array
 
-        else:  # hybrid mode — amplitude references max(|fid|): pull per-FID to numpy
-            n_batch = int(np.prod(original_shape[:-1]))
-            data_np = to_numpy(data_array).reshape(n_batch, N)
-            ghost_np = np.zeros_like(data_np)
+        else:  # hybrid mode — a delayed copy of the FID, shaped by an envelope
+            dt = 1.0 / float(sw_hz)
+            t = np.arange(N, dtype=np.float64) * dt
+            t_shape = [1] * (len(original_shape) - 1) + [N]
+            t = t.reshape(t_shape)
 
-            for i in range(n_batch):
-                fid_1d = data_np[i]
-                result = self._add_echoes_hybrid_1d(fid_1d, sw_hz)
-                ghost_np[i] = result - fid_1d  # additive contribution only
+            gphi = np.deg2rad(self.global_phase_deg)
+            # One amplitude reference per FID, on the data's own backend
+            max_abs = ops.amax(ops.abs(data_array), axis=-1, keepdims=True) + 1e-30
 
-            ghost_np = ghost_np.reshape(original_shape)
-            return data_array + match_backend(ghost_np, data_array), water_array
+            ghost_total = None
+            for echo in self.echoes:
+                alpha = echo.get('alpha', echo.get('amp', echo.get('amplitude', 0.05)))
+                phase_deg = echo.get('phase_deg', 0.0)
+                T2 = echo.get('T2', 0.04)
+                df_hz = echo.get('df_hz', echo.get('freq_hz', 0.0))
+                gaussian_env = echo.get('gaussian_env', False)
+
+                if 'delay_pts' in echo:
+                    shift_pts = int(echo['delay_pts'])
+                    tau = shift_pts * dt
+                else:
+                    tau = echo.get('tau', echo.get('delay_s', 0.18))
+                    shift_pts = int(round(tau / dt))
+
+                t_echo = echo.get('t_echo', tau)
+
+                # Delayed copy of the FID, still on its own backend
+                delayed = ops.shift_right(data_array, shift_pts)
+
+                # Modulation depends only on time, so it is built in NumPy
+                phase_rad = gphi + np.deg2rad(phase_deg)
+                mod = np.exp(1j * (2.0 * np.pi * df_hz * (t - tau) + phase_rad))
+
+                if T2 >= 1e4:
+                    # No envelope: a plain shift and add
+                    ghost = alpha * delayed * ops.cast_like(
+                        match_backend(mod, data_array), data_array)
+                else:
+                    if self.alpha_reference == 'tau':
+                        tau_idx = min(shift_pts, N - 1)
+                        amp_ref = ops.abs(data_array[..., tau_idx:tau_idx + 1])
+                    else:  # 'max'
+                        amp_ref = max_abs
+
+                    if gaussian_env:
+                        env = np.exp(-((t - t_echo) ** 2) / (2.0 * T2 ** 2))
+                    else:
+                        env = np.exp(-np.abs(t - t_echo) / T2)
+
+                    ghost = (ops.cast_like(alpha * amp_ref, data_array)
+                             * (delayed / ops.cast_like(max_abs, delayed))
+                             * ops.cast_like(match_backend(env * mod, data_array), data_array))
+
+                ghost_total = ghost if ghost_total is None else ghost_total + ghost
+
+            if ghost_total is None:
+                return data_array, water_array
+            return data_array + ghost_total, water_array
 
     def _add_echoes(self, fid: np.ndarray, sw_hz: float) -> np.ndarray:
         """

@@ -6,7 +6,7 @@ import pytest
 import numpy as np
 from augmentrum.augmentation.eddy_current import EddyCurrent
 from augmentrum.augmentation.apodization import Apodization
-from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
+from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 
 
 #**************************************************************************************************#

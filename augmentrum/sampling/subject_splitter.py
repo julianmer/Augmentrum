@@ -15,7 +15,7 @@
 #*************#
 #   imports   #
 #*************#
-import torch
+import numpy as np
 
 
 #**************************************************************************************************#
@@ -49,7 +49,7 @@ class SubjectSplitter:
         self.val_frac = val_frac
         self.test_frac = test_frac
         self.seed = seed
-        torch.manual_seed(seed)
+        self.rng = np.random.default_rng(seed)
 
     def __call__(self, **kwargs):
         """
@@ -99,7 +99,7 @@ class SubjectSplitter:
             water_list = None
 
         # Perform random split
-        idxs = torch.randperm(len(data_list)).tolist()
+        idxs = self.rng.permutation(len(data_list)).tolist()
         n_total = len(idxs)
         n_test = int(n_total * self.test_frac)
         n_val = int(n_total * self.val_frac)

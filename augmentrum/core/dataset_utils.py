@@ -101,7 +101,7 @@ def _make_batch(data, water, indices, copy=False):
     Returns:
         (batch_data, batch_water) as NIfTI_MRS_Plus objects.
     """
-    from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus
+    from nifti_mrs_plus import NIfTI_MRS_Plus
 
     get = (lambda idx: data[idx].copy()) if copy else (lambda idx: data[idx])
     batch_data = NIfTI_MRS_Plus(

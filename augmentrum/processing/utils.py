@@ -62,7 +62,6 @@ def update_processing_prov(nmrs_obj, method, details):
     nmrs_obj.add_hdr_field('ProcessingApplied', current_processing)
 
 
-
 #*********************************#
 #   phase correction of spectra   #
 #*********************************#

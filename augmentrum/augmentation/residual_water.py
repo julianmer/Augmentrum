@@ -19,8 +19,9 @@
 import numpy as np
 from typing import Optional, List
 from augmentrum.core.base_module import BaseModule
-from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
-from augmentrum.utils.tensor_ops import fft, ifft, fftshift, ifftshift, to_numpy, match_backend
+from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
+from nifti_mrs_plus import ops
+from nifti_mrs_plus.ops import fft, ifft, fftshift, ifftshift, match_backend
 
 
 #**************************************************************************************************#
@@ -71,7 +72,7 @@ class ResidualWater(BaseModule):
     ... )
     """
 
-    SUPPORTED_BACKENDS = []  # Supports all backends
+    SUPPORTED_BACKENDS = tuple(Backend)
 
     def __init__(self, center_ppm: float = 4.7,
                  peaks: tuple = ((0.0, 0.20, 1.0),
@@ -80,8 +81,7 @@ class ResidualWater(BaseModule):
                  phase_deg: float = 0.0,
                  amplitude_scale: float = 0.1):
         """Initialize residual water module."""
-        super().__init__(center_ppm=center_ppm, peaks=peaks,
-                        phase_deg=phase_deg, amplitude_scale=amplitude_scale)
+        super().__init__()
 
         self.center_ppm = center_ppm
         self.peaks = peaks
@@ -91,6 +91,42 @@ class ResidualWater(BaseModule):
     #*****************#
     #   water lobes   #
     #*****************#
+
+    @staticmethod
+    def _water_lobe_profile(ppm_axis, *, center_ppm=4.7,
+                            peaks=((0.0, 0.20, 1.0),   # (delta_ppm, FWHM_ppm, rel_amp)
+                                   (+0.12, 0.18, 0.4),
+                                   (-0.15, 0.25, 0.3)),
+                            phase_deg=0.0):
+        """
+        The complex water lobe profile at unit amplitude.
+
+        Depends only on the ppm axis, so it is identical for every FID in a
+        batch and is built once. Multiply by a per-FID amplitude to get the
+        additive water contribution.
+
+        Args:
+            ppm_axis: PPM axis
+            center_ppm: Center position of water peak (default: 4.7 ppm)
+            peaks: Tuple of (delta_ppm, FWHM_ppm, rel_amp) for each lobe
+            phase_deg: Phase of water peaks in degrees
+
+        Returns:
+            Complex profile with the same length as ppm_axis, peak magnitude 1
+        """
+        ppm = np.asarray(ppm_axis, float)
+        phi = np.deg2rad(phase_deg)
+        w = np.zeros_like(ppm, float)
+
+        # Simple Lorentzians
+        for dppm, fwhm_ppm, rel_amp in peaks:
+            x = ppm - (center_ppm + dppm)
+            hw = 0.5 * fwhm_ppm
+            w += rel_amp * (hw / (x**2 + hw**2)) / np.pi
+
+        # Normalize lobes to ~unit max
+        w /= np.max(w) if np.max(w) > 0 else 1.0
+        return w * (np.cos(phi) + 1j * np.sin(phi))
 
     @staticmethod
     def _add_water_lobes(spec, ppm_axis, *, center_ppm=4.7,
@@ -113,23 +149,11 @@ class ResidualWater(BaseModule):
             Spectrum with water peaks added
         """
         s = np.asarray(spec, dtype=complex)
-        ppm = np.asarray(ppm_axis, float)
-
-        phi = np.deg2rad(phase_deg)
-        w = np.zeros_like(ppm, float)
-
-        # Simple Lorentzians
-        for dppm, fwhm_ppm, rel_amp in peaks:
-            x = ppm - (center_ppm + dppm)
-            hw = 0.5 * fwhm_ppm
-            w += rel_amp * (hw / (x**2 + hw**2)) / np.pi
-
-        # Normalize lobes to ~unit max, then scale to a fraction of spec
-        w /= np.max(w) if np.max(w) > 0 else 1.0
+        profile = ResidualWater._water_lobe_profile(
+            ppm_axis, center_ppm=center_ppm, peaks=peaks, phase_deg=phase_deg)
         water_amp = amplitude_scale * np.max(np.abs(np.real(s)))
-        water = water_amp * w * (np.cos(phi) + 1j*np.sin(phi))
 
-        return s + water
+        return s + water_amp * profile
 
     def process_nifti_list(self, data_list: List, water_list: Optional[List] = None, **kwargs):
         """
@@ -166,15 +190,15 @@ class ResidualWater(BaseModule):
         """
         Add residual water peaks to tensor/array data (**any backend**).
 
-        FFT/IFFT are done **natively** via ``tensor_ops``.  Water peak shapes
+        FFT/IFFT are done **natively** via "tensor_ops".  Water peak shapes
         and amplitude scaling are computed in NumPy per-FID, then promoted
-        to the target backend via ``match_backend``.
+        to the target backend via "match_backend".
 
         Args:
-            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            data_array: Input tensor of shape "(batch, ..., n_points)"
             water_array: Optional water reference (unchanged)
             backend: Backend enum (unused)
-            **kwargs: Must contain ``'sw_hz'`` and ``'sf_mhz'``
+            **kwargs: Must contain "'sw_hz'" and "'sf_mhz'"
 
         Returns:
             Tuple of (processed_data, water_array)
@@ -185,7 +209,6 @@ class ResidualWater(BaseModule):
             raise ValueError("ResidualWater.process_tensor requires 'sw_hz' and 'sf_mhz' in kwargs")
 
         N = data_array.shape[-1]
-        n_batch = int(np.prod(data_array.shape[:-1]))
         ref_ppm = 4.7
 
         # 1. Spectrum (backend-native FFT)
@@ -196,26 +219,27 @@ class ResidualWater(BaseModule):
         freq_hz = np.fft.fftshift(np.fft.fftfreq(N, d=dt))
         ppm = ref_ppm - freq_hz / float(sf_mhz)
 
-        # 3. Compute additive water contribution per FID (numpy)
-        spec_np = to_numpy(spec).reshape(n_batch, N)
-        water_add_np = np.zeros((n_batch, N), dtype=np.complex128)
+        # 3. The lobe profile depends only on the ppm axis, so it is the same
+        #    for every FID and is built once, in NumPy, at unit amplitude.
+        unit_lobes = self._water_lobe_profile(
+            ppm,
+            center_ppm=self.center_ppm,
+            peaks=self.peaks,
+            phase_deg=self.phase_deg,
+        )
 
-        for i in range(n_batch):
-            spec_with = self._add_water_lobes(
-                spec_np[i], ppm,
-                center_ppm=self.center_ppm,
-                peaks=self.peaks,
-                phase_deg=self.phase_deg,
-                amplitude_scale=self.amplitude_scale,
-            )
-            water_add_np[i] = spec_with - spec_np[i]
+        # 4. The only data-dependent term is one amplitude per FID, taken on the
+        #    data's own backend so the spectrum is never converted.
+        water_amp = self.amplitude_scale * ops.amax(
+            ops.abs(ops.real(spec)), axis=-1, keepdims=True)
 
-        water_add_np = water_add_np.reshape(data_array.shape)
+        water_add = ops.cast_like(match_backend(unit_lobes, spec), spec) \
+            * ops.cast_like(water_amp, spec)
 
-        # 4. Add water in spectral domain (backend-native)
-        spec_aug = spec + match_backend(water_add_np, spec)
+        # 5. Add water in spectral domain (backend-native)
+        spec_aug = spec + water_add
 
-        # 5. Back to FID (backend-native IFFT)
+        # 6. Back to FID (backend-native IFFT)
         return fft(ifftshift(spec_aug)), water_array
 
     def _add_water_to_fid(self, fid: np.ndarray, sw_hz: float, sf_mhz: float,

@@ -12,7 +12,7 @@ Tests cover:
 import pytest
 import numpy as np
 from augmentrum.augmentation.phase_frequency import PhaseShift, FrequencyShift
-from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
+from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 
 
 #**************************************************************************************************#

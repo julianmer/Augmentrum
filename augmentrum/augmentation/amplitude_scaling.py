@@ -20,9 +20,9 @@ from typing import List, Optional, Union, Tuple
 import numpy as np
 from fsl_mrs.core import NIFTI_MRS
 
-from augmentrum.core.base_module import BaseModule, init_params
-from augmentrum.core.nifti_mrs_plus import Backend
-from augmentrum.utils.tensor_ops import match_backend
+from augmentrum.core.base_module import BaseModule
+from nifti_mrs_plus import Backend
+from nifti_mrs_plus.ops import match_backend
 
 
 #**************************************************************************************************#
@@ -77,12 +77,11 @@ class AmplitudeScaling(BaseModule):
         **kwargs
     ):
         """Initialize AmplitudeScaling module."""
-        super().__init__(**init_params(locals()))
+        super().__init__()
 
         self.scale_factor = scale_factor
         self.distribution = distribution
         self.seed = seed
-        self.rng = np.random.default_rng(seed)
 
         # Validate distribution
         if distribution not in ['uniform', 'normal']:
@@ -94,12 +93,12 @@ class AmplitudeScaling(BaseModule):
             min_scale, max_scale = self.scale_factor
 
             if self.distribution == 'uniform':
-                return self.rng.uniform(min_scale, max_scale)
+                return self.rng.numpy_rng().uniform(min_scale, max_scale)
             elif self.distribution == 'normal':
                 # Use range as mean ± std
                 mean = (min_scale + max_scale) / 2.0
                 std = (max_scale - min_scale) / 4.0  # ~95% within range
-                return self.rng.normal(mean, std)
+                return self.rng.numpy_rng().normal(mean, std)
         else:
             return float(self.scale_factor)
 

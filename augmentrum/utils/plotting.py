@@ -54,7 +54,7 @@ def _style_mrs_ax(ax, clean):
 
 
 def _save_fig(fig, save_path, name):
-    """Save *fig* to ``save_path/name.png``, close it, and return the path."""
+    """Save *fig* to "save_path/name.png", close it, and return the path."""
     if save_path is not None:
         os.makedirs(save_path, exist_ok=True)
         out = os.path.join(save_path, f'{name}.png')
@@ -77,7 +77,7 @@ def plot_spec_and_fit(spec, fit, true=None, ppmAxis=None, ppmLim=None, name='',
     fit       : np.ndarray (complex)  forward-modelled fit (1-D).
     true      : np.ndarray (complex), optional  ground-truth spectrum.
     ppmAxis   : np.ndarray, optional  chemical-shift axis matching *spec*. Defaults to
-                ``linspace(0.5, 4.0, len(spec))``.
+                "linspace(0.5, 4.0, len(spec))".
     ppmLim    : tuple(float, float), optional  (lo, hi) ppm window to display.
     name      : str  filename stem (without extension).
     save_path : str, optional  directory to save PNG into; created if missing.
@@ -122,7 +122,7 @@ def plot_spec(spec, ppmAxis=None, ppmLim=None, name='', save_path=None,
               real=True, color='k', title=None, clean=False):
     """Plot a single complex spectrum on a ppm axis (no fit / residual).
 
-    Same visual style as :func:`plot_spec_and_fit` — useful for sanity-checking
+    Same visual style as "plot_spec_and_fit" — useful for sanity-checking
     the simulated input in isolation.
 
     Parameters
@@ -211,7 +211,7 @@ def vis_nifti_mrs_plus(
         >>> nifti_plus.plot(batch_index=None, max_batch_display=4)  # Plot first 4
         >>> nifti_plus.plot(ppmlim=(0.5, 4.2))  # Custom ppm range
     """
-    from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus
+    from nifti_mrs_plus import NIfTI_MRS_Plus
     
     if not isinstance(data, NIfTI_MRS_Plus):
         raise TypeError("data must be a NIfTI_MRS_Plus object")
@@ -435,7 +435,7 @@ def plot_batch_comparison(
         >>> plot_batch_comparison(nifti_plus, indices=[0, 1, 2])
         >>> plot_batch_comparison(nifti_plus, labels=['Original', 'Augmented 1', 'Augmented 2'])
     """
-    from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus
+    from nifti_mrs_plus import NIfTI_MRS_Plus
     
     if not isinstance(nifti_plus, NIfTI_MRS_Plus):
         raise TypeError("nifti_plus must be a NIfTI_MRS_Plus object")
@@ -534,7 +534,7 @@ def plot_batch_grid_detailed(
     Returns:
         matplotlib figure
     """
-    from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus
+    from nifti_mrs_plus import NIfTI_MRS_Plus
     
     if not isinstance(nifti_plus, NIfTI_MRS_Plus):
         raise TypeError("nifti_plus must be a NIfTI_MRS_Plus object")

@@ -13,34 +13,12 @@
 #*************#
 #   imports   #
 #*************#
+import functools
+import inspect
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 from augmentrum.core import NIfTI_MRS_Plus, Backend
-
-
-#*****************#
-#   init params   #
-#*****************#
-def init_params(local_vars: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    A constructor's arguments as a flat dict, for the provenance record.
-
-    Call it as the FIRST statement of ``__init__``, where ``locals()`` still holds
-    exactly the parameters::
-
-        super().__init__(**init_params(locals()))
-
-    Modules used to name a hand-picked subset in their ``super().__init__`` call,
-    or to forward only ``**kwargs``. Both silently under-record: what reaches the
-    NIfTI header is ``self.params``, so an argument left out of that call is an
-    argument the dataset cannot tell you about. Four of sixteen modules were
-    affected, two of them recording nothing at all. Passing ``locals()`` cannot
-    drift out of step with the signature the way a hand-written list does.
-    """
-    params = {k: v for k, v in local_vars.items()
-              if k not in ('self', '__class__', 'kwargs')}
-    params.update(local_vars.get('kwargs') or {})
-    return params
+from nifti_mrs_plus.ops import SeedGenerator
 
 
 #**************************************************************************************************#
@@ -66,17 +44,67 @@ class BaseModule(ABC):
     - forward() as alias (for compatibility)
     """
 
-    # Subclasses can override - if empty, module supports all backends
-    SUPPORTED_BACKENDS: List[Backend] = []
+    # Empty means none. Every subclass declares the backends it handles, so a
+    # module that forgets fails immediately instead of silently claiming to
+    # support everything. Use tuple(Backend) for a module that works anywhere.
+    SUPPORTED_BACKENDS: Tuple[Backend, ...] = ()
+
+    def __init_subclass__(cls, **kwargs):
+        """
+        Wrap a subclass's "__init__" so its arguments are recorded automatically.
+
+        "self.params" is what reaches the NIfTI provenance header, so it has to
+        match the constructor exactly. Binding the call against the signature
+        gets every argument, including defaults the caller never mentioned,
+        without the subclass doing anything.
+        """
+        super().__init_subclass__(**kwargs)
+
+        init = cls.__dict__.get('__init__')
+        if init is None or getattr(init, '_records_params', False):
+            return
+
+        signature = inspect.signature(init)
+        kinds = {p.name: p.kind for p in signature.parameters.values()}
+
+        @functools.wraps(init)
+        def __init__(self, *args, **kwargs):
+            init(self, *args, **kwargs)
+
+            bound = signature.bind(self, *args, **kwargs)
+            bound.apply_defaults()
+
+            params = {}
+            for name, value in bound.arguments.items():
+                if name == 'self' or kinds[name] is inspect.Parameter.VAR_POSITIONAL:
+                    continue
+                if kinds[name] is inspect.Parameter.VAR_KEYWORD:
+                    params.update(value or {})
+                else:
+                    params[name] = value
+
+            self.params = params
+            self.rng = SeedGenerator(params.get('seed'))
+
+        __init__._records_params = True
+        cls.__init__ = __init__
 
     def __init__(self, **kwargs):
         """
         Initialize module with optional parameters.
 
+        Subclasses need not pass anything: their own arguments are recorded from
+        their signature. Anything given here is merged in, for modules that add
+        parameters not named in their constructor.
+
         Args:
-            **kwargs: Module-specific parameters, stored in self.params
+            **kwargs: Extra parameters to record alongside the constructor's.
         """
-        self.params = kwargs
+        self.params = {**getattr(self, 'params', {}), **kwargs}
+
+        # Every module draws from one generator, held for its lifetime: a seeded
+        # run reproduces while each batch still receives a fresh perturbation.
+        self.rng = SeedGenerator(self.params.get('seed'))
 
     def __call__(self, data: NIfTI_MRS_Plus, water: Optional[NIfTI_MRS_Plus] = None,
                  **kwargs) -> Tuple[NIfTI_MRS_Plus, Optional[NIfTI_MRS_Plus]]:
@@ -91,10 +119,9 @@ class BaseModule(ABC):
         # Determine which method to use based on backend
         backend = data.backend
 
-        # Check if we support this backend (if SUPPORTED_BACKENDS specified)
-        if self.SUPPORTED_BACKENDS and backend not in self.SUPPORTED_BACKENDS:
-            # Use first supported backend
-            backend = self.SUPPORTED_BACKENDS[0] if self.SUPPORTED_BACKENDS else Backend.NIFTI_LIST
+        # Fall back to a backend this module actually handles
+        if backend not in self.SUPPORTED_BACKENDS:
+            backend = self.get_preferred_backend()
 
         # Check which methods are actually implemented (overridden from BaseModule)
         has_process_nifti_list = (
@@ -180,23 +207,24 @@ class BaseModule(ABC):
                            backend: Backend, **kwargs) -> Tuple[NIfTI_MRS_Plus, Optional[NIfTI_MRS_Plus]]:
         """Process using tensor method.
 
-        Following the zea pattern, data is passed to ``process_tensor()`` in its
-        **native backend format** (NumPy / PyTorch / JAX / TensorFlow) so that
-        gradients and device placement are preserved.  The write-back into
-        NIFTI_MRS storage always goes through NumPy (unavoidable since NIfTI is
-        a NumPy-backed format).
+        Data is passed to "process_tensor()" in its **native backend format**
+        (NumPy / PyTorch / JAX / TensorFlow) so that gradients and device
+        placement are preserved.
 
         Performance tiers
         -----------------
-        1. **Fast** — same N_PTS in and out (all augmentations except truncate/zerofill):
-           one vectorised tensor op, then ``nifti[:] = sample`` in-place.  Zero extra
-           allocations.
+        1. **Fast** — shape unchanged (all augmentations except truncate/zerofill):
+           one vectorised tensor op, then the result is handed to
+           "NIfTI_MRS_Plus.set_data", which keeps it on its own backend. Nothing
+           is converted, so an autograd graph survives the whole pipeline and is
+           only resolved when something asks for NIfTI objects.
 
-        2. **Medium** — N_PTS changes (e.g. truncation, zero-fill): tensor slice/pad is
+        2. **Medium** — shape changes (e.g. truncation, zero-fill): the tensor op is
            still vectorised, but write-back must rebuild each NIfTI_MRS object
-           (O(B) constructor calls).  A ``RuntimeWarning`` is emitted.
+           through NumPy (O(B) constructor calls), which ends the graph. A
+           "RuntimeWarning" is emitted.
 
-        3. **Slow (~ routing)** — module only implements ``process_nifti_list``:
+        3. **Slow (~ routing)** — module only implements "process_nifti_list":
            falls back to the NIfTI-list path, processes each subject individually.
            This is what sampling modules (CoilAverageSampler, NIfTI_RawProcessor)
            always use because they change DIM_COIL / DIM_DYN, not just values.
@@ -204,8 +232,6 @@ class BaseModule(ABC):
         Rule of thumb: keep **N_PTS and all extra dimensions uniform** across the
         whole batch for tier-1 speed everywhere.
         """
-        from augmentrum.utils.tensor_ops import to_numpy
-
         # Inject spectral metadata so modules can use sw_hz / sf_mhz without
         # requiring FSL-MRS objects.
         # Primary source: metadata_common (populated when volatile=False).
@@ -251,122 +277,123 @@ class BaseModule(ABC):
             data_array, water_array, backend=backend, **kwargs
         )
 
-        # ── Write back into NIfTI_MRS list (must go through numpy) ──
-        nifti_list_out = data.list()
-        if processed_data is not None:
-            processed_np = to_numpy(processed_data)
-            # Detect N_PTS change (e.g. truncation, zero-fill)
-            in_npts = data_array.shape[-1] if hasattr(data_array, 'shape') else None
-            out_npts = processed_np.shape[-1] if processed_np is not None else None
-            if in_npts is not None and out_npts is not None and out_npts != in_npts:
-                import warnings
-                warnings.warn(
-                    f"{self.__class__.__name__}: N_PTS changed {in_npts} → {out_npts} "
-                    f"(same for all {processed_np.shape[0]} batch members — module params "
-                    f"are uniform by design). "
-                    f"NIfTI objects will be rebuilt with the new length. "
-                    f"This is correct but ~slower than the normal in-place write-back path. "
-                    f"For maximum throughput, keep N_PTS the same throughout the pipeline "
-                    f"(e.g. prefer Apodization[exponential] over Apodization[truncate] "
-                    f"when batching on a tensor backend).",
-                    stacklevel=3,
-                )
-            for i, nifti in enumerate(nifti_list_out):
-                if i < processed_np.shape[0]:
-                    sample_np = processed_np[i]
-                    if sample_np.shape == nifti[:].shape:
-                        nifti[:] = sample_np
-                    else:
-                        # N_PTS changed — rebuild this NIfTI_MRS object from scratch
-                        from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
-                        try:
-                            affine = nifti.getAffine('voxel', 'world')
-                        except Exception:
-                            affine = None
-                        nucleus = (nifti.nucleus[0]
-                                   if hasattr(nifti, 'nucleus') and nifti.nucleus else '1H')
-                        dim_tags = (list(nifti.dim_tags)
-                                    if hasattr(nifti, 'dim_tags') else [None, None, None])
-                        new_nifti = gen_nifti_mrs(
-                            data=sample_np,
-                            dwelltime=nifti.dwelltime,
-                            spec_freq=nifti.spectrometer_frequency[0],
-                            nucleus=nucleus,
-                            dim_tags=dim_tags,
-                            affine=affine,
-                        )
-                        # Copy extra header fields
-                        if hasattr(nifti, 'hdr_ext'):
-                            for key in nifti.hdr_ext:
-                                if key not in ('SpectrometerFrequency', 'ResonantNucleus',
-                                               'dim_5', 'dim_6', 'dim_7'):
-                                    try:
-                                        new_nifti.add_hdr_field(key, nifti.hdr_ext[key])
-                                    except Exception:
-                                        pass
-                        nifti_list_out[i] = new_nifti
-
-        # Log provenance
+        # ── Write back ──
         operation_name = self.__class__.__name__
         operation_details = {'method': 'process_tensor', 'backend': backend.value,
                            'params': self.params}
 
-        data_out = NIfTI_MRS_Plus(
-            nifti_list=nifti_list_out,
-            backend=backend,
-            volatile=data.volatile
-        )
-
-        if not data.volatile:
-            data_out.update_metadata(operation_name, operation_details)
+        data_out = self._wrap_processed(data, data_array, processed_data, backend,
+                                        operation_name, operation_details)
 
         water_out = None
         if water is not None:
-            water_list_out = water.list()
-            if processed_water is not None:
-                processed_water_np = to_numpy(processed_water)
-                for i, nifti in enumerate(water_list_out):
-                    if i < processed_water_np.shape[0]:
-                        sample_np = processed_water_np[i]
-                        if sample_np.shape == nifti[:].shape:
-                            nifti[:] = sample_np
-                        else:
-                            from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
-                            try:
-                                affine = nifti.getAffine('voxel', 'world')
-                            except Exception:
-                                affine = None
-                            nucleus = (nifti.nucleus[0]
-                                       if hasattr(nifti, 'nucleus') and nifti.nucleus else '1H')
-                            dim_tags = (list(nifti.dim_tags)
-                                        if hasattr(nifti, 'dim_tags') else [None, None, None])
-                            new_nifti = gen_nifti_mrs(
-                                data=sample_np,
-                                dwelltime=nifti.dwelltime,
-                                spec_freq=nifti.spectrometer_frequency[0],
-                                nucleus=nucleus,
-                                dim_tags=dim_tags,
-                                affine=affine,
-                            )
-                            if hasattr(nifti, 'hdr_ext'):
-                                for key in nifti.hdr_ext:
-                                    if key not in ('SpectrometerFrequency', 'ResonantNucleus',
-                                                   'dim_5', 'dim_6', 'dim_7'):
-                                        try:
-                                            new_nifti.add_hdr_field(key, nifti.hdr_ext[key])
-                                        except Exception:
-                                            pass
-                            water_list_out[i] = new_nifti
-
-            water_out = NIfTI_MRS_Plus(
-                nifti_list=water_list_out,
-                backend=backend,
-                volatile=water.volatile
-            )
-            if not water.volatile:
-                water_out.update_metadata(operation_name, operation_details)
+            water_out = self._wrap_processed(water, water_array, processed_water, backend,
+                                             operation_name, operation_details)
 
         return data_out, water_out
+
+    #*****************#
+    #   write-back    #
+    #*****************#
+
+    def _wrap_processed(self, source: NIfTI_MRS_Plus, in_array, processed,
+                        backend: Backend, operation_name: str,
+                        operation_details: Dict) -> NIfTI_MRS_Plus:
+        """
+        Wrap a processed tensor back into a "NIfTI_MRS_Plus".
+
+        Unchanged shape is both the common case and the fast one: the tensor is
+        installed with "set_data" and never converted, so an autograd graph and
+        device placement survive to the end of the pipeline. A shape change
+        forces the NumPy rebuild, because a NIfTI object's length is fixed when
+        it is constructed.
+        """
+        if processed is None:
+            nifti_list = source.nifti_list
+        elif self._same_shape(in_array, processed):
+            nifti_list = source.nifti_list
+        else:
+            self._warn_shape_change(in_array, processed)
+            nifti_list = self._rebuild_nifti_list(source, processed)
+            processed = None            # values are already in the rebuilt objects
+
+        out = NIfTI_MRS_Plus(nifti_list=nifti_list, backend=backend,
+                             volatile=source.volatile)
+        if processed is not None:
+            out.set_data(processed, backend)
+
+        if not source.volatile:
+            out.update_metadata(operation_name, operation_details)
+
+        return out
+
+    @staticmethod
+    def _same_shape(a, b) -> bool:
+        """True when both carry a shape and the two agree."""
+        if not (hasattr(a, 'shape') and hasattr(b, 'shape')):
+            return False
+        return tuple(a.shape) == tuple(b.shape)
+
+    def _warn_shape_change(self, in_array, processed):
+        """Warn that the rebuild path is slower and ends any autograd graph."""
+        import warnings
+        warnings.warn(
+            f"{self.__class__.__name__}: shape changed "
+            f"{tuple(in_array.shape)} → {tuple(processed.shape)}. "
+            f"NIfTI objects will be rebuilt at the new length, which goes through "
+            f"NumPy and therefore ends any autograd graph. "
+            f"For maximum throughput and to keep gradients, hold N_PTS and all "
+            f"extra dimensions constant through the pipeline (e.g. prefer "
+            f"Apodization[exponential] over Apodization[truncate] when batching "
+            f"on a tensor backend).",
+            stacklevel=4,
+        )
+
+    @staticmethod
+    def _rebuild_nifti_list(source: NIfTI_MRS_Plus, processed) -> List:
+        """Rebuild each NIFTI_MRS at the new length, carrying its header across."""
+        from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+        from nifti_mrs_plus.ops import to_numpy
+
+        processed_np = to_numpy(processed)
+        nifti_list = list(source.nifti_list)
+
+        for i, nifti in enumerate(nifti_list):
+            if i >= processed_np.shape[0]:
+                break
+            sample_np = processed_np[i]
+            if sample_np.shape == nifti[:].shape:
+                nifti[:] = sample_np
+                continue
+
+            try:
+                affine = nifti.getAffine('voxel', 'world')
+            except Exception:
+                affine = None
+            nucleus = (nifti.nucleus[0]
+                       if hasattr(nifti, 'nucleus') and nifti.nucleus else '1H')
+            dim_tags = (list(nifti.dim_tags)
+                        if hasattr(nifti, 'dim_tags') else [None, None, None])
+            new_nifti = gen_nifti_mrs(
+                data=sample_np,
+                dwelltime=nifti.dwelltime,
+                spec_freq=nifti.spectrometer_frequency[0],
+                nucleus=nucleus,
+                dim_tags=dim_tags,
+                affine=affine,
+            )
+            # Copy extra header fields
+            if hasattr(nifti, 'hdr_ext'):
+                for key in nifti.hdr_ext:
+                    if key not in ('SpectrometerFrequency', 'ResonantNucleus',
+                                   'dim_5', 'dim_6', 'dim_7'):
+                        try:
+                            new_nifti.add_hdr_field(key, nifti.hdr_ext[key])
+                        except Exception:
+                            pass
+            nifti_list[i] = new_nifti
+
+        return nifti_list
 
     def _process_via_forward(self, data: NIfTI_MRS_Plus, water: Optional[NIfTI_MRS_Plus],
                             **kwargs) -> Tuple[NIfTI_MRS_Plus, Optional[NIfTI_MRS_Plus]]:
@@ -418,15 +445,17 @@ class BaseModule(ABC):
 
     def supports_backend(self, backend: Backend) -> bool:
         """Check if this module supports the given backend."""
-        if not self.SUPPORTED_BACKENDS:
-            return True  # Supports all if not specified
         return backend in self.SUPPORTED_BACKENDS
 
     def get_preferred_backend(self) -> Backend:
-        """Get the preferred backend for this module."""
-        if self.SUPPORTED_BACKENDS:
-            return self.SUPPORTED_BACKENDS[0]
-        return Backend.NIFTI_LIST
+        """The backend this module would rather be given."""
+        if not self.SUPPORTED_BACKENDS:
+            raise ValueError(
+                f"{self.__class__.__name__}.SUPPORTED_BACKENDS is empty, so the "
+                f"module declares that it supports no backend at all. List the "
+                f"backends it handles, or tuple(Backend) if it works anywhere."
+            )
+        return self.SUPPORTED_BACKENDS[0]
 
     # Subclasses can implement these methods as needed
     def process_nifti_list(self, data_list: List, water_list: Optional[List] = None,
@@ -462,7 +491,8 @@ class BaseModule(ABC):
         )
 
     def __repr__(self) -> str:
-        backends = [b.value for b in self.SUPPORTED_BACKENDS] if self.SUPPORTED_BACKENDS else ['all']
+        backends = (['all'] if tuple(self.SUPPORTED_BACKENDS) == tuple(Backend)
+                    else [b.value for b in self.SUPPORTED_BACKENDS])
         return f"{self.__class__.__name__}(backends={backends})"
 
 

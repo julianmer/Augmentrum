@@ -16,16 +16,16 @@ Shared module registry for the tests that iterate over modules.
 
 Three tests sweep the whole module set — the backend-compatibility matrix, the
 README support table, and the provenance round-trip. Each used to carry its own
-hand-written list, so registering a new module in ``Augmentrum.AVAILABLE_MODULES``
-gave it no coverage anywhere and nothing complained. ``KspaceUndersampling`` was
+hand-written list, so registering a new module in "Augmentrum.AVAILABLE_MODULES"
+gave it no coverage anywhere and nothing complained. "KspaceUndersampling" was
 in neither list.
 
 Here the *discovery* is automatic and only the per-variant detail is written by
-hand. :func:`uncovered_classes` is what closes the gap: a class in the registry
+hand. "uncovered_classes" is what closes the gap: a class in the registry
 with no spec is a test failure, not silence.
 
-A module may need several specs — ``GaussianNoise`` has three ways of stating a
-noise level, ``BaselineAugmentation`` three baseline models — so specs are a flat
+A module may need several specs — "GaussianNoise" has three ways of stating a
+noise level, "BaselineAugmentation" three baseline models — so specs are a flat
 list of variants, not one per class.
 """
 
@@ -53,21 +53,21 @@ class ModuleSpec:
     One testable configuration of a module.
 
     Args:
-        label: display name and pytest id, e.g. ``GaussianNoise[snr_db]``.
+        label: display name and pytest id, e.g. "GaussianNoise[snr_db]".
         cls: the module class.
         kwargs: constructor arguments for this variant.
         needs_multicoil: needs the multi-coil fixture (DIM_COIL + DIM_DYN).
-        spatial: operates on 2-D image tensors ``(batch, X, Y, C)`` rather than spectra.
-        volume: operates on 5-D volumes ``(batch, X, Y, Z, T)``.
+        spatial: operates on 2-D image tensors "(batch, X, Y, C)" rather than spectra.
+        volume: operates on 5-D volumes "(batch, X, Y, Z, T)".
         changes_length: rewrites the spectral length, so shape-preservation
-            assertions do not apply — ``ZeroFill`` and ``Apodization[truncate]``.
+            assertions do not apply — "ZeroFill" and "Apodization[truncate]".
         own_provenance: records its own provenance per operation instead of
-            through ``self.params``, so the constructor-argument check does not
+            through "self.params", so the constructor-argument check does not
             apply.
         nifti_kwargs: overrides for the NIfTI-list path, where the data layout
-            differs from the tensor sweeps'. Only ``SpatialAugmentations`` needs
+            differs from the tensor sweeps'. Only "SpatialAugmentations" needs
             it: the sweeps hand it a 4-D image tensor (dim=2) while a NIfTI list
-            is always ``(X, Y, Z, T)`` (dim=3).
+            is always "(X, Y, Z, T)" (dim=3).
         note: free text surfaced in the README summary for known issues.
     """
     label: str
@@ -166,7 +166,7 @@ SPECS: List[ModuleSpec] = [
 #***************#
 
 def registered_classes() -> Dict[str, Type[BaseModule]]:
-    """Distinct module classes reachable through ``Augmentrum.AVAILABLE_MODULES``."""
+    """Distinct module classes reachable through "Augmentrum.AVAILABLE_MODULES"."""
     return {c.__name__: c for c in Augmentrum.AVAILABLE_MODULES.values()}
 
 
@@ -183,10 +183,10 @@ def uncovered_classes() -> List[str]:
 
 def _bind_classes() -> None:
     """
-    Resolve each spec's ``cls`` from its label against the live registry.
+    Resolve each spec's "cls" from its label against the live registry.
 
     Specs name their class in the label rather than importing it, so this file
-    has one import of ``Augmentrum`` and no second list of imports to drift out
+    has one import of "Augmentrum" and no second list of imports to drift out
     of step with the registry.
     """
     known = registered_classes()

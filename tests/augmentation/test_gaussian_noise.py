@@ -13,7 +13,7 @@ Tests cover:
 import pytest
 import numpy as np
 from augmentrum.augmentation.gaussian_noise import GaussianNoise
-from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
+from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 
 
 #**************************************************************************************************#
@@ -60,7 +60,7 @@ class TestGaussianNoiseCreation:
     def test_supports_all_backends(self):
         """Test that GaussianNoise supports all backends."""
         noise = GaussianNoise(sigma_frac=0.02)
-        assert noise.SUPPORTED_BACKENDS == []
+        assert noise.SUPPORTED_BACKENDS == tuple(Backend)
 
 
 #**************************************************************************************************#

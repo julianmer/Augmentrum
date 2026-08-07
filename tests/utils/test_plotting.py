@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from unittest.mock import Mock, patch
 
 # Test imports
-from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus
+from nifti_mrs_plus import NIfTI_MRS_Plus
 from augmentrum.utils.plotting import (
     vis_nifti_mrs_plus,
     plot_batch_comparison,
@@ -42,6 +42,7 @@ def mock_nifti_mrs():
 
     nifti.__getitem__ = Mock(return_value=fid)
     nifti.shape = (1, 1, 1, n_points)
+    nifti.ndim = 4            # Real int: Mock would break the `ndim > 4` rank check
     nifti.dwelltime = 0.0005  # 500 µs
     nifti.bandwidth = 2000.0  # Real number, not Mock
     nifti.spectrometer_frequency = [123.26]  # 3T for 1H
@@ -68,6 +69,7 @@ def mock_nifti_mrs_list(mock_nifti_mrs):
         
         nifti.__getitem__ = Mock(return_value=fid)
         nifti.shape = (1, 1, 1, n_points)
+        nifti.ndim = 4            # Real int: Mock would break the `ndim > 4` rank check
         nifti.dwelltime = 0.0005
         nifti.bandwidth = 2000.0  # Real number, not Mock
         nifti.spectrometer_frequency = [123.26]
@@ -495,11 +497,13 @@ def test_plot_single_element_batch():
     fid = np.random.randn(n_points) + 1j * np.random.randn(n_points)
     nifti.__getitem__ = Mock(return_value=fid)
     nifti.shape = (1, 1, 1, n_points)
+    nifti.ndim = 4            # Real int: Mock would break the `ndim > 4` rank check
     nifti.dwelltime = 0.0005
+    nifti.bandwidth = 2000.0  # Real number, not Mock
     nifti.spectrometer_frequency = [123.26]
     nifti.nucleus = ['1H']
-    nifti.dim_tags = None
-    
+    nifti.dim_tags = [None, None, None]  # Real NIFTI_MRS always returns a 3-list
+
     nifti_plus = NIfTI_MRS_Plus([nifti], backend='nifti_list', volatile=True)
     
     with patch('matplotlib.pyplot.show'):
@@ -520,6 +524,7 @@ def test_plot_large_batch():
         fid = np.random.randn(n_points) + 1j * np.random.randn(n_points)
         nifti.__getitem__ = Mock(return_value=fid)
         nifti.shape = (1, 1, 1, n_points)
+        nifti.ndim = 4            # Real int: Mock would break the `ndim > 4` rank check
         nifti.dwelltime = 0.0005
         nifti.bandwidth = 2000.0  # Real number, not Mock
         nifti.spectrometer_frequency = [123.26]

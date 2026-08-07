@@ -33,29 +33,29 @@ Ablations
 5. Panel     a full-page sweep of every panel trajectory against acceleration,
              2-D and 3-D side by side, reconstructed by NUFFT throughout
 
-Output (``results/phantom_ablation/``)
+Output ("results/phantom_ablation/")
 --------------------------------------
 ===================================  =========================================
-``<phantom>_spatial_ablation``       one panel per augmentation, applied alone
-``<phantom>_sampling_ablation``      masks and their zero-filled recons
-``<phantom>_acceleration_curve``     reconstruction error vs acceleration
-``<phantom>_trajectories_2d``        2-D trajectories at matched bin coverage
-``<phantom>_trajectories_3d``        3-D trajectories at matched bin coverage
-``<phantom>_nufft_ablation``         nearest-bin gridding vs NUFFT, same samples
-``<phantom>_interpolation_error``    interpolator error vs k-space oversampling
-``<phantom>_nufft_panel``            full page: trajectory vs acceleration
-``<phantom>_nufft_panel_inset``      the same, with a zoomed window onto the
+"<phantom>_spatial_ablation"       one panel per augmentation, applied alone
+"<phantom>_sampling_ablation"      masks and their zero-filled recons
+"<phantom>_acceleration_curve"     reconstruction error vs acceleration
+"<phantom>_trajectories_2d"        2-D trajectories at matched bin coverage
+"<phantom>_trajectories_3d"        3-D trajectories at matched bin coverage
+"<phantom>_nufft_ablation"         nearest-bin gridding vs NUFFT, same samples
+"<phantom>_interpolation_error"    interpolator error vs k-space oversampling
+"<phantom>_nufft_panel"            full page: trajectory vs acceleration
+"<phantom>_nufft_panel_inset"      the same, with a zoomed window onto the
                                      Cartesian bins on each 2-D pattern
-``<phantom>_nufft_panel_paired``     the same, with what was sampled above each
+"<phantom>_nufft_panel_paired"     the same, with what was sampled above each
                                      reconstruction
-``<phantom>_nufft_panel_paired_inset``  paired, with the zoom windows as well
-``anisotropy_ablation``              rotation with and without the voxel-size
+"<phantom>_nufft_panel_paired_inset"  paired, with the zoom windows as well
+"anisotropy_ablation"              rotation with and without the voxel-size
                                      correction
-``metrics.csv``                      every number behind those figures
+"metrics.csv"                      every number behind those figures
 ===================================  =========================================
 
 Every figure is written as both PNG and PDF. Ablations 4 to 5 need the optional
-``torchkbnufft`` dependency and are skipped with a note when it is absent; the
+"torchkbnufft" dependency and are skipped with a note when it is absent; the
 3-D NUFFTs in the panel dominate the runtime.
 """
 
@@ -83,7 +83,6 @@ from tqdm import tqdm
 
 from augmentrum.augmentation.spatial_augmentations import SpatialAugmentations
 from augmentrum.sampling import GridMask, KspaceSampler, KspaceUndersampling
-from augmentrum.utils import NumpyBackend
 
 
 #************#
@@ -246,7 +245,7 @@ def load_bigbrain(path, size=128, n_slices=8):
     """
     Load the BigBrainMR T1-weighted volume, block-averaged down to the matrix.
 
-    Downsampled rather than cropped, unlike :func:`load_ge_phantom`. The volume
+    Downsampled rather than cropped, unlike "load_ge_phantom". The volume
     is 388 x 480 x 408 at 0.4 mm and the brain fills it, so a centred crop of
     128 voxels would return a 51 mm block of white matter instead of a head.
     Averaging whole blocks — as opposed to striding — is what keeps that
@@ -271,7 +270,7 @@ def load_bigbrain(path, size=128, n_slices=8):
     keep = [f * t for f, t in zip(factor, target)]
     start = [(s - k) // 2 for s, k in zip(img.shape, keep)]
 
-    # Streamed in one sequential pass rather than sliced out of ``dataobj``.
+    # Streamed in one sequential pass rather than sliced out of "dataobj".
     # The 100 um volume is 1550 x 1920 x 1630 — 4.85 G voxels, 19 GB as float32,
     # so it cannot be materialised. Slicing it instead is worse: without
     # indexed_gzip every seek decompresses from the top of the file, and one
@@ -279,7 +278,7 @@ def load_bigbrain(path, size=128, n_slices=8):
     # folding each xy plane into its output slice as it arrives costs a single
     # pass and one plane of memory.
     #
-    # The data offset comes from the array proxy, not from ``vox_offset``: these
+    # The data offset comes from the array proxy, not from "vox_offset": these
     # files store 0 there, and reading from byte 0 silently parses the 352-byte
     # header as voxels.
     per_plane = nx * ny * np.dtype(dtype).itemsize
@@ -325,8 +324,8 @@ def _save(fig, save_path, name, dpi=200, pdf_dpi=600):
     PNG for viewing plus PDF (vector) for the paper.
 
     Line art and text come out as vectors in the PDF; image panels and any
-    artist marked ``rasterized=True`` — the trajectory scatters — do not, and
-    are resampled at save time. savefig defaults to ``dpi='figure'``, i.e. 100,
+    artist marked "rasterized=True" — the trajectory scatters — do not, and
+    are resampled at save time. savefig defaults to "dpi='figure'", i.e. 100,
     so omitting it here emitted those parts of the PDF at half the resolution of
     the PNG and made the vector file look the softer of the two. Hence a dpi
     for the PDF as well, and a higher one, since it is the print target.
@@ -484,11 +483,11 @@ TRAJECTORIES_3D_OTHER = (
 )
 
 
-def _grid_coverage(shots, shot_mask, meta, backend):
+def _grid_coverage(shots, shot_mask, meta):
     """Fraction of Cartesian bins the retained shots actually touch."""
     matrix = tuple(int(v) for v in meta['matrix'])
     fov_m = tuple(f / 1000.0 for f in meta['fov_mm'])
-    grid = GridMask.rasterize_shots_to_grid(shots, shot_mask, fov_m, matrix, backend)
+    grid = GridMask.rasterize_shots_to_grid(shots, shot_mask, fov_m, matrix)
     return grid, float(grid.mean())
 
 
@@ -565,12 +564,12 @@ def _decimation_mask(name, meta, n_total, accel):
     return mask
 
 
-def _match_coverage(name, header, target, config, backend,
+def _match_coverage(name, header, target, config,
                     max_shots=4096, tol=0.02, min_shots=32):
     """
     Find a trajectory + shot mask whose retained BIN coverage is near *target*.
 
-    A shared ``acceleration_factor`` does not make trajectories comparable: it
+    A shared "acceleration_factor" does not make trajectories comparable: it
     undersamples shots, and at full sampling these cover anywhere from 0.9% of
     the grid (floret_3d at 256 shots) to 38% (cartesian_2d). Comparing them at
     one nominal acceleration compares mostly how many bins each happened to
@@ -594,9 +593,9 @@ def _match_coverage(name, header, target, config, backend,
         params = dict(TRAJ_PARAMS.get(name, {}))
         if n_shots is not None:
             params['n_shots'] = n_shots
-        shots, meta = TrajectoryRegistry.generate(name, header, params, backend)
+        shots, meta = TrajectoryRegistry.generate(name, header, params)
         full = np.ones(len(shots), dtype=bool)
-        _, cov_full = _grid_coverage(shots, full, meta, backend)
+        _, cov_full = _grid_coverage(shots, full, meta)
         actual = len(shots)
 
         # Two conditions have to hold before the bisection can do anything.
@@ -636,7 +635,7 @@ def _match_coverage(name, header, target, config, backend,
     for _ in range(12):
         mid = 0.5 * (lo + hi)
         mask = _decimation_mask(name, meta, len(shots), mid)
-        _, cov = _grid_coverage(shots, mask, meta, backend)
+        _, cov = _grid_coverage(shots, mask, meta)
         if abs(cov - target) < abs(best[1] - target):
             best = (mask, cov, mid)
         if abs(cov - target) <= tol:
@@ -658,7 +657,6 @@ def ablate_trajectory_family(vol, config, names, family):
     from augmentrum.sampling import KspaceGeometry
 
     target = float(config['coverage_target'])
-    backend = NumpyBackend()
     x = _to_nifti_layout(vol)
     mid = _display_slice(vol)
     nx, ny, nz = vol.shape
@@ -677,8 +675,8 @@ def ablate_trajectory_family(vol, config, names, family):
     for name in names:
         try:
             shots, mask, meta, cov, n_shots, accel = _match_coverage(
-                name, header, target, config, backend)
-            grid, _ = _grid_coverage(shots, mask, meta, backend)
+                name, header, target, config)
+            grid, _ = _grid_coverage(shots, mask, meta)
             while grid.ndim < 3:                     # 2-D mask -> replicate along z
                 grid = grid[..., None]
             grid = np.broadcast_to(grid, (nx, ny, nz))
@@ -765,14 +763,14 @@ def _nufft_available():
 
 def _retained_coords(shots, mask, meta):
     """
-    Retained samples as normalised ``[1, 1, D, K]`` coordinates in the unit box.
+    Retained samples as normalised "[1, 1, D, K]" coordinates in the unit box.
 
     Every retained shot is concatenated into a single readout. Shots are kept
     separate elsewhere because undersampling drops whole shots, but that has
     already happened by the time we get here, and trajectories like
-    ``concentric_rings_2d`` give each shot a different length — a ring near the
+    "concentric_rings_2d" give each shot a different length — a ring near the
     centre needs fewer samples than one at the edge — so there is no rectangular
-    ``[S, L]`` to stack them into. The NUFFT flattens the two axes anyway.
+    "[S, L]" to stack them into. The NUFFT flattens the two axes anyway.
     """
     from augmentrum.sampling import KspaceReconstructor
 
@@ -789,10 +787,10 @@ def _nearest_bin_recon(coords, kdata, n):
 
     This is the honest counterpart to the NUFFT: identical measurements, but each
     one is rounded onto the grid and bins that collect several samples average
-    them. It is what ``GridMask.rasterize_shots_to_grid`` implies, and the
+    them. It is what "GridMask.rasterize_shots_to_grid" implies, and the
     approximation the reconstructor exists to avoid.
 
-    Note this is NOT what ``ksp_mode='gridded'`` does today. That path uses the
+    Note this is NOT what "ksp_mode='gridded'" does today. That path uses the
     trajectory only to decide which Cartesian bins to keep and then masks the
     image's own FFT, so it never leaves the grid and never sees an off-grid
     sample value at all.
@@ -817,7 +815,7 @@ def _measure(image, coords, osf):
     Using the exact NUFFT rather than our own interpolator is deliberate — it
     keeps this an honest test of the RECONSTRUCTION, instead of folding the
     interpolator's error into the measurement. The interpolator is characterised
-    separately in :func:`ablate_interpolator`.
+    separately in "ablate_interpolator".
     """
     import torchkbnufft as tkbn
     from augmentrum.sampling import KspaceReconstructor
@@ -852,8 +850,8 @@ def ablate_nufft(vol, config):
     """
     Nearest-bin gridding against a true NUFFT, from the same measured samples.
 
-    This is the seam between the two halves of the module. ``KspaceUndersampling``
-    in ``gridded`` mode snaps every trajectory sample to its nearest Cartesian bin
+    This is the seam between the two halves of the module. "KspaceUndersampling"
+    in "gridded" mode snaps every trajectory sample to its nearest Cartesian bin
     and runs an ordinary inverse FFT; the reconstructor instead evaluates the
     adjoint at the coordinates the samples were actually taken at. Both start
     from an identical set of measurements here, so the difference between the two
@@ -865,7 +863,6 @@ def ablate_nufft(vol, config):
 
     target = float(config['coverage_target'])
     osf = float(config['nufft_osf'])
-    backend = NumpyBackend()
     mid = _display_slice(vol)
     img = np.abs(vol[:, :, mid]).astype(np.float32)
     nx, ny, nz = vol.shape
@@ -880,7 +877,7 @@ def ablate_nufft(vol, config):
     for name in TRAJECTORIES_2D:
         try:
             shots, mask, meta, cov, n_shots, accel = _match_coverage(
-                name, header, target, config, backend)
+                name, header, target, config)
             coords = _retained_coords(shots, mask, meta)
             kdata = _measure(img, coords, osf)
 
@@ -921,7 +918,6 @@ def ablate_interpolator(vol, config):
     from augmentrum.processing import BicubicHermiteMAkima2D
     from augmentrum.sampling import KspaceReconstructor, TrajectoryRegistry
 
-    backend = NumpyBackend()
     mid = _display_slice(vol)
     img = np.abs(vol[:, :, mid]).astype(np.float32)
     n = img.shape[0]
@@ -931,7 +927,7 @@ def ablate_interpolator(vol, config):
         "DwellTime": 0.83e-3,
     }
     shots, meta = TrajectoryRegistry.generate('radial_2d', header,
-                                              {'n_shots': 201}, backend)
+                                              {'n_shots': 201})
     coords = _retained_coords(shots, np.ones(len(shots), bool), meta)
     exact = _measure(img, coords, float(config['nufft_osf']))
 
@@ -1051,7 +1047,6 @@ def ablate_nufft_panel(vol, config):
     """
     from augmentrum.sampling import TrajectoryRegistry
 
-    backend = NumpyBackend()
     nx, ny, nz = vol.shape
     header = {
         "dim":    [4, nx, ny, nz, 1, 1, 1, 1],
@@ -1065,14 +1060,14 @@ def ablate_nufft_panel(vol, config):
     bar = tqdm(total=len(PANEL_TRAJECTORIES) * len(config['panel_accelerations']),
                desc='     measuring', unit='cell', leave=False)
     for name, label, params in PANEL_TRAJECTORIES:
-        shots, meta = TrajectoryRegistry.generate(name, header, dict(params), backend)
+        shots, meta = TrajectoryRegistry.generate(name, header, dict(params))
         full = np.ones(len(shots), bool)
         columns.append((name, label, _pattern_shots(shots, full, meta)))
 
         for accel in config['panel_accelerations']:
             mask = full if accel <= 1.0 else _decimation_mask(name, meta, len(shots), accel)
             rec, target = _nufft_cell(vol, shots, mask, meta, osf)
-            _, cov = _grid_coverage(shots, mask, meta, backend)
+            _, cov = _grid_coverage(shots, mask, meta)
             err = nrmse(target, rec)
             cells[(accel, name)] = (rec, _pattern_shots(shots, mask, meta),
                                     dict(trajectory=name, acceleration=accel,

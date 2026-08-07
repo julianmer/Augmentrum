@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 
-from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
+from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 from augmentrum.core.base_module import BaseModule
 from tests.module_specs import SPECS
 
@@ -215,10 +215,10 @@ def _run_mrs_module(module, nifti_list, backend_enum) -> float:
 
 def _run_volume_module(module, backend_enum) -> float:
     """
-    Modules that take a 5-D MRSI volume ``(batch, X, Y, Z, T)``.
+    Modules that take a 5-D MRSI volume "(batch, X, Y, Z, T)".
 
-    The spectra fixtures cannot exercise these — ``KspaceUndersampling`` masks
-    k-space across the spatial axes, so handing it a ``(1, 1, 1, N_PTS)`` spectrum
+    The spectra fixtures cannot exercise these — "KspaceUndersampling" masks
+    k-space across the spatial axes, so handing it a "(1, 1, 1, N_PTS)" spectrum
     raises on the layout check rather than telling you anything about backend
     support.
     """

@@ -72,7 +72,7 @@ class Augmentrum:
     - Multi-backend support (PyTorch, NumPy, TensorFlow, JAX)
 
     Example 1: On-the-fly augmentation with RANGE sampling
-        ```python
+        "`python
         augmenter = Augmentrum(
             data=nifti_list,
             water=water_list,
@@ -91,10 +91,10 @@ class Augmentrum:
         # Each batch will have DIFFERENT random augmentations!
         for batch_data, batch_water in augmenter.dataloader(framework='numpy'):
             train_model(batch_data)
-        ```
+        "`
 
     Example 2: Fixed augmentation (exact values)
-        ```python
+        "`python
         augmenter = Augmentrum(
             data=nifti_list,
             water=water_list,
@@ -110,10 +110,10 @@ class Augmentrum:
         # Each batch will have IDENTICAL augmentations
         for batch_data, batch_water in augmenter.dataloader():
             validate_model(batch_data)
-        ```
+        "`
 
     Example 3: Gaussian distribution sampling
-        ```python
+        "`python
         augmenter = Augmentrum(
             data=nifti_list,
             pipeline=['noise', 'line_broadening'],
@@ -124,10 +124,10 @@ class Augmentrum:
         )
         # Samples will be more concentrated around 0.03 (midpoint) for sigma_frac
         # and around 5.0 (midpoint) for lb_hz, with tails at the extremes
-        ```
+        "`
 
     Example 3: With train/val/test splitting
-        ```python
+        "`python
         augmenter = Augmentrum(
             data=nifti_list,
             water=water_list,
@@ -152,7 +152,7 @@ class Augmentrum:
 
         train_dl = augmenter.train_dataloader()
         val_dl = augmenter.val_dataloader()
-        ```
+        "`
     """
 
     # Available augmentation modules
@@ -398,7 +398,7 @@ class Augmentrum:
                                       'test_track1': [24, 25, 26, 27, 28],
                                       'test_track2': [29, 30, 31]})
 
-        and each is reachable via ``dataloader(split='test_track1')``.
+        and each is reachable via "dataloader(split='test_track1')".
         """
         n_total = len(self.data_all)
         data_list = self.data_all.list()
@@ -712,8 +712,8 @@ class Augmentrum:
 
         Args:
             framework: 'pytorch', 'numpy', 'tensorflow', 'keras', 'jax'
-            split: Split name. Any key of ``self.splits`` — including custom
-                   names created via ``split_indices`` (e.g. 'test_track1').
+            split: Split name. Any key of "self.splits" — including custom
+                   names created via "split_indices" (e.g. 'test_track1').
             shuffle: Whether to shuffle (only honoured in 'fixed' mode)
 
         Returns:

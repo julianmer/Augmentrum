@@ -9,8 +9,8 @@ channel-like axis (spectral points, or coils for the CSM pipeline) LAST:
     dim=3 :  (batch, X, Y, Z, C)
     dim=2 :  (batch, X, Y, C)
 
-That is exactly what ``NIfTI_MRS_Plus.get_data()`` produces by stacking
-``(X, Y, Z, T)`` NIfTI arrays along a new leading batch axis.
+That is exactly what "NIfTI_MRS_Plus.get_data()" produces by stacking
+"(X, Y, Z, T)" NIfTI arrays along a new leading batch axis.
 
 Tests cover:
 - Creation / initialization (incl. pixdim, padding_mode, chunk_channels,
@@ -38,7 +38,7 @@ import numpy as np
 import torch
 
 from augmentrum.augmentation.spatial_augmentations import SpatialAugmentations
-from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
+from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 from augmentrum.core.pipeline import AugmentationPipeline
 
 # fsl_mrs is noisy on NIfTI construction / header handling.
@@ -51,7 +51,7 @@ warnings.filterwarnings('ignore')
 def make_spec(**overrides):
     """A fully-populated, do-nothing augmentation spec.
 
-    Passing an explicit ``aug_spec_list`` bypasses sampling entirely, so this is
+    Passing an explicit "aug_spec_list" bypasses sampling entirely, so this is
     how a test pins down one single transform (a flip, a 90° rotation, ...)
     without fighting the RNG.
     """
@@ -76,8 +76,8 @@ def physical_sphere(nx, ny, nz, pixdim, radius_mm):
     """A blob that is a sphere in *millimetres*.
 
     On an anisotropic grid its voxel-space footprint is an ellipsoid with
-    semi-axes ``radius_mm / pixdim_i`` — the in-plane extent ratio is therefore
-    ``pixdim_y / pixdim_x``.
+    semi-axes "radius_mm / pixdim_i" — the in-plane extent ratio is therefore
+    "pixdim_y / pixdim_x".
     """
     dx, dy, dz = pixdim
     gx = (np.arange(nx) - (nx - 1) / 2.0) * dx

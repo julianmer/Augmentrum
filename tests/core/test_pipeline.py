@@ -216,7 +216,7 @@ class TestPipelineBackendCompatibility:
     def test_modules_with_all_backends_supported(self, dummy_nifti_list):
         """Test modules that support all backends."""
         class AllBackendsModule(BaseModule):
-            SUPPORTED_BACKENDS = []  # Empty = all backends
+            SUPPORTED_BACKENDS = tuple(Backend)
 
             def forward(self, data, water=None, **kwargs):
                 return data, water

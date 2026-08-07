@@ -62,9 +62,9 @@ class TestBaseModuleCreation:
         assert not module.supports_backend(Backend.NUMPY)
 
     def test_supports_all_backends_by_default(self):
-        """Test that empty SUPPORTED_BACKENDS means all backends supported."""
+        """Test that ALL_BACKENDS means every backend is supported."""
         class AllBackendsModule(BaseModule):
-            SUPPORTED_BACKENDS = []
+            SUPPORTED_BACKENDS = tuple(Backend)
 
             def forward(self, data, water=None, **kwargs):
                 return data, water
@@ -113,9 +113,9 @@ class TestBaseModuleBackendSupport:
         assert module.get_preferred_backend() == Backend.PYTORCH
 
     def test_get_preferred_backend_defaults_to_nifti_list(self):
-        """Test get_preferred_backend() defaults to NIFTI_LIST when empty."""
+        """Test get_preferred_backend() returns the first declared backend."""
         class DefaultModule(BaseModule):
-            SUPPORTED_BACKENDS = []
+            SUPPORTED_BACKENDS = tuple(Backend)
 
             def forward(self, data, water=None, **kwargs):
                 return data, water
@@ -411,7 +411,7 @@ class TestBaseModuleRepr:
     def test_repr_with_all_backends(self):
         """Test __repr__ shows 'all' when no backends specified."""
         class AllModule(BaseModule):
-            SUPPORTED_BACKENDS = []
+            SUPPORTED_BACKENDS = tuple(Backend)
 
             def forward(self, data, water=None, **kwargs):
                 return data, water
@@ -462,7 +462,7 @@ class TestBaseModuleIntegration:
     def test_with_noiseperturber_style(self, dummy_nifti_list):
         """Test BaseModule works like NoisePerturber."""
         class NoiseModule(BaseModule):
-            SUPPORTED_BACKENDS = []  # Supports all
+            SUPPORTED_BACKENDS = tuple(Backend)
 
             def __init__(self, noise_level=0.1):
                 super().__init__(noise_level=noise_level)
@@ -509,3 +509,57 @@ class TestBaseModuleIntegration:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+#**************************************************************************************************#
+#                                Class TestSupportedBackendsSemantics                              #
+#**************************************************************************************************#
+#                                                                                                  #
+# An empty SUPPORTED_BACKENDS must mean "none", not "all".                                         #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestSupportedBackendsSemantics:
+    """An empty SUPPORTED_BACKENDS means none, and is reported as an error."""
+
+    def test_empty_supports_nothing(self):
+        class NoBackendsModule(BaseModule):
+            SUPPORTED_BACKENDS = ()
+
+            def forward(self, data, water=None, **kwargs):
+                return data, water
+
+        module = NoBackendsModule()
+        for backend in Backend:
+            assert not module.supports_backend(backend)
+
+    def test_empty_is_reported_as_a_configuration_error(self):
+        class NoBackendsModule(BaseModule):
+            SUPPORTED_BACKENDS = ()
+
+            def forward(self, data, water=None, **kwargs):
+                return data, water
+
+        with pytest.raises(ValueError, match="supports no backend"):
+            NoBackendsModule().get_preferred_backend()
+
+    def test_declared_subset_is_honoured(self):
+        class TorchOnlyModule(BaseModule):
+            SUPPORTED_BACKENDS = (Backend.PYTORCH,)
+
+            def forward(self, data, water=None, **kwargs):
+                return data, water
+
+        module = TorchOnlyModule()
+        assert module.supports_backend(Backend.PYTORCH)
+        assert not module.supports_backend(Backend.JAX)
+        assert module.get_preferred_backend() is Backend.PYTORCH
+
+    def test_every_registered_module_declares_something(self):
+        """A module supporting no backend at all is always a mistake."""
+        from augmentrum.core.augmentrum import Augmentrum
+
+        for name, cls in Augmentrum.AVAILABLE_MODULES.items():
+            assert cls.SUPPORTED_BACKENDS, (
+                f"{cls.__name__} (registered as '{name}') declares an empty "
+                f"SUPPORTED_BACKENDS, so it claims to support nothing."
+            )

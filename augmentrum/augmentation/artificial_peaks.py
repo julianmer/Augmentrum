@@ -17,9 +17,9 @@
 import numpy as np
 from typing import Optional, List, Dict
 from augmentrum.core.base_module import BaseModule
-from augmentrum.core.nifti_mrs_plus import Backend
-from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
-from augmentrum.utils.tensor_ops import fft, ifft, fftshift, ifftshift, to_numpy, match_backend
+from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
+from nifti_mrs_plus import ops
+from nifti_mrs_plus.ops import fft, ifft, fftshift, ifftshift, match_backend
 
 
 #**************************************************************************************************#
@@ -60,14 +60,14 @@ class ArtificialPeaks(BaseModule):
     >>> result_data, _ = peaks(nifti_plus, None)
     """
 
-    SUPPORTED_BACKENDS = []  # Supports all backends
+    SUPPORTED_BACKENDS = tuple(Backend)
 
     def __init__(self, peaks: List[Dict] = None, ref_ppm: float = 4.7, amp_mode: str = 'real'):
         """Initialize artificial peaks module."""
         if peaks is None:
             peaks = [{'ppm': 3.0, 'amp': 0.05, 'phase_deg': 0.0, 'lb_hz': 5.0, 'gb_hz': 0.0}]
 
-        super().__init__(peaks=peaks, ref_ppm=ref_ppm, amp_mode=amp_mode)
+        super().__init__()
 
         self.peaks = peaks
         self.ref_ppm = ref_ppm
@@ -108,15 +108,16 @@ class ArtificialPeaks(BaseModule):
         """
         Add artificial peaks to tensor/array data (**any backend**).
 
-        FFT/IFFT are done **natively** via ``tensor_ops`` (preserves gradients).
-        Peak shapes and amplitude references are computed in NumPy then
-        promoted to the target backend with ``match_backend``.
+        Everything touching the data runs on the data's own backend, so
+        gradients and device placement survive. Only the peak shapes are built
+        in NumPy: they depend on the ppm axis alone, so they are constant with
+        respect to the data and identical for every FID.
 
         Args:
-            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            data_array: Input tensor of shape "(batch, ..., n_points)"
             water_array: Optional water reference (unchanged)
             backend: Backend enum (unused)
-            **kwargs: Must contain ``'sw_hz'`` and ``'sf_mhz'``
+            **kwargs: Must contain "'sw_hz'" and "'sf_mhz'"
 
         Returns:
             Tuple of (processed_data, water_array)
@@ -127,7 +128,6 @@ class ArtificialPeaks(BaseModule):
             raise ValueError("ArtificialPeaks.process_tensor requires 'sw_hz' and 'sf_mhz' in kwargs")
 
         N = data_array.shape[-1]
-        n_batch = int(np.prod(data_array.shape[:-1]))
 
         # 1. Spectrum (backend-native FFT — preserves gradients)
         spec = fftshift(ifft(data_array))  # shape = original_shape
@@ -137,43 +137,40 @@ class ArtificialPeaks(BaseModule):
         freq_hz = np.fft.fftshift(np.fft.fftfreq(N, d=dt))
         ppm = self.ref_ppm - freq_hz / float(sf_mhz)
 
-        # 3. Amplitude reference and peak shapes (numpy, per-FID scalar pull)
-        spec_np = to_numpy(spec).reshape(n_batch, N)
-        contam_np = np.zeros((n_batch, N), dtype=np.complex128)
+        # 3. Peak shapes depend only on the ppm axis, so they are the same for
+        #    every FID and are built once, in NumPy, at unit amplitude.
+        unit_contam = np.zeros(N, dtype=np.complex128)
+        for p in self.peaks:
+            ppm0 = float(p['ppm'])
+            amp_frac = float(p.get('amp', p.get('amplitude', 0.05)))
+            phase_deg = float(p.get('phase_deg', 0.0))
+            lb_hz = float(p.get('lb_hz', 0.0))
+            gb_hz = float(p.get('gb_hz', 0.0))
 
-        for i in range(n_batch):
-            if self.amp_mode == 'abs':
-                peak_ref = float(np.max(np.abs(spec_np[i]))) or 1.0
+            if lb_hz > 0 and gb_hz > 0:
+                shape = self._voigt(ppm, ppm0, lb_hz, gb_hz, sf_mhz)
+            elif lb_hz > 0:
+                shape = self._lorentzian(ppm, ppm0, lb_hz, sf_mhz)
+            elif gb_hz > 0:
+                shape = self._gaussian(ppm, ppm0, gb_hz, sf_mhz)
             else:
-                peak_ref = float(np.max(np.abs(spec_np[i].real))) or 1.0
+                continue
 
-            contam = np.zeros(N, dtype=np.complex128)
-            for p in self.peaks:
-                ppm0 = float(p['ppm'])
-                amp_frac = float(p.get('amp', p.get('amplitude', 0.05)))
-                phase_deg = float(p.get('phase_deg', 0.0))
-                lb_hz = float(p.get('lb_hz', 0.0))
-                gb_hz = float(p.get('gb_hz', 0.0))
+            unit_contam += amp_frac * shape * np.exp(1j * np.deg2rad(phase_deg))
 
-                if lb_hz > 0 and gb_hz > 0:
-                    shape = self._voigt(ppm, ppm0, lb_hz, gb_hz, sf_mhz)
-                elif lb_hz > 0:
-                    shape = self._lorentzian(ppm, ppm0, lb_hz, sf_mhz)
-                elif gb_hz > 0:
-                    shape = self._gaussian(ppm, ppm0, gb_hz, sf_mhz)
-                else:
-                    continue
+        # 4. The only data-dependent term is one amplitude per FID, taken on the
+        #    data's own backend so the spectrum is never converted.
+        magnitude = ops.abs(spec if self.amp_mode == 'abs' else ops.real(spec))
+        peak_ref = ops.amax(magnitude, axis=-1, keepdims=True)
+        peak_ref = ops.where(peak_ref > 0, peak_ref, ops.cast_like(peak_ref * 0.0 + 1.0, peak_ref))
 
-                contam += (amp_frac * peak_ref) * shape * np.exp(1j * np.deg2rad(phase_deg))
+        contam = ops.cast_like(match_backend(unit_contam, spec), spec) \
+            * ops.cast_like(peak_ref, spec)
 
-            contam_np[i] = contam
+        # 5. Add contamination in spectral domain (backend-native)
+        spec_aug = spec + contam
 
-        contam_np = contam_np.reshape(data_array.shape)
-
-        # 4. Add contamination in spectral domain (backend-native)
-        spec_aug = spec + match_backend(contam_np, spec)
-
-        # 5. Back to FID (backend-native IFFT)
+        # 6. Back to FID (backend-native IFFT)
         return fft(ifftshift(spec_aug)), water_array
 
     def _add_peaks(self, fid: np.ndarray, sw_hz: float, sf_mhz: float) -> np.ndarray:

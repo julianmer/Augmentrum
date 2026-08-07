@@ -18,9 +18,8 @@ import numpy as np
 from typing import Optional, List
 from scipy.signal import butter, filtfilt
 from augmentrum.core.base_module import BaseModule
-from augmentrum.core.nifti_mrs_plus import Backend
-from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
-from augmentrum.utils.tensor_ops import to_numpy, match_backend
+from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
+from nifti_mrs_plus.ops import to_numpy, match_backend
 
 
 #**************************************************************************************************#
@@ -73,14 +72,13 @@ class EddyCurrent(BaseModule):
     >>> result_data, result_water = ec(nifti_plus, water_plus)
     """
 
-    SUPPORTED_BACKENDS = []  # Supports all backends via process_tensor
+    SUPPORTED_BACKENDS = tuple(Backend)
 
     def __init__(self, mode: str = 'synthetic',
                  std_rad: float = 0.6, lp_cut_hz: float = 25.0,
                  strength: float = 1.0, remove_linear: bool = True, seed: Optional[int] = None):
         """Initialize eddy current module."""
-        super().__init__(mode=mode, std_rad=std_rad, lp_cut_hz=lp_cut_hz,
-                        strength=strength, remove_linear=remove_linear, seed=seed)
+        super().__init__()
 
         self.mode = mode.lower()
         self.std_rad = std_rad
@@ -136,13 +134,13 @@ class EddyCurrent(BaseModule):
 
         The phase trajectory is generated in NumPy (uses SciPy butter filter),
         then applied as a complex phasor multiplication which stays in the
-        native backend — ``data * match_backend(phasor, data)``.
+        native backend — "data * match_backend(phasor, data)".
 
         Args:
-            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            data_array: Input tensor of shape "(batch, ..., n_points)"
             water_array: Optional water reference tensor
             backend: Backend enum (unused)
-            **kwargs: Must contain ``'sw_hz'`` (spectral width in Hz)
+            **kwargs: Must contain "'sw_hz'" (spectral width in Hz)
 
         Returns:
             Tuple of (processed_data, water_array)
@@ -267,7 +265,7 @@ class EddyCurrent(BaseModule):
         Returns:
             Phase values in radians
         """
-        rng = np.random.default_rng(self.seed)
+        rng = self.rng.numpy_rng()
         t = np.arange(N, dtype=float) / float(sw_hz)
 
         # Generate white noise

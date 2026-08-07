@@ -17,9 +17,9 @@
 import numpy as np
 from typing import Optional, List
 from augmentrum.core.base_module import BaseModule
-from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
+from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
-from augmentrum.utils.tensor_ops import match_backend
+from nifti_mrs_plus.ops import match_backend
 
 
 #**************************************************************************************************#
@@ -66,7 +66,7 @@ class Apodization(BaseModule):
     >>> apod = Apodization(mode='exponential', auto_lb=True, target_pts=1024)
     """
 
-    SUPPORTED_BACKENDS = []  # Supports all backends
+    SUPPORTED_BACKENDS = tuple(Backend)
 
     def __init__(self, mode: str = 'exponential',
                  n_pts: Optional[int] = None,
@@ -76,9 +76,7 @@ class Apodization(BaseModule):
                  target_damp: float = 0.01,
                  target_pts: Optional[int] = None):
         """Initialize apodization module."""
-        super().__init__(mode=mode, n_pts=n_pts, frac_pts=frac_pts,
-                        lb_hz=lb_hz, auto_lb=auto_lb,
-                        target_damp=target_damp, target_pts=target_pts)
+        super().__init__()
 
         self.mode = mode.lower()
         self.n_pts = n_pts
@@ -154,19 +152,19 @@ class Apodization(BaseModule):
         """
         Apply apodization to tensor/array data (**any backend**).
 
-        **Truncation mode**: slices the last axis with ``data[..., :n_keep]``
+        **Truncation mode**: slices the last axis with "data[..., :n_keep]"
         — works natively in NumPy, PyTorch, JAX, and TensorFlow without any
         conversion.
 
         **Exponential mode**: the decay envelope is a numpy array (no data
-        dependency) multiplied via ``data * match_backend(envelope, data)``
+        dependency) multiplied via "data * match_backend(envelope, data)"
         — fully backend-native multiply, gradients preserved.
 
         Args:
-            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            data_array: Input tensor of shape "(batch, ..., n_points)"
             water_array: Optional water reference (unchanged)
             backend: Backend enum (unused)
-            **kwargs: ``'sw_hz'`` required for exponential mode
+            **kwargs: "'sw_hz'" required for exponential mode
 
         Returns:
             Tuple of (processed_data, water_array)

@@ -64,7 +64,7 @@ class TestLineBroadeningCreation:
         """Test that LineBroadening supports all backends."""
         broadening = LineBroadening(lb_hz=5.0)
 
-        assert broadening.SUPPORTED_BACKENDS == []
+        assert broadening.SUPPORTED_BACKENDS == tuple(Backend)
         assert broadening.supports_backend(Backend.NIFTI_LIST)
         assert broadening.supports_backend(Backend.NUMPY)
 

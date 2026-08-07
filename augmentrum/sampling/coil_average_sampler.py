@@ -14,7 +14,6 @@
 #*************#
 #   imports   #
 #*************#
-import torch
 
 from fsl_mrs.core.nifti_mrs import split
 
@@ -54,7 +53,7 @@ class CoilAverageSampler(BaseModule):
             n_averages (tuple or int): Min/max number of averages to sample, or exact value.
             reweight (bool): Whether to reweight signals after sampling.
         """
-        super().__init__(mode=mode, n_coils=n_coils, n_averages=n_averages, reweight=reweight)
+        super().__init__()
 
         self.mode = mode
 
@@ -158,8 +157,9 @@ class CoilAverageSampler(BaseModule):
             n_total  = data_met.shape[coil_dim]          # actual coil count
             min_c, max_c = self._get_limits(self.n_coils, n_total)
             if min_c < max_c:
-                num_coils   = torch.randint(min_c, max_c, (1,)).item()
-                coil_indices = torch.randperm(n_total)[:num_coils].tolist()
+                rng = self.rng.numpy_rng()
+                num_coils   = int(rng.integers(min_c, max_c))
+                coil_indices = rng.permutation(n_total)[:num_coils].tolist()
         elif self.mode == 'deterministic' and has_coil:
             # Deterministic mode but no indices provided: use all coils
             coil_dim = data_met.dim_position('DIM_COIL')
@@ -204,8 +204,9 @@ class CoilAverageSampler(BaseModule):
             n_total = data_met.shape[dyn_dim]            # actual average count
             min_a, max_a = self._get_limits(self.n_averages, n_total)
             if min_a < max_a:
-                num_averages    = torch.randint(min_a, max_a, (1,)).item()
-                average_indices = torch.randperm(n_total)[:num_averages].tolist()
+                rng = self.rng.numpy_rng()
+                num_averages    = int(rng.integers(min_a, max_a))
+                average_indices = rng.permutation(n_total)[:num_averages].tolist()
         elif self.mode == 'deterministic' and has_dyn:
             # Deterministic mode but no indices provided: use all averages
             dyn_dim = data_met.dim_position('DIM_DYN')
@@ -247,11 +248,11 @@ class CoilAverageSampler(BaseModule):
 
     def _get_limits(self, n, n_total):
         """
-        Return ``(min_n, max_exclusive)`` for ``torch.randint(min_n, max_exclusive)``.
+        Return "(min_n, max_exclusive)" for an exclusive-upper-bound draw.
 
         Args:
-            n (tuple): ``(min, max)`` — both *inclusive*, either can be ``None``.
-                       ``None`` on min → 1.  ``None`` on max → ``n_total`` (use all).
+            n (tuple): "(min, max)" — both *inclusive*, either can be "None".
+                       "None" on min → 1.  "None" on max → "n_total" (use all).
             n_total (int): Total number of items available (coils / averages).
 
         Examples::

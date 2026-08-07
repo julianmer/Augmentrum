@@ -18,7 +18,8 @@ import numpy as np
 from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
-from augmentrum.utils.tensor_ops import is_torch, is_jax, is_tf
+from nifti_mrs_plus import Backend
+from nifti_mrs_plus.ops import is_torch, is_jax, is_tf
 from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 
 
@@ -34,16 +35,16 @@ class ZeroFill(BaseModule):
     Zero-pad (or crop) the FID to a fixed target number of spectral points.
 
     Zero-filling increases apparent spectral resolution by interpolating
-    between frequency bins.  Cropping (``target_pts < N_PTS``) is equivalent
-    to ``Apodization(mode='truncate')``.
+    between frequency bins.  Cropping ("target_pts < N_PTS") is equivalent
+    to "Apodization(mode='truncate')".
 
-    Because ``target_pts`` is a module-level scalar, the same length is
+    Because "target_pts" is a module-level scalar, the same length is
     applied to **every item in the batch** — so the output batch remains
     uniform regardless of backend.
 
     On non-NIfTI tensor backends, if N_PTS changes the base class detects
     the shape change, rebuilds each NIfTI_MRS object at the new length, and
-    emits a ``RuntimeWarning`` (the "medium-speed" path).  For maximum
+    emits a "RuntimeWarning" (the "medium-speed" path).  For maximum
     throughput keep N_PTS the same throughout the whole pipeline.
 
     Parameters
@@ -57,10 +58,10 @@ class ZeroFill(BaseModule):
     >>> out, _ = zf(nifti_plus, None)
     """
 
-    SUPPORTED_BACKENDS = []  # All backends via process_tensor
+    SUPPORTED_BACKENDS = tuple(Backend)
 
     def __init__(self, target_pts: int):
-        super().__init__(target_pts=target_pts)
+        super().__init__()
         if int(target_pts) < 1:
             raise ValueError(f"target_pts must be >= 1, got {target_pts}")
         self.target_pts = int(target_pts)

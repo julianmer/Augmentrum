@@ -11,14 +11,10 @@
 #                                                                                                  #
 ####################################################################################################
 
-"""
-Core data structures for Augmentrum.
-"""
-
 #*************#
 #   imports   #
 #*************#
-from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
+from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 from augmentrum.core.augmentrum import Augmentrum
 from augmentrum.core.base_module import BaseModule
 from augmentrum.core.pipeline import AugmentationPipeline

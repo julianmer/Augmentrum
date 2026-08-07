@@ -25,12 +25,10 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
-from augmentrum.core.base_module import BaseModule, init_params
-from augmentrum.core.nifti_mrs_plus import Backend
-from augmentrum.utils.tensor_ops import is_torch
-from augmentrum.utils.backends import (
-    ArrayBackend, NumpyBackend, TorchBackend, validate_backend,
-)
+from augmentrum.core.base_module import BaseModule
+from nifti_mrs_plus import Backend
+from nifti_mrs_plus import ops
+from nifti_mrs_plus.ops import is_torch
 
 
 #***************#
@@ -76,17 +74,17 @@ class KspaceGeometry:
     @staticmethod
     def header_dict_from_nifti(obj) -> Dict[str, Any]:
         """
-        Build the header dict ``read_header_geometry`` expects from a NIfTI-MRS object.
+        Build the header dict "read_header_geometry" expects from a NIfTI-MRS object.
 
         Geometry belongs to the data, so it should be read off the object rather than
         hand-assembled by callers.  This accepts anything Augmentrum carries data in:
 
-          * ``NIfTI_MRS_Plus`` — a batch shares one geometry, so the first subject is
-            used (its ``.shape`` has a leading batch axis, which is why the underlying
-            ``nifti_list`` entry is read instead).
-          * a bare ``NIFTI_MRS`` (or any object exposing ``.shape`` and ``.header``).
+          * "NIfTI_MRS_Plus" — a batch shares one geometry, so the first subject is
+            used (its ".shape" has a leading batch axis, which is why the underlying
+            "nifti_list" entry is read instead).
+          * a bare "NIFTI_MRS" (or any object exposing ".shape" and ".header").
 
-        Note the unit change: NIfTI-MRS stores ``SpectrometerFrequency`` in **MHz**,
+        Note the unit change: NIfTI-MRS stores "SpectrometerFrequency" in **MHz**,
         while this module's header dicts use **Hz**, so it is scaled by 1e6 here.
         """
         nifti = obj
@@ -144,16 +142,16 @@ class KspaceGeometry:
         ----------
         header : dict or NIfTI_MRS_Plus or NIFTI_MRS
             Passing a **data object** is the preferred form — geometry is then read
-            straight off the data via ``header_dict_from_nifti`` and cannot drift from
+            straight off the data via "header_dict_from_nifti" and cannot drift from
             it.  A plain dict is still accepted for synthetic geometries and tests.
 
             Recognised dict fields (see _NIFTI_MRS_FIELDS):
-              - ``dim``    : array-like, dim[1..3] → matrix [nx, ny, nz]
-              - ``pixdim`` : array-like, pixdim[1..3] → voxel size [vx, vy, vz] in mm
-              - ``SpectrometerFrequency`` : list[float] → centre frequency in Hz
-              - ``DwellTime``             : float → ADC dwell time in seconds
-              Fallback keys also accepted: ``matrix``, ``voxel_size_mm``,
-              ``fov_mm``, ``dwell_time``.
+              - "dim"    : array-like, dim[1..3] → matrix [nx, ny, nz]
+              - "pixdim" : array-like, pixdim[1..3] → voxel size [vx, vy, vz] in mm
+              - "SpectrometerFrequency" : list[float] → centre frequency in Hz
+              - "DwellTime"             : float → ADC dwell time in seconds
+              Fallback keys also accepted: "matrix", "voxel_size_mm",
+              "fov_mm", "dwell_time".
 
         Returns
         -------
@@ -266,11 +264,11 @@ class Trajectory(ABC):
     A trajectory is a *parameterised object*: construct it with the parameters
     that shape it, then ask it for coordinates in a given geometry. This
     replaces the previous arrangement where every trajectory was a private
-    static method reached by ``getattr`` through a name -> method-name table,
+    static method reached by "getattr" through a name -> method-name table,
     which meant parameters had no home and no per-trajectory validation point.
 
-    Subclasses must set :attr:`NAME` and :attr:`NDIM` and implement
-    :meth:`generate`. Shared machinery (density placeholder, undersampling
+    Subclasses must set "NAME" and "NDIM" and implement
+    "generate". Shared machinery (density placeholder, undersampling
     warning) lives here.
 
     >>> traj = TrajectoryRegistry.create('radial_2d', n_shots=64)
@@ -294,8 +292,8 @@ class Trajectory(ABC):
     #****************#
 
     @abstractmethod
-    def generate(self, geometry: dict, backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
-        """Return ``(shots, meta)`` for *geometry*, built in *backend*."""
+    def generate(self, geometry: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
+        """Return "(shots, meta)" for *geometry*, built on *like*'s backend."""
 
 
     @staticmethod
@@ -338,7 +336,7 @@ class Trajectory(ABC):
 
 
     @staticmethod
-    def _warn_if_undersampled(shots, meta, geom, backend, name):
+    def _warn_if_undersampled(shots, meta, geom, like, name):
         """
         Warn when consecutive samples along a shot are more than one k-space bin
         apart, which means the readout is aliased.
@@ -352,7 +350,7 @@ class Trajectory(ABC):
         if not shots:
             return
         try:
-            first = np.asarray(backend.to_cpu(shots[0]), dtype=np.float64)
+            first = np.asarray(ops.to_numpy(shots[0]), dtype=np.float64)
             if first.ndim != 2 or first.shape[0] < 2:
                 return
             gap = float(np.median(np.linalg.norm(np.diff(first, axis=0), axis=1)))
@@ -377,7 +375,7 @@ class Trajectory(ABC):
     def shots_from_continuous(
         coords: Any,
         segmentation: Dict[str, Any],
-        backend: ArrayBackend,
+        like=None,
     ) -> List[Any]:
         """
         Split a continuous k-space readout array into shots.
@@ -392,7 +390,7 @@ class Trajectory(ABC):
               'shot_lengths' : list[int] — variable lengths per shot.
               'shot_boundaries' : list[int] — start indices for each shot
                   (last boundary implicitly at N_total_samples).
-        backend : ArrayBackend
+        like : array, optional
 
         Returns
         -------
@@ -403,9 +401,8 @@ class Trajectory(ABC):
         ValueError
             If segmentation dict lacks required keys or lengths are inconsistent.
         """
-        validate_backend(backend)
-        total = backend.shape(coords)[0]
-        cpu_coords = backend.to_cpu(coords)
+        total = ops.shape(coords)[0]
+        cpu_coords = ops.to_numpy(coords)
 
         if "n_shots" in segmentation:
             n = int(segmentation["n_shots"])
@@ -415,7 +412,7 @@ class Trajectory(ABC):
                     "Use 'shot_lengths' or 'shot_boundaries' for unequal shots."
                 )
             sps = total // n
-            shots = [backend.asarray(cpu_coords[i * sps: (i + 1) * sps]) for i in range(n)]
+            shots = [ops.asarray_like(like, cpu_coords[i * sps: (i + 1) * sps]) for i in range(n)]
 
         elif "shot_lengths" in segmentation:
             lengths = list(segmentation["shot_lengths"])
@@ -426,14 +423,14 @@ class Trajectory(ABC):
             shots = []
             start = 0
             for length in lengths:
-                shots.append(backend.asarray(cpu_coords[start: start + length]))
+                shots.append(ops.asarray_like(like, cpu_coords[start: start + length]))
                 start += length
 
         elif "shot_boundaries" in segmentation:
             bounds = list(segmentation["shot_boundaries"]) + [total]
             shots = []
             for s, e in zip(bounds[:-1], bounds[1:]):
-                shots.append(backend.asarray(cpu_coords[s:e]))
+                shots.append(ops.asarray_like(like, cpu_coords[s:e]))
 
         else:
             raise ValueError(
@@ -447,17 +444,17 @@ class Trajectory(ABC):
 #                                     Class TrajectoryRegistry                                     #
 #**************************************************************************************************#
 #                                                                                                  #
-# Name -> :class:`Trajectory` subclass lookup.                                                     #
+# Name -> "Trajectory" subclass lookup.                                                     #
 #                                                                                                  #
 #**************************************************************************************************#
 class TrajectoryRegistry:
     """
-    Name -> :class:`Trajectory` subclass lookup.
+    Name -> "Trajectory" subclass lookup.
 
-    Classes register themselves with the :meth:`register` decorator, so adding a
+    Classes register themselves with the "register" decorator, so adding a
     trajectory means writing one class — there is no separate table to keep in
-    sync, which is how ``stack_of_cones`` once stayed registered as a duplicate
-    of ``stack_of_spirals`` long after it stopped meaning anything different.
+    sync, which is how "stack_of_cones" once stayed registered as a duplicate
+    of "stack_of_spirals" long after it stopped meaning anything different.
 
     >>> 'radial_2d' in TrajectoryRegistry.available()
     True
@@ -471,7 +468,7 @@ class TrajectoryRegistry:
 
     @classmethod
     def register(cls, trajectory_cls: type) -> type:
-        """Class decorator recording *trajectory_cls* under its ``NAME``."""
+        """Class decorator recording *trajectory_cls* under its "NAME"."""
         name = getattr(trajectory_cls, "NAME", "")
         if not name:
             raise ValueError(f"{trajectory_cls.__name__} must define a non-empty NAME.")
@@ -512,20 +509,20 @@ class TrajectoryRegistry:
 
     @classmethod
     def generate(cls, name: str, header: Dict[str, Any], params: Dict[str, Any],
-                 backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
+                 like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         Build a trajectory by name and return shot-organised coordinates.
 
         Parameters
         ----------
         name : str
-            Registered trajectory name; see :meth:`available`.
+            Registered trajectory name; see "available".
         header : dict
-            Parsed NIfTI-MRS header, passed to ``read_header_geometry``.
+            Parsed NIfTI-MRS header, passed to "read_header_geometry".
         params : dict
             Trajectory-specific parameters, forwarded to the class constructor.
-        backend : ArrayBackend
-            ``NumpyBackend()`` or ``TorchBackend()``.
+        like : array, optional
+            Reference tensor fixing the backend and device of the result.
 
         Returns
         -------
@@ -542,9 +539,7 @@ class TrajectoryRegistry:
         KeyError
             Required header fields missing.
         TypeError
-            Backend is not an ArrayBackend.
         """
-        validate_backend(backend)
         trajectory = cls.create(name, **(params or {}))
         geom = KspaceGeometry.read_header_geometry(header)
         if geom["inferred"]:
@@ -554,8 +549,8 @@ class TrajectoryRegistry:
                 UserWarning,
                 stacklevel=2,
             )
-        shots, meta = trajectory.generate(geom, backend)
-        Trajectory._warn_if_undersampled(shots, meta, geom, backend, name)
+        shots, meta = trajectory.generate(geom, like)
+        Trajectory._warn_if_undersampled(shots, meta, geom, like, name)
         return shots, meta
 
 
@@ -563,21 +558,21 @@ class TrajectoryRegistry:
 #                                        Class Cartesian2D                                         #
 #**************************************************************************************************#
 #                                                                                                  #
-# See :meth:`_build` for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                              #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
 class Cartesian2D(Trajectory):
-    """See :meth:`_build` for the geometry and parameters."""
+    """See "_build" for the geometry and parameters."""
 
     NAME = "cartesian_2d"
     NDIM = 2
 
-    def generate(self, geometry, backend):
-        return self._build(geometry, self.params, backend)
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like)
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         2D Cartesian trajectory.
 
@@ -601,7 +596,7 @@ class Cartesian2D(Trajectory):
         ordering = params.get("ordering", "linear")
         n_shots = int(params.get("n_shots", ny))
 
-        kx_line = backend.linspace(-nx / 2, nx / 2 - 1, nx, True) / fov_x_m   # (nx,) in 1/m
+        kx_line = ops.linspace_like(like, -nx / 2, nx / 2 - 1, nx, True) / fov_x_m   # (nx,) in 1/m
 
         if ordering == "centric":
             half = ny // 2
@@ -621,8 +616,8 @@ class Cartesian2D(Trajectory):
 
         shots = []
         for ky_val in ky_positions:
-            ky_line = backend.full((nx,), float(ky_val))
-            shot = backend.stack([kx_line, ky_line], axis=1)   # (nx, 2)
+            ky_line = ops.full_like_shape(like, (nx,), float(ky_val))
+            shot = ops.stack([kx_line, ky_line], axis=1)   # (nx, 2)
             shots.append(shot)
 
         kmax_x, kmax_y, _ = KspaceGeometry._kmax_from_geometry(geom)
@@ -644,21 +639,21 @@ class Cartesian2D(Trajectory):
 #                                        Class Cartesian3D                                         #
 #**************************************************************************************************#
 #                                                                                                  #
-# See :meth:`_build` for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                              #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
 class Cartesian3D(Trajectory):
-    """See :meth:`_build` for the geometry and parameters."""
+    """See "_build" for the geometry and parameters."""
 
     NAME = "cartesian_3d"
     NDIM = 3
 
-    def generate(self, geometry, backend):
-        return self._build(geometry, self.params, backend)
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like)
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         3D Cartesian trajectory.
 
@@ -685,7 +680,7 @@ class Cartesian3D(Trajectory):
         fov_z_m = geom["fov_mm"][2] / 1000.0
 
         ordering = params.get("ordering", "linear")
-        kx_line = backend.linspace(-nx / 2, nx / 2 - 1, nx) / fov_x_m
+        kx_line = ops.linspace_like(like, -nx / 2, nx / 2 - 1, nx) / fov_x_m
 
         ky_arr = (np.arange(ny, dtype=np.float32) - ny / 2.0) / fov_y_m
         kz_arr = (np.arange(nz, dtype=np.float32) - nz / 2.0) / fov_z_m
@@ -715,9 +710,9 @@ class Cartesian3D(Trajectory):
             for ky_val in ky_arr:
                 if count >= n_max:
                     break
-                ky_line = backend.full((nx,), float(ky_val))
-                kz_line = backend.full((nx,), float(kz_val))
-                shot = backend.stack([kx_line, ky_line, kz_line], axis=1)  # (nx, 3)
+                ky_line = ops.full_like_shape(like, (nx,), float(ky_val))
+                kz_line = ops.full_like_shape(like, (nx,), float(kz_val))
+                shot = ops.stack([kx_line, ky_line, kz_line], axis=1)  # (nx, 3)
                 shots.append(shot)
                 count += 1
 
@@ -752,11 +747,11 @@ class Radial2D(Trajectory):
     NDIM = 2
     USE_GOLDEN = False
 
-    def generate(self, geometry, backend):
-        return self._build(geometry, self.params, backend, use_golden=self.USE_GOLDEN)
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like, use_golden=self.USE_GOLDEN)
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend,
+    def _build(geom: dict, params: dict, like=None,
                         use_golden: bool = False) -> Tuple[List[Any], Dict[str, Any]]:
         """
         2D radial trajectory (uniform or golden-angle angular increment).
@@ -811,13 +806,13 @@ class Radial2D(Trajectory):
                 angle = i * math.pi / n_shots
 
             if center_out:
-                r = backend.linspace(0.0, 1.0, sps)
+                r = ops.linspace_like(like, 0.0, 1.0, sps)
             else:
-                r = backend.linspace(-1.0, 1.0, sps)
+                r = ops.linspace_like(like, -1.0, 1.0, sps)
 
-            kx = r * backend.cos(backend.array([angle]))[0] * kmax_x
-            ky = r * backend.sin(backend.array([angle]))[0] * kmax_y
-            shot = backend.stack([kx, ky], axis=1)
+            kx = r * ops.cos(ops.asarray_like(like, [angle]))[0] * kmax_x
+            ky = r * ops.sin(ops.asarray_like(like, [angle]))[0] * kmax_y
+            shot = ops.stack([kx, ky], axis=1)
             shots.append(shot)
 
         kmax = (kmax_x, kmax_y)
@@ -855,21 +850,21 @@ class GoldenRadial2D(Radial2D):
 #                                          Class Spiral2D                                          #
 #**************************************************************************************************#
 #                                                                                                  #
-# See :meth:`_build` for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                              #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
 class Spiral2D(Trajectory):
-    """See :meth:`_build` for the geometry and parameters."""
+    """See "_build" for the geometry and parameters."""
 
     NAME = "spiral_2d"
     NDIM = 2
 
-    def generate(self, geometry, backend):
-        return self._build(geometry, self.params, backend)
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like)
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         2D multi-shot Archimedean or variable-density spiral.
 
@@ -941,7 +936,7 @@ class Spiral2D(Trajectory):
                 f"spiral_2d ordering must be 'golden' or 'linear', got {ordering!r}"
             )
 
-        t = backend.linspace(0.0, 1.0, sps)           # normalised parameter
+        t = ops.linspace_like(like, 0.0, 1.0, sps)           # normalised parameter
         # r(t) ∝ t^(1/vd_alpha), ensures r ∈ [0, 1]
         r = t ** (1.0 / vd_alpha)
         theta_base = r * (2.0 * math.pi * turns)
@@ -955,9 +950,9 @@ class Spiral2D(Trajectory):
             else:
                 rot = 2.0 * math.pi * i / n_shots
             theta = theta_base + rot
-            kx = r * backend.cos(theta) * kmax_x
-            ky = r * backend.sin(theta) * kmax_y
-            shot = backend.stack([kx, ky], axis=1)
+            kx = r * ops.cos(theta) * kmax_x
+            ky = r * ops.sin(theta) * kmax_y
+            shot = ops.stack([kx, ky], axis=1)
             shots.append(shot)
 
         meta = {
@@ -980,21 +975,21 @@ class Spiral2D(Trajectory):
 #                                         Class Rosette2D                                          #
 #**************************************************************************************************#
 #                                                                                                  #
-# See :meth:`_build` for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                              #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
 class Rosette2D(Trajectory):
-    """See :meth:`_build` for the geometry and parameters."""
+    """See "_build" for the geometry and parameters."""
 
     NAME = "rosette_2d"
     NDIM = 2
 
-    def generate(self, geometry, backend):
-        return self._build(geometry, self.params, backend)
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like)
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         2D Rosette (looped petal) trajectory.
 
@@ -1030,13 +1025,13 @@ class Rosette2D(Trajectory):
         sps = int(params.get("samples_per_shot", max(512, sps_nyquist)))
         rot_step = float(params.get("rotation_per_shot", GOLDEN_ANGLE_RAD))
 
-        t = backend.linspace(0.0, 2.0 * math.pi, sps)
+        t = ops.linspace_like(like, 0.0, 2.0 * math.pi, sps)
         shots = []
         for i in range(n_shots):
             rot = i * rot_step
-            kx = backend.sin(t * omega1) * backend.cos(t * omega2 + rot) * kmax_x
-            ky = backend.sin(t * omega1) * backend.sin(t * omega2 + rot) * kmax_y
-            shot = backend.stack([kx, ky], axis=1)
+            kx = ops.sin(t * omega1) * ops.cos(t * omega2 + rot) * kmax_x
+            ky = ops.sin(t * omega1) * ops.sin(t * omega2 + rot) * kmax_y
+            shot = ops.stack([kx, ky], axis=1)
             shots.append(shot)
 
         meta = {
@@ -1058,21 +1053,21 @@ class Rosette2D(Trajectory):
 #                                      Class RosettePetals2D                                       #
 #**************************************************************************************************#
 #                                                                                                  #
-# See :meth:`_build` for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                              #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
 class RosettePetals2D(Trajectory):
-    """See :meth:`_build` for the geometry and parameters."""
+    """See "_build" for the geometry and parameters."""
 
     NAME = "rosette_2d_petals"
     NDIM = 2
 
-    def generate(self, geometry, backend):
-        return self._build(geometry, self.params, backend)
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like)
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         2D Rosette where each individual petal is returned as a separate shot.
 
@@ -1114,14 +1109,14 @@ class RosettePetals2D(Trajectory):
         sps = int(params.get("samples_per_shot", 512))
         start_angle = float(params.get("start_angle_rad", 0.0))
 
-        t = backend.linspace(0.0, math.pi, sps)   # one petal: origin → tip → origin
+        t = ops.linspace_like(like, 0.0, math.pi, sps)   # one petal: origin → tip → origin
         shots = []
         for k in range(n_petals):
             # -π/2 aligns petal 0 with +kx; 2π*k/n_petals rotates CCW
             phi = -math.pi / 2.0 + 2.0 * math.pi * k / n_petals + start_angle
-            kx = backend.sin(t) * backend.cos(t + phi) * kmax_x
-            ky = backend.sin(t) * backend.sin(t + phi) * kmax_y
-            shot = backend.stack([kx, ky], axis=1)
+            kx = ops.sin(t) * ops.cos(t + phi) * kmax_x
+            ky = ops.sin(t) * ops.sin(t + phi) * kmax_y
+            shot = ops.stack([kx, ky], axis=1)
             shots.append(shot)
 
         kmax_xv, kmax_yv, _ = KspaceGeometry._kmax_from_geometry(geom)
@@ -1145,21 +1140,21 @@ class RosettePetals2D(Trajectory):
 #                                     Class ConcentricRings2D                                      #
 #**************************************************************************************************#
 #                                                                                                  #
-# See :meth:`_build` for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                              #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
 class ConcentricRings2D(Trajectory):
-    """See :meth:`_build` for the geometry and parameters."""
+    """See "_build" for the geometry and parameters."""
 
     NAME = "concentric_rings_2d"
     NDIM = 2
 
-    def generate(self, geometry, backend):
-        return self._build(geometry, self.params, backend)
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like)
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         2D Concentric Rings trajectory.
 
@@ -1184,7 +1179,7 @@ class ConcentricRings2D(Trajectory):
         Output shot count: n_rings.
         Sample count per shot: variable unless samples_per_ring is set.
         """
-        shots, meta_eccentric = _Eccentric2D._build(geom, params, backend)
+        shots, meta_eccentric = _Eccentric2D._build(geom, params, like)
         # Re-label trajectory type for clarity
         meta_eccentric["trajectory_type"] = "concentric_rings_2d"
         meta_eccentric["n_shots"] = len(shots)
@@ -1196,21 +1191,21 @@ class ConcentricRings2D(Trajectory):
 #                                     Class ConcentricShells3D                                     #
 #**************************************************************************************************#
 #                                                                                                  #
-# See :meth:`_build` for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                              #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
 class ConcentricShells3D(Trajectory):
-    """See :meth:`_build` for the geometry and parameters."""
+    """See "_build" for the geometry and parameters."""
 
     NAME = "concentric_shells_3d"
     NDIM = 3
 
-    def generate(self, geometry, backend):
-        return self._build(geometry, self.params, backend)
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like)
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         3D Concentric Shells trajectory — the volumetric analogue of
         concentric_rings_2d.
@@ -1272,12 +1267,12 @@ class ConcentricShells3D(Trajectory):
                     max(6, int(round(circ_bins)))
                 # Alternate direction shell-locally, as the 2D rings do.
                 sign = 1.0 if li % 2 == 0 else -1.0
-                phi = backend.linspace(0.0, sign * 2.0 * math.pi, sps)
+                phi = ops.linspace_like(like, 0.0, sign * 2.0 * math.pi, sps)
                 sin_t = math.sin(theta)
-                kx = backend.cos(phi) * (frac * sin_t * kmax_x)
-                ky = backend.sin(phi) * (frac * sin_t * kmax_y)
-                kz = backend.full((sps,), frac * math.cos(theta) * kmax_z)
-                shots.append(backend.stack([kx, ky, kz], axis=1))
+                kx = ops.cos(phi) * (frac * sin_t * kmax_x)
+                ky = ops.sin(phi) * (frac * sin_t * kmax_y)
+                kz = ops.full_like_shape(like, (sps,), frac * math.cos(theta) * kmax_z)
+                shots.append(ops.stack([kx, ky, kz], axis=1))
                 total_samples += sps
 
         n_shots_total = len(shots)
@@ -1302,21 +1297,21 @@ class ConcentricShells3D(Trajectory):
 #                                       Class Phyllotaxis3D                                        #
 #**************************************************************************************************#
 #                                                                                                  #
-# See :meth:`_build` for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                              #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
 class Phyllotaxis3D(Trajectory):
-    """See :meth:`_build` for the geometry and parameters."""
+    """See "_build" for the geometry and parameters."""
 
     NAME = "3d_phyllotaxis"
     NDIM = 3
 
-    def generate(self, geometry, backend):
-        return self._build(geometry, self.params, backend)
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like)
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         Fermat phyllotaxis 3D radial trajectory.
 
@@ -1355,7 +1350,7 @@ class Phyllotaxis3D(Trajectory):
         #   cos(elevation) = 1 - (2*i+1)/n_shots
         #   azimuth = i * golden_angle (3D variant: 2.399963...)
         shots = []
-        r = backend.linspace(0.0, 1.0, sps)   # center-out
+        r = ops.linspace_like(like, 0.0, 1.0, sps)   # center-out
         for i in range(n_shots):
             # Low-discrepancy elevation (golden-fraction), NOT the monotonic
             # lattice 1 - (2i+1)/n. The monotonic form walks from the north
@@ -1385,7 +1380,7 @@ class Phyllotaxis3D(Trajectory):
             kx = r * dx * kmax_x
             ky = r * dy * kmax_y
             kz = r * dz * kmax_z
-            shot = backend.stack([kx, ky, kz], axis=1)
+            shot = ops.stack([kx, ky, kz], axis=1)
             shots.append(shot)
 
         meta = {
@@ -1407,21 +1402,21 @@ class Phyllotaxis3D(Trajectory):
 #                                          Class Cones3D                                           #
 #**************************************************************************************************#
 #                                                                                                  #
-# See :meth:`_build` for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                              #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
 class Cones3D(Trajectory):
-    """See :meth:`_build` for the geometry and parameters."""
+    """See "_build" for the geometry and parameters."""
 
     NAME = "cones_3d"
     NDIM = 3
 
-    def generate(self, geometry, backend):
-        return self._build(geometry, self.params, backend)
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like)
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         3D cones trajectory: spiral arms arranged on cones at discrete polar angles.
 
@@ -1429,7 +1424,7 @@ class Cones3D(Trajectory):
         polar angle θ measured from the +kz axis.
 
         By default the polar range is [0, π], covering both the upper (+kz) and
-        lower (−kz) hemispheres symmetrically.  Set ``polar_max=π/2`` to restrict
+        lower (−kz) hemispheres symmetrically.  Set "polar_max=π/2" to restrict
         to the upper hemisphere only (legacy behaviour).
 
         Parameters (params)
@@ -1480,7 +1475,7 @@ class Cones3D(Trajectory):
         polar_max     = float(params.get("polar_max", 0.85*math.pi))
 
         cone_angles = np.linspace(polar_min, polar_max, n_cones, True)
-        t = backend.linspace(0.0, 1.0, sps)
+        t = ops.linspace_like(like, 0.0, 1.0, sps)
 
         shots = []
         for ci, cone_ang in enumerate(cone_angles):
@@ -1491,10 +1486,10 @@ class Cones3D(Trajectory):
                 theta_spiral = t * (2.0 * math.pi * turns) + az0
                 r = t  # centre-out
 
-                kx = r * backend.cos(theta_spiral) * sin_ca * kmax_x
-                ky = r * backend.sin(theta_spiral) * sin_ca * kmax_y
+                kx = r * ops.cos(theta_spiral) * sin_ca * kmax_x
+                ky = r * ops.sin(theta_spiral) * sin_ca * kmax_y
                 kz = r * cos_ca * kmax_z          # naturally negative when θ > π/2
-                shot = backend.stack([kx, ky, kz], axis=1)
+                shot = ops.stack([kx, ky, kz], axis=1)
                 shots.append(shot)
 
         n_shots = len(shots)
@@ -1520,25 +1515,25 @@ class Cones3D(Trajectory):
 #                                       Class ConesRosette3D                                       #
 #**************************************************************************************************#
 #                                                                                                  #
-# See :meth:`_build` for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                              #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
 class ConesRosette3D(Trajectory):
-    """See :meth:`_build` for the geometry and parameters."""
+    """See "_build" for the geometry and parameters."""
 
     NAME = "cones_3d_rosette"
     NDIM = 3
 
-    def generate(self, geometry, backend):
-        return self._build(geometry, self.params, backend)
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like)
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         3D Cones Rosette trajectory.
 
-        Replaces the spiral readout arms of ``cones_3d`` with rosette petals.
+        Replaces the spiral readout arms of "cones_3d" with rosette petals.
         Like a 2D petal, each 3D petal is a *closed* trajectory that starts and
         ends at the k-space origin (center-out-center), tracing a lemniscate-like
         loop on the surface of the cone:
@@ -1606,8 +1601,8 @@ class ConesRosette3D(Trajectory):
         polar_max = float(params.get("polar_max", 0.85*math.pi))
 
         cone_angles = np.linspace(polar_min, polar_max, n_cones, True)
-        t     = backend.linspace(0.0, math.pi, sps)   # petal: 0 → π
-        sin_t = backend.sin(t)                         # envelope — 0 at both ends
+        t     = ops.linspace_like(like, 0.0, math.pi, sps)   # petal: 0 → π
+        sin_t = ops.sin(t)                         # envelope — 0 at both ends
 
         shots = []
         for ci, theta_cone in enumerate(cone_angles):
@@ -1615,10 +1610,10 @@ class ConesRosette3D(Trajectory):
             cos_ca = math.cos(float(theta_cone))   # negative for θ > π/2 → −kz petals
             for pi_ in range(ppc):
                 phi = pi_ * 2.0 * math.pi / ppc + ci * GOLDEN_ANGLE_RAD
-                kx = sin_t * sin_ca * backend.cos(t + phi) * kmax_x
-                ky = sin_t * sin_ca * backend.sin(t + phi) * kmax_y
+                kx = sin_t * sin_ca * ops.cos(t + phi) * kmax_x
+                ky = sin_t * sin_ca * ops.sin(t + phi) * kmax_y
                 kz = sin_t * cos_ca * kmax_z       # sign follows cos(θ) naturally
-                shot = backend.stack([kx, ky, kz], axis=1)
+                shot = ops.stack([kx, ky, kz], axis=1)
                 shots.append(shot)
 
         n_shots = len(shots)
@@ -1646,21 +1641,21 @@ class ConesRosette3D(Trajectory):
 #                                          Class Floret3D                                          #
 #**************************************************************************************************#
 #                                                                                                  #
-# See :meth:`_build` for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                              #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
 class Floret3D(Trajectory):
-    """See :meth:`_build` for the geometry and parameters."""
+    """See "_build" for the geometry and parameters."""
 
     NAME = "floret_3d"
     NDIM = 3
 
-    def generate(self, geometry, backend):
-        return self._build(geometry, self.params, backend)
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like)
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         FLORET (Fermat-Loop-Over-Radial Echo Trajectory) 3D trajectory.
 
@@ -1717,7 +1712,7 @@ class Floret3D(Trajectory):
                                        math.degrees(math.acos(1.0 / math.sqrt(3.0)))))
         hub_ang_rad = math.radians(hub_ang_deg)
 
-        t = backend.linspace(0.0, 1.0, sps)
+        t = ops.linspace_like(like, 0.0, 1.0, sps)
 
         # Hub axes. Three hubs get the published FLORET arrangement — the
         # cardinal axes — because that is what tiles the sphere at the magic
@@ -1764,8 +1759,8 @@ class Floret3D(Trajectory):
                 sgn = 1.0 if (a % 2 == 0) else -1.0
                 cos_pol_a = 1.0 - u_arm * (1.0 - math.cos(hub_ang_rad))
                 sin_pol_a = math.sqrt(max(0.0, 1.0 - cos_pol_a * cos_pol_a))
-                arm_vec_x = r * backend.cos(theta) * sin_pol_a
-                arm_vec_y = r * backend.sin(theta) * sin_pol_a
+                arm_vec_x = r * ops.cos(theta) * sin_pol_a
+                arm_vec_y = r * ops.sin(theta) * sin_pol_a
                 arm_vec_z = r * (sgn * cos_pol_a)
 
                 # Rotate from hub local frame to global
@@ -1775,7 +1770,7 @@ class Floret3D(Trajectory):
                       + arm_vec_z * hub_axis[1]) * kmax_y
                 kz = (arm_vec_x * local_x[2] + arm_vec_y * local_y[2]
                       + arm_vec_z * hub_axis[2]) * kmax_z
-                shot = backend.stack([kx, ky, kz], axis=1)
+                shot = ops.stack([kx, ky, kz], axis=1)
                 shots.append(shot)
 
         n_shots = len(shots)
@@ -1801,21 +1796,21 @@ class Floret3D(Trajectory):
 #                                        Class EggRosette3D                                        #
 #**************************************************************************************************#
 #                                                                                                  #
-# See :meth:`_build` for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                              #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
 class EggRosette3D(Trajectory):
-    """See :meth:`_build` for the geometry and parameters."""
+    """See "_build" for the geometry and parameters."""
 
     NAME = "3d_egg_rosette"
     NDIM = 3
 
-    def generate(self, geometry, backend):
-        return self._build(geometry, self.params, backend)
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like)
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         3D Egg-Shaped Rosette trajectory.
 
@@ -1879,9 +1874,9 @@ class EggRosette3D(Trajectory):
         rot_per_shot = float(params.get("rotation_per_shot", GOLDEN_ANGLE_RAD))
         petal_width = float(params.get("petal_width", 0.6))
 
-        t = backend.linspace(0.0, math.pi, sps)
-        env_q = backend.sin(t) * backend.cos(t) * petal_width   # across tip
-        env_d = backend.sin(t) * backend.sin(t)                 # towards tip
+        t = ops.linspace_like(like, 0.0, math.pi, sps)
+        env_q = ops.sin(t) * ops.cos(t) * petal_width   # across tip
+        env_d = ops.sin(t) * ops.sin(t)                 # towards tip
 
         shots = []
         for n in range(n_shots):
@@ -1913,7 +1908,7 @@ class EggRosette3D(Trajectory):
             kx = (env_q * q[0] + env_d * d[0]) * kmax_x
             ky = (env_q * q[1] + env_d * d[1]) * kmax_y
             kz = (env_q * q[2] + env_d * d[2]) * kmax_z
-            shots.append(backend.stack([kx, ky, kz], axis=1))
+            shots.append(ops.stack([kx, ky, kz], axis=1))
 
         meta = {
             "trajectory_type":    "3d_egg_rosette",
@@ -1943,7 +1938,7 @@ class _Eccentric2D:
     """Concentric-ring implementation shared by ConcentricRings2D and StackOfRings."""
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend) -> Tuple[List[Any], Dict[str, Any]]:
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         ECCENTRIC MRSI trajectory (Echo-planar Concentric Rings Trajectory).
 
@@ -1979,10 +1974,10 @@ class _Eccentric2D:
             theta = np.linspace(0, 2 * math.pi, n_samp, endpoint=True)
             if idx % 2 == 1:        # alternating CW/CCW for echo-planar style
                 theta = theta[::-1]
-            theta_b = backend.asarray(theta)
-            kx = backend.cos(theta_b) * r_norm * kmax_x
-            ky = backend.sin(theta_b) * r_norm * kmax_y
-            shot = backend.stack([kx, ky], axis=1)
+            theta_b = ops.asarray_like(like, theta)
+            kx = ops.cos(theta_b) * r_norm * kmax_x
+            ky = ops.sin(theta_b) * r_norm * kmax_y
+            shot = ops.stack([kx, ky], axis=1)
             shots.append(shot)
 
         meta = {
@@ -2011,15 +2006,15 @@ class StackOf(Trajectory):
     """A 2-D in-plane trajectory replicated along kz. Subclasses pick the in-plane pattern."""
 
     NDIM = 3
-    #: Key into the in-plane dispatch table inside :meth:`_build`.
+    #: Key into the in-plane dispatch table inside "_build".
     INPLANE: str = ""
 
-    def generate(self, geometry, backend):
-        return self._build(geometry, self.params, backend, inplane_name=self.INPLANE)
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, self.INPLANE, like=like)
 
     @staticmethod
-    def _build(geom: dict, params: dict, backend: ArrayBackend,
-                         inplane_name: str) -> Tuple[List[Any], Dict[str, Any]]:
+    def _build(geom: dict, params: dict, inplane_name: str,
+               like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
         Generic stack-of-2D hybrid: generate in-plane trajectory per kz slice.
 
@@ -2068,13 +2063,13 @@ class StackOf(Trajectory):
                    "fov_mm": (geom["fov_mm"][0], geom["fov_mm"][1], 1.0)}
 
         ip_map = {
-            "radial":        lambda: Radial2D._build(geom2d, params, backend, use_golden=False),
-            "golden_radial": lambda: Radial2D._build(geom2d, params, backend, use_golden=True),
-            "spiral":        lambda: Spiral2D._build(geom2d, params, backend),
-            "ECCENTRIC":     lambda: _Eccentric2D._build(geom2d, params, backend),
-            "rings":         lambda: ConcentricRings2D._build(geom2d, params, backend),
-            "rosette":       lambda: Rosette2D._build(geom2d, params, backend),
-            "rosette_petals": lambda: RosettePetals2D._build(geom2d, params, backend),
+            "radial":        lambda: Radial2D._build(geom2d, params, like, use_golden=False),
+            "golden_radial": lambda: Radial2D._build(geom2d, params, like, use_golden=True),
+            "spiral":        lambda: Spiral2D._build(geom2d, params, like),
+            "ECCENTRIC":     lambda: _Eccentric2D._build(geom2d, params, like),
+            "rings":         lambda: ConcentricRings2D._build(geom2d, params, like),
+            "rosette":       lambda: Rosette2D._build(geom2d, params, like),
+            "rosette_petals": lambda: RosettePetals2D._build(geom2d, params, like),
         }
         if inplane_name not in ip_map:
             raise ValueError(f"Unknown in-plane trajectory '{inplane_name}'. "
@@ -2085,13 +2080,13 @@ class StackOf(Trajectory):
         for kz_val in kz_positions:
             kz_col = float(kz_val)
             for shot2d in inplane_shots:
-                nrows = backend.shape(shot2d)[0]
-                kz_col_arr = backend.full((nrows,), kz_col)
-                shot3d = backend.concat([shot2d, backend.stack([kz_col_arr], axis=1)], axis=1)
+                nrows = ops.shape(shot2d)[0]
+                kz_col_arr = ops.full_like_shape(like, (nrows,), kz_col)
+                shot3d = ops.concatenate([shot2d, ops.stack([kz_col_arr], axis=1)], axis=1)
                 all_shots.append(shot3d)
 
         n_shots_total = len(all_shots)
-        sps = backend.shape(all_shots[0])[0] if all_shots else 0
+        sps = ops.shape(all_shots[0])[0] if all_shots else 0
         traj_name = f"stack_of_{inplane_name}"
         kmax_x, kmax_y, _ = KspaceGeometry._kmax_from_geometry(geom)
         meta = {
@@ -2183,10 +2178,10 @@ class ShotUndersampler:
     """
     Decide which shots of a trajectory are actually acquired.
 
-    >>> mask, _ = ShotUndersampler.undersample_shots(shots, "random_vd", 4.0, {}, backend)
+    >>> mask, _ = ShotUndersampler.undersample_shots(shots, "random_vd", 4.0, {}, like)
 
-    ``COMPAT`` records which undersampling methods make sense for which
-    trajectory families; pass ``trajectory_name=''`` to bypass the check.
+    "COMPAT" records which undersampling methods make sense for which
+    trajectory families; pass "trajectory_name=''" to bypass the check.
     """
 
     #: trajectory -> undersampling methods that make sense for it
@@ -2262,7 +2257,7 @@ class ShotUndersampler:
 
     @staticmethod
     def _us_random_vd(n_shots: int, af: float, params: dict,
-                      coords_per_shot: List[Any], backend: ArrayBackend) -> np.ndarray:
+                      coords_per_shot: List[Any], like=None) -> np.ndarray:
         """
         Variable-density random undersampling.
         Centre shots (lower norm) are kept with higher probability.
@@ -2281,7 +2276,7 @@ class ShotUndersampler:
         # Compute shot centre norms (use numpy via to_cpu)
         norms = []
         for shot in coords_per_shot:
-            cpu = backend.to_cpu(shot)
+            cpu = ops.to_numpy(shot)
             norms.append(float(np.linalg.norm(cpu.mean(axis=0))))
         norms = np.array(norms, dtype=np.float32)
 
@@ -2313,8 +2308,8 @@ class ShotUndersampler:
 
     @staticmethod
     def _us_keep_acs(n_shots: int, af: float, params: dict,
-                     coords_per_shot: List[Any], backend: ArrayBackend,
-                     traj_name: str) -> np.ndarray:
+                     coords_per_shot: List[Any], traj_name: str,
+                     like=None) -> np.ndarray:
         """
         Keep shots whose centre lies within the ACS region (innermost fraction of k-space).
 
@@ -2330,7 +2325,7 @@ class ShotUndersampler:
 
         norms = []
         for shot in coords_per_shot:
-            cpu = backend.to_cpu(shot)
+            cpu = ops.to_numpy(shot)
             norms.append(float(np.linalg.norm(cpu.mean(axis=0))))
         norms = np.array(norms, dtype=np.float32)
 
@@ -2358,7 +2353,7 @@ class ShotUndersampler:
     @staticmethod
     def _us_poisson_disc_cartesian(n_shots: int, af: float, params: dict,
                                    coords_per_shot: List[Any],
-                                   backend: ArrayBackend) -> np.ndarray:
+                                   like=None) -> np.ndarray:
         """
         Variable-density Poisson-disc undersampling for Cartesian trajectories.
 
@@ -2387,7 +2382,7 @@ class ShotUndersampler:
         # Phase encode index from shot centre
         norms = []
         for shot in coords_per_shot:
-            cpu = backend.to_cpu(shot)
+            cpu = ops.to_numpy(shot)
             norms.append(float(np.abs(cpu[:, 1]).mean()))   # ky-like axis
         norms = np.array(norms, dtype=np.float32)
 
@@ -2416,9 +2411,7 @@ class ShotUndersampler:
         return mask
 
     @staticmethod
-    def _us_combined(n_shots: int, af: float, params: dict,
-                     coords_per_shot: List[Any],
-                     backend: ArrayBackend, traj_name: str) -> np.ndarray:
+    def _us_combined(n_shots: int, af: float, params: dict, coords_per_shot: List[Any], traj_name: str, like=None) -> np.ndarray:
         """
         Combined strategy: keep ACS + prefix/random_vd on remaining shots.
 
@@ -2428,7 +2421,7 @@ class ShotUndersampler:
         outer_method : str  'prefix' | 'random_vd' | 'drop_every' (default 'prefix')
         outer_af : float  (default = af, applied to outer shots only)
         """
-        acs_mask = ShotUndersampler._us_keep_acs(n_shots, af, params, coords_per_shot, backend, traj_name)
+        acs_mask = ShotUndersampler._us_keep_acs(n_shots, af, params, coords_per_shot, like, traj_name)
         outer_idx = np.where(~acs_mask)[0]
         outer_method = str(params.get("outer_method", "prefix"))
         outer_af = float(params.get("outer_af", af))
@@ -2439,7 +2432,7 @@ class ShotUndersampler:
         if outer_method == "prefix":
             outer_mask = ShotUndersampler._us_prefix(n_outer, outer_af, params)
         elif outer_method == "random_vd":
-            outer_mask = ShotUndersampler._us_random_vd(n_outer, outer_af, params, outer_coords, backend)
+            outer_mask = ShotUndersampler._us_random_vd(n_outer, outer_af, params, outer_coords, like)
         elif outer_method == "drop_every":
             outer_mask = ShotUndersampler._us_drop_every(n_outer, outer_af, params)
         else:
@@ -2462,7 +2455,7 @@ class ShotUndersampler:
 
     @staticmethod
     def _us_shell_based(n_shots: int, af: float, params: dict,
-                        coords_per_shot: List[Any], backend: ArrayBackend) -> np.ndarray:
+                        coords_per_shot: List[Any], like=None) -> np.ndarray:
         """
         Shell-based undersampling for 3D trajectories: keep full inner shells,
         undersample outer shells progressively.
@@ -2478,7 +2471,7 @@ class ShotUndersampler:
         n_shells = int(params.get("n_shells", 4))
         shell_afs_param = params.get("shell_afs", None)
 
-        norms = np.array([float(np.linalg.norm(backend.to_cpu(s).mean(axis=0)))
+        norms = np.array([float(np.linalg.norm(ops.to_numpy(s).mean(axis=0)))
                           for s in coords_per_shot], dtype=np.float32)
         if norms.max() > 0:
             norms_n = norms / norms.max()
@@ -2511,7 +2504,7 @@ class ShotUndersampler:
         method: str,
         acceleration_factor: float,
         params: Dict[str, Any],
-        backend: ArrayBackend,
+        like=None,
         trajectory_name: str = "",
     ) -> Tuple[Any, Optional[List[Any]]]:
         """
@@ -2531,7 +2524,7 @@ class ShotUndersampler:
             Exact: N_keep = ceil(N_total / acceleration_factor).
         params : dict
             Method-specific parameters (see each _us_* helper for keys).
-        backend : ArrayBackend
+        like : array, optional
         trajectory_name : str, optional
             Name of the trajectory (used for compatibility checks).
 
@@ -2549,10 +2542,8 @@ class ShotUndersampler:
         ValueError
             If method is not supported, acceleration_factor < 1, or trajectory/method incompatible.
         TypeError
-            If backend is missing required methods.
         """
-        validate_backend(backend)
-
+        
         if acceleration_factor < 1.0:
             raise ValueError(
                 f"acceleration_factor must be ≥ 1.0 (got {acceleration_factor}). "
@@ -2594,17 +2585,17 @@ class ShotUndersampler:
         elif method == "drop_every":
             mask_np = ShotUndersampler._us_drop_every(n_shots, acceleration_factor, params)
         elif method == "poisson_disc_cartesian":
-            mask_np = ShotUndersampler._us_poisson_disc_cartesian(n_shots, acceleration_factor, params, coords_per_shot, backend)
+            mask_np = ShotUndersampler._us_poisson_disc_cartesian(n_shots, acceleration_factor, params, coords_per_shot, like)
         elif method == "random_vd":
-            mask_np = ShotUndersampler._us_random_vd(n_shots, acceleration_factor, params, coords_per_shot, backend)
+            mask_np = ShotUndersampler._us_random_vd(n_shots, acceleration_factor, params, coords_per_shot, like)
         elif method == "keep_acs":
-            mask_np = ShotUndersampler._us_keep_acs(n_shots, acceleration_factor, params, coords_per_shot, backend, traj_name)
+            mask_np = ShotUndersampler._us_keep_acs(n_shots, acceleration_factor, params, coords_per_shot, like, traj_name)
         elif method == "variable_density_spiral":
             mask_np = ShotUndersampler._us_variable_density_spiral(n_shots, acceleration_factor, params)
         elif method == "shell_based":
-            mask_np = ShotUndersampler._us_shell_based(n_shots, acceleration_factor, params, coords_per_shot, backend)
+            mask_np = ShotUndersampler._us_shell_based(n_shots, acceleration_factor, params, coords_per_shot, like)
         elif method == "combined":
-            mask_np = ShotUndersampler._us_combined(n_shots, acceleration_factor, params, coords_per_shot, backend, traj_name)
+            mask_np = ShotUndersampler._us_combined(n_shots, acceleration_factor, params, coords_per_shot, like, traj_name)
 
         achieved_af = n_shots / max(mask_np.sum(), 1)
         if abs(achieved_af - acceleration_factor) > 0.5 * acceleration_factor:
@@ -2615,7 +2606,7 @@ class ShotUndersampler:
                 stacklevel=2,
             )
 
-        shot_mask = backend.cast_bool(backend.asarray(mask_np.astype(np.uint8)))
+        shot_mask = ops.cast_bool(ops.asarray_like(like, mask_np.astype(np.uint8)))
         return shot_mask, None   # per_sample_masks deferred → None
 
 
@@ -2632,7 +2623,7 @@ class GridMask:
 
     For data already reconstructed onto a grid, undersampling can be applied as
     FFT -> mask -> IFFT, with no gridding or NUFFT. Masks are returned in
-    ``numpy.fft.fftshift`` order, so they multiply a shifted spectrum directly.
+    "numpy.fft.fftshift" order, so they multiply a shifted spectrum directly.
     """
 
     @staticmethod
@@ -2641,7 +2632,6 @@ class GridMask:
         shot_mask: Any,
         fov_m: Tuple[float, ...],
         matrix: Tuple[int, ...],
-        backend: Optional[Backend] = None,
     ) -> np.ndarray:
         """
         Rasterise the retained samples of a trajectory onto a Cartesian grid mask.
@@ -2650,13 +2640,13 @@ class GridMask:
 
             i = round(k [cycles/m] * FOV_m) + N // 2
 
-        which is exact for ``cartesian_2d`` / ``cartesian_3d`` (whose coordinates are
+        which is exact for "cartesian_2d" / "cartesian_3d" (whose coordinates are
         generated on exactly this lattice) and nearest-neighbour for everything else.
 
         The mapping goes through the *coordinates*, never the shot index. Shot index
-        is not a k-space index: with ``ordering='centric'`` the ``cartesian_2d``
-        generator emits shots in a permuted order, so ``shot_mask[s]`` says nothing
-        about which ``ky`` line ``s`` refers to.
+        is not a k-space index: with "ordering='centric'" the "cartesian_2d"
+        generator emits shots in a permuted order, so "shot_mask[s]" says nothing
+        about which "ky" line "s" refers to.
 
         Parameters
         ----------
@@ -2668,14 +2658,14 @@ class GridMask:
             Field of view per axis **in metres** (i.e. fov_mm / 1000).
         matrix : tuple of int
             Grid size per axis. Length determines the output rank (2-D or 3-D).
-        backend : ArrayBackend, optional
-            Used to move coordinates to CPU. Defaults to plain ``np.asarray``.
+        like : array, optional
+            Reference tensor fixing the backend and device of the result.
 
         Returns
         -------
-        numpy.ndarray of bool, shape ``matrix``
+        numpy.ndarray of bool, shape "matrix"
             True where at least one retained sample lands. Bin ordering matches
-            ``numpy.fft.fftshift(numpy.fft.fftn(x))``, so the mask can be applied
+            "numpy.fft.fftshift(numpy.fft.fftn(x))", so the mask can be applied
             directly to a shifted spectrum.
 
         Notes
@@ -2683,7 +2673,7 @@ class GridMask:
         Samples falling outside the grid (e.g. the +kmax edge of a trajectory that
         slightly overshoots) are dropped rather than wrapped.
         """
-        to_cpu = backend.to_cpu if backend is not None else np.asarray
+        to_cpu = ops.to_numpy
         matrix = tuple(int(n) for n in matrix)
         n_dims = len(matrix)
 
@@ -2725,20 +2715,20 @@ class GridMask:
         Draw a variable-density Cartesian sampling mask directly on the grid.
 
         Sampling probability falls off with normalised distance from the k-space
-        centre as ``exp(-vd_beta * r)``, with a fully-sampled central region (the
+        centre as "exp(-vd_beta * r)", with a fully-sampled central region (the
         auto-calibration region) always retained.
 
-        Unlike ``_us_poisson_disc_cartesian``, which reduces every shot to a single
+        Unlike "_us_poisson_disc_cartesian", which reduces every shot to a single
         scalar along one axis and is therefore 1-D by construction, this draws a
         genuinely N-dimensional mask — the pattern used by compressed-sensing MRSI.
 
         Parameters
         ----------
         matrix : tuple of int
-            Grid size, e.g. ``(64, 64)`` for an in-plane mask.
+            Grid size, e.g. "(64, 64)" for an in-plane mask.
         acceleration_factor : float
-            Target acceleration (>= 1). Retained bins ~ ``prod(matrix) / af``.
-            Note ``acs_frac`` sets a floor: an ACS region larger than the target
+            Target acceleration (>= 1). Retained bins ~ "prod(matrix) / af".
+            Note "acs_frac" sets a floor: an ACS region larger than the target
             budget caps the achievable acceleration.
         acs_frac : float, default 0.06
             Fraction of the grid width forming the fully-sampled centre, per axis.
@@ -2750,12 +2740,12 @@ class GridMask:
             is used as an augmentation.
         axes : tuple of int, optional
             Which axes to undersample. Axes not listed are fully sampled. Use e.g.
-            ``axes=(0, 1)`` on a 3-D grid to undersample in-plane only.
+            "axes=(0, 1)" on a 3-D grid to undersample in-plane only.
 
         Returns
         -------
-        numpy.ndarray of bool, shape ``matrix``
-            Bin ordering matches ``numpy.fft.fftshift(numpy.fft.fftn(x))``.
+        numpy.ndarray of bool, shape "matrix"
+            Bin ordering matches "numpy.fft.fftshift(numpy.fft.fftn(x))".
         """
         matrix = tuple(int(n) for n in matrix)
         if acceleration_factor < 1.0:
@@ -2836,7 +2826,7 @@ class ShotPerturbations:
     def apply_shot_phase_errors(
         coords_per_shot: List[Any],
         phase_std_rad: float,
-        backend: ArrayBackend,
+        like=None,
         seed: int = 0,
     ) -> List[Any]:
         """
@@ -2851,7 +2841,7 @@ class ShotPerturbations:
         coords_per_shot : list of arrays
         phase_std_rad : float
             Standard deviation of normally distributed random phase offsets [rad].
-        backend : ArrayBackend
+        like : array, optional
         seed : int
             RNG seed.
 
@@ -2867,7 +2857,7 @@ class ShotPerturbations:
     def apply_gradient_delay(
         coords_per_shot: List[Any],
         delay_samples: float,
-        backend: ArrayBackend,
+        like=None,
     ) -> List[Any]:
         """
         Simulation hook: shift each shot's k-space trajectory by a gradient delay.
@@ -2882,7 +2872,7 @@ class ShotPerturbations:
         coords_per_shot : list of arrays, each (Nsamples, Ndims)
         delay_samples : float
             Delay in samples (may be fractional).
-        backend : ArrayBackend
+        like : array, optional
 
         Returns
         -------
@@ -2890,14 +2880,14 @@ class ShotPerturbations:
         """
         shifted = []
         for shot in coords_per_shot:
-            cpu = backend.to_cpu(shot)
+            cpu = ops.to_numpy(shot)
             if cpu.shape[0] < 2:
                 shifted.append(shot)
                 continue
             dk = cpu[1] - cpu[0]   # per-sample k-space increment (Ndims,)
             shift = dk * delay_samples
             shifted_cpu = cpu + shift[np.newaxis, :]
-            shifted.append(backend.asarray(shifted_cpu))
+            shifted.append(ops.asarray_like(like, shifted_cpu))
         return shifted
 
     @staticmethod
@@ -2905,7 +2895,7 @@ class ShotPerturbations:
         coords_per_shot: List[Any],
         freq_offset_hz: float,
         dwell_time_s: float,
-        backend: ArrayBackend,
+        like=None,
     ) -> List[float]:
         """
         Simulation hook: compute per-sample off-resonance phase for each shot.
@@ -2920,7 +2910,7 @@ class ShotPerturbations:
             Off-resonance frequency in Hz.
         dwell_time_s : float
             Sampling interval in seconds (== DwellTime from header).
-        backend : ArrayBackend
+        like : array, optional
 
         Returns
         -------
@@ -2928,8 +2918,8 @@ class ShotPerturbations:
         """
         phases = []
         for shot in coords_per_shot:
-            nsamples = backend.shape(shot)[0]
-            t = backend.arange(0, nsamples) * dwell_time_s
+            nsamples = ops.shape(shot)[0]
+            t = ops.arange_like(like, nsamples) * dwell_time_s
             phi = 2.0 * math.pi * freq_offset_hz * t
             phases.append(phi)
         return phases
@@ -2939,7 +2929,7 @@ class ShotPerturbations:
         coords_per_shot: List[Any],
         shot_mask: Any,
         meta: Dict[str, Any],
-        backend: ArrayBackend,
+        like=None,
     ) -> dict:
         """
         Return a refreshed density estimate for a given (possibly undersampled) subset.
@@ -2952,17 +2942,17 @@ class ShotPerturbations:
         coords_per_shot : list of arrays (all shots, before masking)
         shot_mask : boolean array (N_shots,)
         meta : dict from generate_trajectory or get_kspace_shots_and_mask
-        backend : ArrayBackend
+        like : array, optional
 
         Returns
         -------
         dict
             Updated density estimate dict appropriate for the retained subset.
         """
-        mask_np = backend.to_cpu(shot_mask).astype(bool)
+        mask_np = ops.to_numpy(shot_mask).astype(bool)
         retained = [s for s, m in zip(coords_per_shot, mask_np) if m]
         n_retained = len(retained)
-        sps = backend.shape(retained[0])[0] if retained else 0
+        sps = ops.shape(retained[0])[0] if retained else 0
 
         base = meta.get("density_estimate", {}).copy()
         base.update({
@@ -2991,7 +2981,7 @@ class ShotIO:
         coords_per_shot: List[Any],
         shot_mask: Any,
         meta: Dict[str, Any],
-        backend: ArrayBackend,
+        like=None,
     ) -> None:
         """
         Save trajectory and mask to a NumPy .npz archive.
@@ -3009,12 +2999,12 @@ class ShotIO:
         coords_per_shot : list of arrays
         shot_mask : boolean array
         meta : dict
-        backend : ArrayBackend
+        like : array, optional
         """
         payload: dict = {}
-        payload["shot_mask"] = backend.to_cpu(shot_mask)
+        payload["shot_mask"] = ops.to_numpy(shot_mask)
         for i, shot in enumerate(coords_per_shot):
-            payload[f"coords_{i:06d}"] = backend.to_cpu(shot).astype(np.float32)
+            payload[f"coords_{i:06d}"] = ops.to_numpy(shot).astype(np.float32)
         # Save select meta fields as scalars
         for key in ["trajectory_type", "n_shots", "n_shots_retained",
                     "achieved_acceleration", "acceleration_requested", "undersampling_method"]:
@@ -3027,7 +3017,7 @@ class ShotIO:
         print(f"Saved {len(coords_per_shot)} shots + mask → '{path}'")
 
     @staticmethod
-    def load_shots_npz(path: str, backend: ArrayBackend) -> Tuple[List[Any], Any, dict]:
+    def load_shots_npz(path: str, like=None) -> Tuple[List[Any], Any, dict]:
         """
         Load a .npz archive saved by save_shots_npz.
 
@@ -3036,10 +3026,10 @@ class ShotIO:
         coords_per_shot, shot_mask, meta_partial
         """
         data = np.load(path, allow_pickle=False)
-        shot_mask = backend.cast_bool(backend.asarray(data["shot_mask"].astype(np.uint8)))
+        shot_mask = ops.cast_bool(ops.asarray_like(like, data["shot_mask"].astype(np.uint8)))
 
         shot_keys = sorted(k for k in data.files if k.startswith("coords_"))
-        coords_per_shot = [backend.asarray(data[k]) for k in shot_keys]
+        coords_per_shot = [ops.asarray_like(like, data[k]) for k in shot_keys]
 
         meta_partial: dict = {}
         for k in data.files:
@@ -3068,7 +3058,7 @@ class KspaceSampler:
 
     >>> shots, mask, meta = KspaceSampler.get_kspace_shots_and_mask(
     ...     nifti, "golden_radial_2d", "prefix", acceleration_factor=4.0,
-    ...     traj_params={"n_shots": 200}, us_params={}, backend=NumpyBackend())
+    ...     traj_params={"n_shots": 200}, us_params={}, like=None)
     """
 
     @staticmethod
@@ -3079,7 +3069,7 @@ class KspaceSampler:
         acceleration_factor: float,
         traj_params: Dict[str, Any],
         us_params: Dict[str, Any],
-        backend: ArrayBackend,
+        like=None,
     ) -> Tuple[List[Any], Any, Dict[str, Any]]:
         """
         Full pipeline: generate trajectory → apply undersampling → return results.
@@ -3098,8 +3088,8 @@ class KspaceSampler:
             Passed verbatim to generate_trajectory.
         us_params : dict
             Passed verbatim to undersample_shots.
-        backend : ArrayBackend
-            NumpyBackend() or TorchBackend() instance.
+        like : array, optional
+            Reference tensor fixing the backend and device of the result.
 
         Returns
         -------
@@ -3116,7 +3106,7 @@ class KspaceSampler:
 
         Example
         -------
-        >>> from kspace_sampling import get_kspace_shots_and_mask, NumpyBackend
+        >>> from kspace_sampling import get_kspace_shots_and_mask
         >>> header = {
         ...     "dim": [4, 64, 64, 1, 1, 1, 1, 1],
         ...     "pixdim": [1.0, 3.0, 3.0, 3.0, 1.0, 1.0, 1.0, 1.0],
@@ -3127,20 +3117,19 @@ class KspaceSampler:
         ...     header, "golden_radial_2d", "prefix", acceleration_factor=4.0,
         ...     traj_params={"n_shots": 200, "samples_per_shot": 64},
         ...     us_params={},
-        ...     backend=NumpyBackend(),
+        ...     like=None,
         ... )
         >>> # shots: list of 200 arrays each (64, 2)
         >>> # mask: bool array (200,), ~50 True entries
         """
-        validate_backend(backend)
-
-        coords_per_shot, meta = TrajectoryRegistry.generate(trajectory, header, traj_params, backend)
+        
+        coords_per_shot, meta = TrajectoryRegistry.generate(trajectory, header, traj_params, like)
         shot_mask, per_sample_masks = ShotUndersampler.undersample_shots(
-            coords_per_shot, undersampling, acceleration_factor, us_params, backend,
+            coords_per_shot, undersampling, acceleration_factor, us_params, like,
             trajectory_name=trajectory,
         )
 
-        mask_np = backend.to_cpu(shot_mask).astype(bool)
+        mask_np = ops.to_numpy(shot_mask).astype(bool)
         n_retained = int(mask_np.sum())
         achieved_af = len(coords_per_shot) / max(n_retained, 1)
 
@@ -3166,9 +3155,9 @@ class KspaceUndersampling(BaseModule):
     """
     Retrospectively undersample gridded MRSI data to simulate acceleration.
 
-    Data layout follows the NIfTI-MRS convention — ``(batch, X, Y, Z, T)`` — with
-    the spectral axis last, matching ``SpatialAugmentations`` and everything
-    ``NIfTI_MRS_Plus.get_data()`` produces.
+    Data layout follows the NIfTI-MRS convention — "(batch, X, Y, Z, T)" — with
+    the spectral axis last, matching "SpatialAugmentations" and everything
+    "NIfTI_MRS_Plus.get_data()" produces.
 
     Why this is a mask and not a NUFFT
     ----------------------------------
@@ -3176,37 +3165,37 @@ class KspaceUndersampling(BaseModule):
     position, so the sampling operator is identical for all spectral points. It
     can therefore be applied **once** as a transfer function rather than once per
     timepoint. Doing it literally — forward NUFFT, drop shots, adjoint NUFFT —
-    costs ``batch x Z x T`` separate 2-D NUFFTs, roughly 240 GFLOP and tens of
+    costs "batch x Z x T" separate 2-D NUFFTs, roughly 240 GFLOP and tens of
     seconds per batch on CPU for a 64x64x32x384 volume. Masking on the Cartesian
     grid gets the coverage pattern, the aliasing behaviour, and exact zeros in
     unacquired bins for about 1/100th of that, with no extra dependency.
 
     Modes
     -----
-    ``'cartesian'`` (default)
+    "'cartesian'" (default)
         Draw a variable-density mask directly on the (X, Y) grid.
-    ``'gridded'``
-        Generate any of the trajectories in :mod:`augmentrum.sampling.kspace_sampling`
+    "'gridded'"
+        Generate any of the trajectories in "augmentrum.sampling.kspace_sampling"
         (radial, spiral, rosette, concentric rings, ...), undersample its shots,
         and rasterise the retained samples onto the grid. Nearest-neighbour, so
         the off-grid point-spread function is approximated.
 
-        Careful with what ``acceleration_factor`` means here: it undersamples
+        Careful with what "acceleration_factor" means here: it undersamples
         **shots**, and the fraction of grid bins that end up covered is a
         different number. A radial trajectory with many long shots can still
         touch most bins at nominal acceleration 3. Read the shot-level figure
-        from ``last_meta_['achieved_acceleration']`` and the bin coverage from
-        ``last_masks_.mean()``; they are not interchangeable.
-    ``'off'``
+        from "last_meta_['achieved_acceleration']" and the bin coverage from
+        "last_masks_.mean()"; they are not interchangeable.
+    "'off'"
         Identity — useful to keep a pipeline shape-identical across splits.
 
     Noise
     -----
-    ``noise_sigma_k`` adds complex Gaussian noise **in k-space before masking**,
+    "noise_sigma_k" adds complex Gaussian noise **in k-space before masking**,
     which is where thermal noise actually is. Adding white noise in the image
     domain instead would fill the unacquired bins that a real accelerated
     acquisition leaves exactly zero — a shortcut a network learns immediately.
-    Leave it None and use :class:`~augmentrum.augmentation.gaussian_noise.GaussianNoise`
+    Leave it None and use "~augmentrum.augmentation.gaussian_noise.GaussianNoise"
     if you want image-domain noise regardless.
 
     Examples
@@ -3224,15 +3213,18 @@ class KspaceUndersampling(BaseModule):
     ...            acceleration_factor=(2.0, 6.0))
     """
 
-    # FFT masking is implemented natively for NumPy and PyTorch; other backends
-    # are routed through one of these by the pipeline.
-    SUPPORTED_BACKENDS = [Backend.PYTORCH, Backend.NUMPY]
+    # FFT masking runs natively on every tensor backend. NIFTI_LIST is absent
+    # because this module only implements process_tensor, so the pipeline routes
+    # a NIfTI-list batch to a tensor backend instead. The nufft mode narrows
+    # this further in __init__.
+    SUPPORTED_BACKENDS = tuple(b for b in Backend if b is not Backend.NIFTI_LIST)
 
     MODES = ('cartesian', 'gridded', 'nufft', 'off')
 
     def __init__(self,
                  ksp_mode: str = 'cartesian',
                  nufft_osf: float = 2.0,
+                 nufft_impl: str = 'gridding',
                  acceleration_factor: float = 3.0,
                  acs_frac: float = 0.06,
                  vd_beta: float = 3.0,
@@ -3251,6 +3243,13 @@ class KspaceUndersampling(BaseModule):
         """
         ksp_mode: 'cartesian', 'gridded', 'nufft' or 'off' (see class docstring).
         nufft_osf: NUFFT grid oversampling, used by ksp_mode='nufft' only.
+        nufft_impl: which NUFFT to use for ksp_mode='nufft'.
+                'gridding' (default) measures with the Kaiser-Bessel operator;
+                'interp' measures by interpolating an oversampled Cartesian grid,
+                which is cheaper and less accurate, and is the approximation
+                whose error against nufft_osf is worth studying; both run on any
+                backend with gradients intact. 'torchkbnufft' is the PyTorch
+                reference, kept for comparison and restricted to PyTorch.
         acceleration_factor: target acceleration (>= 1). 4.0 keeps ~1/4 of k-space.
                 Pass a (min, max) tuple to Augmentrum to sample it per batch.
         acs_frac: fraction of the grid width kept fully sampled at the k-space
@@ -3259,7 +3258,7 @@ class KspaceUndersampling(BaseModule):
         vd_beta: variable-density exponent. 0 is uniform random; larger values
                 concentrate samples near the k-space centre.
         trajectory: trajectory name for 'gridded' mode — any key of
-                ``TrajectoryGenerator.GENERATORS``.
+                "TrajectoryGenerator.GENERATORS".
         undersampling: shot-undersampling method for 'gridded' mode.
         traj_params, us_params: extra dicts forwarded to trajectory generation
                 and shot undersampling respectively.
@@ -3279,13 +3278,23 @@ class KspaceUndersampling(BaseModule):
                 shape the trajectory. Normally left None — geometry is read off
                 the NIfTI-MRS data by BaseModule and passed in automatically.
         """
-        super().__init__(**init_params(locals()))
+        super().__init__()
 
         if ksp_mode not in self.MODES:
             raise ValueError(f"ksp_mode must be one of {self.MODES}, got {ksp_mode!r}")
 
         self.ksp_mode = ksp_mode
+        if ksp_mode == 'nufft' and nufft_impl == 'torchkbnufft':
+            # torchkbnufft is a PyTorch extension, so that implementation cannot
+            # run anywhere else. The gridding implementation has no such limit.
+            self.SUPPORTED_BACKENDS = (Backend.PYTORCH,)
+
         self.nufft_osf = float(nufft_osf)
+        if nufft_impl not in ('gridding', 'interp', 'torchkbnufft'):
+            raise ValueError(
+                f"nufft_impl must be 'gridding', 'interp' or 'torchkbnufft', "
+                f"got {nufft_impl!r}")
+        self.nufft_impl = nufft_impl
         self.acceleration_factor = acceleration_factor
         self.acs_frac = acs_frac
         self.vd_beta = vd_beta
@@ -3312,7 +3321,7 @@ class KspaceUndersampling(BaseModule):
         """
         Measure along the real trajectory and invert, instead of masking the grid.
 
-        The honest counterpart to ``gridded``. That mode uses the trajectory only
+        The honest counterpart to "gridded". That mode uses the trajectory only
         to choose which Cartesian bins to keep and then masks the data's own FFT,
         so it never leaves the grid and never sees an off-grid sample value. Here
         the volume is sampled at the coordinates the trajectory actually visits
@@ -3321,16 +3330,13 @@ class KspaceUndersampling(BaseModule):
         The spectral axis rides in the NUFFT's coil slot, so a volume with T
         spectral points costs ONE forward/adjoint pair rather than T of them —
         which is what makes this affordable at all. Memory scales as
-        ``batch x T x n_samples``, so it is sized for MRSI matrices (32-64 in
+        "batch x T x n_samples", so it is sized for MRSI matrices (32-64 in
         plane) rather than for imaging-resolution grids.
 
         A 2-D trajectory describes one plane, so kz joins the spectral axis in
         the coil slot and every slice is measured with the same in-plane pattern;
         a 3-D trajectory samples the volume directly.
         """
-        import torch as _torch
-        from augmentrum.sampling.kspace_reconstructor import KspaceReconstructor
-
         header = self._header_for_trajectory(matrix, geometry)
         us_params = dict(self.us_params)
         us_params.setdefault('seed', int(rng.integers(0, 2 ** 31 - 1)))
@@ -3341,7 +3347,7 @@ class KspaceUndersampling(BaseModule):
             header, self.trajectory, self.undersampling,
             float(self.acceleration_factor),
             traj_params=dict(self.traj_params), us_params=us_params,
-            backend=NumpyBackend(),
+            like=None,
         )
         self.last_meta_ = meta
         self.last_masks_ = np.asarray(shot_mask, dtype=bool)
@@ -3352,8 +3358,63 @@ class KspaceUndersampling(BaseModule):
         pts = np.concatenate([np.atleast_2d(np.asarray(shots[int(i)])) for i in keep])
 
         ndim = pts.shape[1]
+        kmax = np.asarray(meta['kmax'][:ndim], dtype=np.float64)
+        if self.nufft_impl == 'torchkbnufft':
+            return self._nufft_torchkbnufft(data_array, matrix, pts, kmax, ndim)
+        return self._nufft_gridding(data_array, matrix, pts, kmax, ndim)
+
+    def _nufft_gridding(self, data_array, matrix, pts, kmax, ndim):
+        """
+        Measure and reconstruct with the backend-agnostic gridding NUFFT.
+
+        Runs on whatever backend the data is on and keeps its gradients, so a
+        non-Cartesian acquisition can sit inside a training loop.
+        """
+        from augmentrum.sampling.gridding_nufft import GriddingNUFFT
+
+        # Gridding takes the trajectory in [-0.5, 0.5) per axis
+        coords = (pts / (2.0 * kmax[None, :])).astype(np.float32)
+
+        nx, ny, nz = matrix
+        vol = ops.cast(data_array, 'complex64')
+        n_batch = int(ops.shape(vol)[0])
+        n_t = int(ops.shape(vol)[4])
+
+        if ndim == 2:                       # (B, X, Y, Z, T) -> (B, Z*T, X, Y)
+            im_size = (nx, ny)
+            stack = ops.reshape(ops.transpose(vol, (0, 3, 4, 1, 2)),
+                                (n_batch, nz * n_t, nx, ny))
+        else:                               # (B, X, Y, Z, T) -> (B, T, X, Y, Z)
+            im_size = (nx, ny, nz)
+            stack = ops.transpose(vol, (0, 4, 1, 2, 3))
+
+        nufft = GriddingNUFFT(im_size, self.nufft_osf)
+
+        recon = []
+        for b in range(n_batch):
+            plane = ops.reshape(ops.take(stack, np.array([b]), axis=0),
+                                (-1,) + im_size)
+            measured = (nufft.forward_interp(plane, coords)
+                        if self.nufft_impl == 'interp'
+                        else nufft.forward(plane, coords))
+            recon.append(nufft.adjoint(measured, coords))
+        out = ops.stack(recon, axis=0)
+
+        if ndim == 2:
+            out = ops.transpose(ops.reshape(out, (n_batch, nz, n_t, nx, ny)),
+                                (0, 3, 4, 1, 2))
+        else:
+            out = ops.transpose(out, (0, 2, 3, 4, 1))
+
+        return self._match_scale(out, vol, data_array)
+
+    def _nufft_torchkbnufft(self, data_array, matrix, pts, kmax, ndim):
+        """Measure and reconstruct with torchkbnufft, the PyTorch reference."""
+        import torch as _torch
+        from augmentrum.sampling.kspace_reconstructor import KspaceReconstructor
+
         coords = _torch.from_numpy(pts.T).float()[None, None]          # [1, 1, D, K]
-        coords = KspaceReconstructor.normalise_trajectory(coords, meta['kmax'][:ndim])
+        coords = KspaceReconstructor.normalise_trajectory(coords, kmax)
 
         was_numpy = not is_torch(data_array)
         vol = _torch.as_tensor(np.asarray(data_array)) if was_numpy else data_array
@@ -3388,15 +3449,25 @@ class KspaceUndersampling(BaseModule):
         else:
             out = out.permute(0, 2, 3, 4, 1)
 
-        # A density-compensated adjoint recovers the image only up to a constant
-        # — one that depends on the trajectory, the DCF and the grid size. That
-        # is acceptable in an operator but not in a pipeline stage, which has to
-        # hand back data in the units it was given, so the overall scale is
-        # matched to the input. Only the global factor is touched; the relative
-        # structure is whatever the reconstruction produced.
-        scale = _torch.linalg.vector_norm(vol) / _torch.linalg.vector_norm(out).clamp_min(1e-12)
-        out = (out * scale).to(dtype)
-        return out.numpy() if was_numpy else out
+        out = self._match_scale(out, vol, data_array)
+        out = ops.cast_like(out, _torch.zeros((), dtype=dtype))
+        return ops.to_numpy(out) if was_numpy else out
+
+    @staticmethod
+    def _match_scale(out, vol, like):
+        """
+        Restore the input's overall scale.
+
+        A density-compensated adjoint recovers the image only up to a constant
+        that depends on the trajectory, the DCF and the grid size. That is
+        acceptable in an operator but not in a pipeline stage, which has to hand
+        back data in the units it was given. Only the global factor is touched;
+        the relative structure is whatever the reconstruction produced.
+        """
+        num = ops.sqrt(ops.sum(ops.abs(vol) ** 2))
+        den = ops.sqrt(ops.sum(ops.abs(out) ** 2))
+        scale = num / ops.where(den > 1e-12, den, den * 0 + 1e-12)
+        return out * ops.cast_like(scale, out)
 
     #***********************#
     #   mask construction   #
@@ -3429,14 +3500,13 @@ class KspaceUndersampling(BaseModule):
         coords, shot_mask, meta = KspaceSampler.get_kspace_shots_and_mask(
             header, self.trajectory, self.undersampling, accel,
             traj_params=dict(self.traj_params), us_params=us_params,
-            backend=NumpyBackend(),
+            like=None,
         )
         self.last_meta_ = meta
 
         traj_matrix = tuple(int(n) for n in meta['matrix'])
         fov_m = tuple(f / 1000.0 for f in meta['fov_mm'])
-        grid = GridMask.rasterize_shots_to_grid(coords, shot_mask, fov_m, traj_matrix,
-                                       backend=NumpyBackend())
+        grid = GridMask.rasterize_shots_to_grid(coords, shot_mask, fov_m, traj_matrix)
 
         # 2-D trajectories describe the in-plane pattern only; broadcast it along
         # any remaining axis so the slab direction stays fully encoded.
@@ -3474,14 +3544,14 @@ class KspaceUndersampling(BaseModule):
     #**************************#
 
     def process_tensor(self, data_array, water_array=None,
-                       backend: ArrayBackend = Backend.PYTORCH, **kwargs):
+                       backend: Backend = Backend.PYTORCH, **kwargs):
         """
         Undersample a batch of MRSI volumes.
 
         Args:
             data_array: (batch, X, Y, Z, T) complex, NumPy or PyTorch.
             water_array: passed through unchanged.
-            backend: ArrayBackend enum (unused; kept for the BaseModule signature).
+            like=None enum (unused; kept for the BaseModule signature).
             **kwargs: absorbs sw_hz / sf_mhz / geometry injected by BaseModule.
 
         Returns:
@@ -3508,68 +3578,47 @@ class KspaceUndersampling(BaseModule):
         masks = np.stack([self._draw_mask(matrix, geometry, rng) for _ in range(n_masks)])
         self.last_masks_ = masks
 
-        if is_torch(data_array):
-            out = self._apply_torch(data_array, masks)
-        else:
-            out = self._apply_numpy(np.asarray(data_array), masks)
+        return self._apply_masks(data_array, masks), water_array
 
-        return out, water_array
-
-    #******************************#
-    #   backend-specific masking   #
-    #******************************#
-    # Both implementations do the same thing: FFT over the spatial axes, add
-    # k-space noise, zero the unacquired bins, transform back. The mask is in
-    # fftshift order (k-space centre in the middle), so the spectrum is shifted
-    # to match rather than the mask being rolled.
+    #***************#
+    #   masking     #
+    #***************#
 
     def _spatial_axes(self, ndim: int = 5) -> Tuple[int, ...]:
         return (1, 2, 3)
 
-    def _apply_torch(self, x, masks: np.ndarray):
-        import torch
+    def _apply_masks(self, x, masks: np.ndarray):
+        """
+        FFT over the spatial axes, add k-space noise, zero the unacquired bins,
+        transform back.
 
+        The mask is in fftshift order, with the k-space centre in the middle, so
+        the spectrum is shifted to match rather than the mask being rolled.
+
+        Runs on whatever backend *x* belongs to. Chunks are collected and joined
+        rather than written into a preallocated output, because jax and
+        tensorflow tensors are immutable.
+        """
         axes = self._spatial_axes()
-        mask_t = torch.as_tensor(masks, device=x.device)          # (n_masks, X, Y, Z)
-        if mask_t.shape[0] == 1 and x.shape[0] > 1:
-            mask_t = mask_t.expand(x.shape[0], *mask_t.shape[1:])
-        mask_t = mask_t[..., None]                                 # broadcast over T
 
-        n_t = int(x.shape[-1])
-        chunk = int(self.chunk_t) if self.chunk_t else n_t
-        chunk = max(1, min(chunk, n_t))
-
-        out = torch.empty_like(x)
-        for t0 in range(0, n_t, chunk):
-            sl = slice(t0, t0 + chunk)
-            k = torch.fft.fftshift(torch.fft.fftn(x[..., sl], dim=axes, norm='ortho'), dim=axes)
-            if self.noise_sigma_k:
-                k = k + float(self.noise_sigma_k) * torch.complex(
-                    torch.randn_like(k.real), torch.randn_like(k.real))
-            k = k * mask_t.to(k.dtype)
-            out[..., sl] = torch.fft.ifftn(
-                torch.fft.ifftshift(k, dim=axes), dim=axes, norm='ortho')
-        return out
-
-    def _apply_numpy(self, x: np.ndarray, masks: np.ndarray) -> np.ndarray:
-        axes = self._spatial_axes()
         if masks.shape[0] == 1 and x.shape[0] > 1:
             masks = np.broadcast_to(masks, (x.shape[0],) + masks.shape[1:])
-        mask = masks[..., None]
+        mask = ops.match_backend(masks[..., None], x)   # broadcast over T
 
         n_t = int(x.shape[-1])
         chunk = int(self.chunk_t) if self.chunk_t else n_t
         chunk = max(1, min(chunk, n_t))
 
-        rng = np.random.default_rng(self.us_seed)
-        out = np.empty_like(x)
+        pieces = []
         for t0 in range(0, n_t, chunk):
-            sl = slice(t0, t0 + chunk)
-            k = np.fft.fftshift(np.fft.fftn(x[..., sl], axes=axes, norm='ortho'), axes=axes)
+            block = x[..., t0:t0 + chunk]
+            k = ops.fftshift(ops.fftn(block, axes, norm='ortho'), axis=axes)
             if self.noise_sigma_k:
-                k = k + float(self.noise_sigma_k) * (
-                    rng.normal(size=k.shape) + 1j * rng.normal(size=k.shape))
-            k = k * mask
-            out[..., sl] = np.fft.ifftn(
-                np.fft.ifftshift(k, axes=axes), axes=axes, norm='ortho')
-        return out
+                real = self.rng.normal(tuple(k.shape), like=ops.real(k))
+                imag = self.rng.normal(tuple(k.shape), like=ops.real(k))
+                k = k + float(self.noise_sigma_k) * ops.cast_like(
+                    ops.complex_from(real, imag), k)
+            k = k * ops.cast_like(mask, k)
+            pieces.append(ops.ifftn(ops.ifftshift(k, axis=axes), axes, norm='ortho'))
+
+        return pieces[0] if len(pieces) == 1 else ops.concatenate(pieces, axis=-1)

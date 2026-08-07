@@ -18,14 +18,13 @@
 #   imports   #
 #*************#
 import math
-import torch
-import torch.nn.functional as F
 from typing import Optional, Tuple, List, Dict, Any, Union
 
 import numpy as np
-from augmentrum.core.base_module import BaseModule, init_params
-from augmentrum.core.nifti_mrs_plus import Backend, NIfTI_MRS_Plus
+from augmentrum.core.base_module import BaseModule
+from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from augmentrum.utils.geometry import Affine
+from nifti_mrs_plus import ops
 
 
 __all__ = ['SpatialAugmentations']
@@ -52,33 +51,30 @@ class SpatialAugmentations(BaseModule):
         dim=3 :  (batch, X, Y, Z, C)
         dim=2 :  (batch, X, Y, C)
 
-    This is exactly what ``NIfTI_MRS_Plus.get_data()`` produces by stacking
-    ``(X, Y, Z, T)`` NIfTI arrays along a new leading batch axis, so tensors flow
+    This is exactly what "NIfTI_MRS_Plus.get_data()" produces by stacking
+    "(X, Y, Z, T)" NIfTI arrays along a new leading batch axis, so tensors flow
     through unchanged. Internally the batch is permuted to PyTorch's
-    ``(N, C, D, H, W)`` image layout for ``grid_sample`` and permuted back; the
+    "(N, C, D, H, W)" image layout for "grid_sample" and permuted back; the
     permutation reverses axes 1..n-1 and is its own inverse.
 
     Under that mapping the affine's axes are (X, Y, Z) in order, so
-    ``z_angle_deg`` rotates in the XY plane about Z and ``flip_z`` is a
+    "z_angle_deg" rotates in the XY plane about Z and "flip_z" is a
     through-slice flip.
 
     All channels of a sample receive the *same* transform — the spatial
     augmentation of an MRSI volume must not vary with spectral point.
 
     Fully-singleton spatial axes (e.g. single-voxel spectroscopy, shaped
-    ``(B, 1, 1, 1, N)``) are passed through untouched rather than resampled
+    "(B, 1, 1, 1, N)") are passed through untouched rather than resampled
     along the spectral axis.
     """
 
-    # NIfTI_LIST and NUMPY inputs are converted to PyTorch internally.
-    # TensorFlow, JAX, and Keras are NOT natively supported — the base-module
-    # fallback will route them through the NIfTI-list path (implicit conversion).
-    SUPPORTED_BACKENDS = [Backend.NIFTI_LIST, Backend.NUMPY, Backend.PYTORCH]
+    SUPPORTED_BACKENDS = tuple(Backend)
 
     def __init__(self,
                  dim: int = 3,
                  prob: float = 0.5,
-                 device: Optional[torch.device] = None,
+                 device=None,
                  # data-pipeline ranges (sampleable as flat kwargs from Augmentrum)
                  translation_frac: float = 0.10,
                  max_z_angle_deg: float = 30.0,
@@ -104,7 +100,7 @@ class SpatialAugmentations(BaseModule):
         """
         dim: 2 or 3
         prob: Bernoulli probability to activate each augmentation
-        device: torch device.  Leave as None to operate on tensors wherever they
+        device: unused; tensors stay wherever the caller put them. Kept for
                 already live (important on GPU); set it to force a device.
         translation_frac: max translation as fraction of axis length
         max_z_angle_deg: max z-axis rotation for the data pipeline (degrees)
@@ -121,9 +117,9 @@ class SpatialAugmentations(BaseModule):
         min_coils, max_coils: integer range of coils to keep when coil subsampling is active
         pixdim: voxel size per spatial axis, e.g. (2.8, 3.5, 4.0) in mm. When given,
                 the affine is corrected for anisotropic voxels — see
-                ``_correct_anisotropy``. Leave as None for isotropic data or when
+                "_correct_anisotropy". Leave as None for isotropic data or when
                 the axes are not physically comparable.
-        padding_mode: how ``grid_sample`` fills coordinates that fall outside the
+        padding_mode: how "grid_sample" fills coordinates that fall outside the
                 volume. 'zeros' (default) is correct for a finite object; 'border'
                 extrudes the edge voxels, which fabricates anatomy beyond a slab.
         chunk_channels: resample this many channels at a time to bound peak memory.
@@ -143,7 +139,7 @@ class SpatialAugmentations(BaseModule):
         for per-batch sampling in on-the-fly mode — e.g. zoom_min=(0.85, 0.95)
         means the lower zoom bound is sampled uniformly from [0.85, 0.95] each batch.
         """
-        super().__init__(**init_params(locals()))
+        super().__init__()
         assert dim in (2, 3)
         self.dim = dim
         self.prob = float(prob)
@@ -151,7 +147,7 @@ class SpatialAugmentations(BaseModule):
         # to cpu and then unconditionally moving inputs would silently drag GPU
         # tensors back to the host.
         self._device_explicit = device is not None
-        self.device = device or torch.device('cpu')
+        self.device = device
         self.pipeline = pipeline
 
         if pixdim is not None:
@@ -221,7 +217,7 @@ class SpatialAugmentations(BaseModule):
     #***************************************#
     def sample_augmentations(self, batch_size: int,
                            pipeline: str = 'data',
-                           rng: Optional[torch.Generator] = None) -> List[Dict[str, Any]]:
+                           rng=None) -> List[Dict[str, Any]]:
         """
         Returns a list of augmentation specification dicts (one per sample).
         Each dict contains booleans 'do_*' keys and corresponding parameter keys.
@@ -232,7 +228,7 @@ class SpatialAugmentations(BaseModule):
             rng: Optional random number generator
         """
         ranges = self.csm_ranges if pipeline == 'csm' else self.data_ranges
-        rng = rng or torch.default_generator
+        rng = rng if rng is not None else self.rng.numpy_rng()
         info_list = []
 
         for _ in range(batch_size):
@@ -242,7 +238,7 @@ class SpatialAugmentations(BaseModule):
                 if self.prob <= 0.0:
                     return False
                 p = self.prob if p is None else float(p)
-                return (torch.rand(1, generator=rng).item() < p)
+                return (rng.random() < p)
 
             # decide per-augmentation activation
             do_translate = bern(ranges.get('translation_prob'))
@@ -261,16 +257,16 @@ class SpatialAugmentations(BaseModule):
             tz = 0.0
             if do_translate:
                 frac = ranges['translation_frac']
-                tx = (torch.rand(1, generator=rng).item() * 2 - 1) * frac
-                ty = (torch.rand(1, generator=rng).item() * 2 - 1) * frac
+                tx = (rng.random() * 2 - 1) * frac
+                ty = (rng.random() * 2 - 1) * frac
                 if self.dim == 3:
-                    tz = (torch.rand(1, generator=rng).item() * 2 - 1) * frac
+                    tz = (rng.random() * 2 - 1) * frac
 
             # z-rotation angle
             z_angle = 0.0
             if do_z_rot:
                 max_deg = ranges['max_z_angle_deg']
-                z_angle = (torch.rand(1, generator=rng).item() * 2 - 1) * max_deg
+                z_angle = (rng.random() * 2 - 1) * max_deg
 
             # random full rotation angle, plus the axis it turns about.  The axis
             # belongs in the spec: sampling it at apply() time would make a saved
@@ -279,15 +275,15 @@ class SpatialAugmentations(BaseModule):
             random_rot_deg = 0.0
             rot_axis = (0.0, 0.0, 1.0)
             if do_random_csm_rot:
-                random_rot_deg = torch.rand(1, generator=rng).item() * ranges['max_random_angle_deg']
+                random_rot_deg = rng.random() * ranges['max_random_angle_deg']
                 if self.dim == 3:
-                    ax = torch.randn(3, generator=rng)
-                    rot_axis = tuple((ax / (ax.norm() + 1e-12)).tolist())
+                    ax = rng.standard_normal(3)
+                    rot_axis = tuple((ax / (np.linalg.norm(ax) + 1e-12)).tolist())
 
             # 90-degree rotations (k=1,2,3 for 90,180,270)
             k_rot90 = 0
             if do_rot90:
-                k_rot90 = torch.randint(1, 4, (1,), generator=rng).item()
+                k_rot90 = int(rng.integers(1, 4))
 
             # Zoom, per axis. One range feeds both behaviours: do_anisotropic
             # draws each axis independently, do_zoom draws once and broadcasts —
@@ -296,7 +292,7 @@ class SpatialAugmentations(BaseModule):
             # zoom_max * scale_max = 1.21 rather than the 1.1 either one implied.
             def _draw_zoom():
                 lo, hi = ranges['zoom_range']
-                return lo + (hi - lo) * torch.rand(1, generator=rng).item()
+                return lo + (hi - lo) * rng.random()
 
             # shear
             shx = 0.0
@@ -304,20 +300,20 @@ class SpatialAugmentations(BaseModule):
             shz = 0.0
             if do_shear:
                 mx = ranges['shear_max']
-                shx = (torch.rand(1, generator=rng).item() * 2 - 1) * mx
-                shy = (torch.rand(1, generator=rng).item() * 2 - 1) * mx
+                shx = (rng.random() * 2 - 1) * mx
+                shy = (rng.random() * 2 - 1) * mx
                 if self.dim == 3:
-                    shz = (torch.rand(1, generator=rng).item() * 2 - 1) * mx
+                    shz = (rng.random() * 2 - 1) * mx
 
             # flip
             flip_x = False
             flip_y = False
             flip_z = False
             if do_flip:
-                flip_x = bool(torch.rand(1, generator=rng).item() < 0.5)
-                flip_y = bool(torch.rand(1, generator=rng).item() < 0.5)
+                flip_x = bool(rng.random() < 0.5)
+                flip_y = bool(rng.random() < 0.5)
                 if self.dim == 3:
-                    flip_z = bool(torch.rand(1, generator=rng).item() < 0.5)
+                    flip_z = bool(rng.random() < 0.5)
 
             # anisotropic wins when both are set: it is the general case
             zoom_x = zoom_y = zoom_z = 1.0
@@ -332,7 +328,7 @@ class SpatialAugmentations(BaseModule):
             coil_keep = None
             if do_coil_sub and self.min_coils is not None:
                 if self.max_coils is not None:
-                    coil_keep = torch.randint(self.min_coils, self.max_coils + 1, (1,), generator=rng).item()
+                    coil_keep = int(rng.integers(self.min_coils, self.max_coils + 1))
                 else:
                     coil_keep = self.min_coils
 
@@ -365,7 +361,7 @@ class SpatialAugmentations(BaseModule):
     #   affine composition   #
     #************************#
     def _compose_affines_for_batch(self, aug_spec_list: List[Dict[str, Any]],
-                                   data_shape: torch.Size) -> torch.Tensor:
+                                   data_shape):
         """
         Build affine matrices for an entire batch given augmentation specs.
         Returns (N, 2, 3) or (N, 3, 4) depending on dim.
@@ -393,19 +389,19 @@ class SpatialAugmentations(BaseModule):
             else:
                 # 3D
                 # Build rotation matrix
-                R = torch.eye(3, dtype=torch.float32)
+                R = np.eye(3, dtype=np.float32)
                 # z-axis rotation
                 if spec['do_z_rot']:
                     z_rad = math.radians(spec['z_angle_deg'])
-                    q_z = Affine.quat_from_axis_angle(torch.tensor([0.0, 0.0, 1.0]), z_rad, device=None)
+                    q_z = Affine.quat_from_axis_angle([0.0, 0.0, 1.0], z_rad)
                     R = Affine.quat_to_rotmat(q_z)
                 # random rotation — axis comes from the spec so the transform is
                 # exactly reproducible from it (see sample_augmentations)
                 if spec['do_random_csm_rot']:
                     rand_rad = math.radians(spec['random_rot_deg'])
-                    axis_rand = torch.tensor(spec.get('rot_axis', (0.0, 0.0, 1.0)),
-                                             dtype=torch.float32)
-                    axis_rand = axis_rand / (axis_rand.norm() + 1e-12)
+                    axis_rand = np.array(spec.get('rot_axis', (0.0, 0.0, 1.0)),
+                                         dtype=np.float32)
+                    axis_rand = axis_rand / (np.linalg.norm(axis_rand) + 1e-12)
                     q_rand = Affine.quat_from_axis_angle(axis_rand, rand_rad, device=None)
                     R_rand = Affine.quat_to_rotmat(q_rand)
                     R = R @ R_rand
@@ -413,18 +409,18 @@ class SpatialAugmentations(BaseModule):
                 if spec['do_rot90']:
                     k = spec['k_rot90']
                     angle_90 = k * math.pi / 2.0
-                    q90 = Affine.quat_from_axis_angle(torch.tensor([0.0, 0.0, 1.0]), angle_90, device=None)
+                    q90 = Affine.quat_from_axis_angle([0.0, 0.0, 1.0], angle_90)
                     R90 = Affine.quat_to_rotmat(q90)
                     R = R @ R90
 
                 # shear
                 shx, shy = spec['shear_xy']
                 shz = spec['shear_z']
-                SH = torch.tensor([
+                SH = np.array([
                     [1.0, shx, 0.0],
                     [shy, 1.0, 0.0],
                     [0.0, shz, 1.0]
-                ], dtype=torch.float32)
+                ], dtype=np.float32)
                 # scale
                 sx, sy, sz = spec['zoom_xyz']
                 tx = spec['tx']
@@ -436,34 +432,34 @@ class SpatialAugmentations(BaseModule):
                 theta = Affine.build_3d(R, (sx, sy, sz), SH, (tx, ty, tz), fx, fy, fz)
                 thetas.append(theta)
         # Stack
-        theta_batch = torch.stack(thetas, dim=0)  # Nx2x3 or Nx3x4
+        theta_batch = np.stack(thetas, axis=0)  # Nx2x3 or Nx3x4
 
         if self.pixdim is not None and data_shape is not None:
             theta_batch = self._correct_anisotropy(theta_batch, data_shape, aug_spec_list)
         return theta_batch
 
-    def _correct_anisotropy(self, theta: torch.Tensor, data_shape,
-                            aug_spec_list: Optional[List[Dict[str, Any]]] = None) -> torch.Tensor:
+    def _correct_anisotropy(self, theta, data_shape,
+                            aug_spec_list: Optional[List[Dict[str, Any]]] = None):
         """
         Rewrite the affine so rotations are physical when voxels are anisotropic.
 
-        ``grid_sample`` works in coordinates normalised to [-1, 1] *per axis*, so a
+        "grid_sample" works in coordinates normalised to [-1, 1] *per axis*, so a
         rotation matrix applied there is conjugated by the wrong metric whenever
         the field of view is not isotropic.  For a 179.2 x 224.0 mm FOV, a nominal
         30 degree rotation comes out as a rotation composed with a 1.25x stretch —
         a shear, not a rotation, and the anatomy is visibly skewed.
 
-        With physical coordinates ``p = D n`` where ``D = diag(L_i / 2)`` and
-        ``L_i = N_i * pixdim_i``, requiring ``p_in = R p_out`` gives
-        ``n_in = D^-1 R D n_out``.  So the linear block is conjugated by
-        ``S = diag(L_i)`` — the factor of 2 cancels.  The translation column is
-        left alone: ``translation_frac`` already means "fraction of axis length",
+        With physical coordinates "p = D n" where "D = diag(L_i / 2)" and
+        "L_i = N_i * pixdim_i", requiring "p_in = R p_out" gives
+        "n_in = D^-1 R D n_out".  So the linear block is conjugated by
+        "S = diag(L_i)" — the factor of 2 cancels.  The translation column is
+        left alone: "translation_frac" already means "fraction of axis length",
         which is the per-axis semantics we want.
         """
         d = self.dim
-        lengths = torch.tensor(
+        lengths = np.array(
             [float(data_shape[1 + i]) * float(self.pixdim[i]) for i in range(d)],
-            dtype=theta.dtype, device=theta.device,
+            dtype=np.float32,
         )
 
         if (not self._warned_rot90) and self.allow_rot90 and d >= 2 \
@@ -479,45 +475,40 @@ class SpatialAugmentations(BaseModule):
                 RuntimeWarning, stacklevel=3,
             )
 
-        S = torch.diag(lengths)
-        S_inv = torch.diag(1.0 / lengths)
+        S = np.diag(lengths)
+        S_inv = np.diag(1.0 / lengths)
         linear = S_inv @ theta[:, :, :d] @ S
-        return torch.cat([linear, theta[:, :, d:]], dim=2)
+        return np.concatenate([linear, theta[:, :, d:]], axis=2)
 
     @staticmethod
     def _axis_perm(ndim: int) -> Tuple[int, ...]:
         """
-        Permutation between the NIfTI layout ``(B, X, Y, [Z,] C)`` and the
-        ``grid_sample`` layout ``(B, C, [Z,] Y, X)``.
+        Permutation between the NIfTI layout "(B, X, Y, [Z,] C)" and the
+        "grid_sample" layout "(B, C, [Z,] Y, X)".
 
         It reverses axes 1..ndim-1, so it is its own inverse and the same tuple
         converts in both directions.
         """
         return (0,) + tuple(range(ndim - 1, 0, -1))
 
-    def _apply_affine_batch(self, x: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
+    def _apply_affine_batch(self, x, theta):
         """
         x: NIfTI layout — (N, X, Y, Z, C) for dim=3, (N, X, Y, C) for dim=2.
         theta: (N, 2, 3) or (N, 3, 4)
         returns the transformed tensor in the same layout.
         """
-        perm = self._axis_perm(x.dim())
-        xg = x.permute(*perm)                       # (N, C, [Z,] Y, X)
-        n_batch, n_chan = xg.shape[0], xg.shape[1]
-        spatial = tuple(xg.shape[2:])
+        perm = self._axis_perm(len(ops.shape(x)))
+        xg = ops.transpose(x, perm)                 # (N, C, [Z,] Y, X)
+        n_batch, n_chan = ops.shape(xg)[0], ops.shape(xg)[1]
+        spatial = tuple(ops.shape(xg)[2:])
 
-        real_dtype = xg.real.dtype if torch.is_complex(xg) else xg.dtype
-        if real_dtype not in (torch.float32, torch.float64):
-            real_dtype = torch.float32
+        # theta is a small NumPy matrix; move it onto the data's own backend
+        theta_b = ops.asarray_like(xg, theta)
 
         # The sampling grid depends only on (theta, spatial) — never on C — so it
         # is built once and reused for every chunk and for both the real and the
         # imaginary pass.
-        grid = F.affine_grid(
-            theta.to(device=xg.device, dtype=real_dtype),
-            (n_batch, 1) + spatial,
-            align_corners=False,
-        )
+        grid = ops.affine_grid(theta_b, (n_batch, 1) + spatial)
 
         chunk = int(self.chunk_channels) if self.chunk_channels else n_chan
         chunk = max(1, min(chunk, n_chan))
@@ -525,24 +516,23 @@ class SpatialAugmentations(BaseModule):
         outs = []
         for c0 in range(0, n_chan, chunk):
             block = xg[:, c0:c0 + chunk]
-            if torch.is_complex(block):
-                outs.append(torch.complex(
-                    self._grid_sample(block.real.to(real_dtype), grid),
-                    self._grid_sample(block.imag.to(real_dtype), grid),
+            if ops.is_complex(block):
+                outs.append(ops.complex_from(
+                    self._grid_sample(ops.real(block), grid),
+                    self._grid_sample(ops.imag(block), grid),
                 ))
             else:
-                outs.append(self._grid_sample(block.to(real_dtype), grid))
+                outs.append(self._grid_sample(block, grid))
 
-        return torch.cat(outs, dim=1).permute(*perm)
+        return ops.transpose(ops.concatenate(outs, axis=1), perm)
 
-    def _grid_sample(self, x: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
-        return F.grid_sample(x.contiguous(), grid, mode='bilinear',
-                             padding_mode=self.padding_mode, align_corners=False)
+    def _grid_sample(self, x, grid):
+        return ops.grid_sample(x, grid, padding_mode=self.padding_mode)
 
     #******************#
     #   coil sampler   #
     #******************#
-    def default_coil_sampler(self, x: torch.Tensor, keep: int, coils_axis: int = -1) -> torch.Tensor:
+    def default_coil_sampler(self, x, keep: int, coils_axis: int = -1):
         """
         Subsample coil maps along the coil axis (last axis in the NIfTI layout).
         Keep 'keep' coils selected uniformly at random.
@@ -551,16 +541,16 @@ class SpatialAugmentations(BaseModule):
             return x
         C = x.shape[coils_axis]
         keep = min(max(1, int(keep)), C)
-        idx = torch.randperm(C, device=x.device)[:keep]
-        return torch.index_select(x, dim=coils_axis, index=idx)
+        idx = self.rng.numpy_rng().permutation(C)[:keep]
+        return ops.take(x, idx, axis=coils_axis)
 
     #***************************#
     #   public apply function   #
     #***************************#
-    def apply(self, x: torch.Tensor,
+    def apply(self, x,
              pipeline: str = 'data',
              aug_spec_list: Optional[List[Dict[str, Any]]] = None,
-             coils_axis: int = -1) -> Tuple[torch.Tensor, List[Dict[str, Any]]]:
+             coils_axis: int = -1) -> Tuple[Any, List[Dict[str, Any]]]:
         """
         Apply augmentations to input batch x.
 
@@ -576,7 +566,7 @@ class SpatialAugmentations(BaseModule):
             (x_aug, aug_info_list): Augmented tensor and list of augmentation specifications
         """
         expected = self.dim + 2
-        if x.dim() != expected:
+        if len(ops.shape(x)) != expected:
             raise ValueError(
                 f"SpatialAugmentations(dim={self.dim}) expects a {expected}-D tensor in the "
                 f"NIfTI layout "
@@ -603,9 +593,9 @@ class SpatialAugmentations(BaseModule):
         # this keeps "no augmentation" bit-exact: grid_sample through an identity
         # affine still blends neighbours at the 1e-6 level because the normalised
         # sampling coordinates are not exactly on voxel centres in float32.
-        identity = torch.eye(self.dim, self.dim + 1,
+        identity = np.eye(self.dim, self.dim + 1,
                              dtype=theta.dtype, device=theta.device)
-        if torch.allclose(theta, identity.expand_as(theta), atol=1e-7, rtol=0.0):
+        if np.allclose(theta, identity[None], atol=1e-7, rtol=0.0):
             x_aug = x
         else:
             # Apply affine to entire batch at once
@@ -622,7 +612,7 @@ class SpatialAugmentations(BaseModule):
             # pad/stack back into a tensor: if coil counts differ we will return a list instead
             chans = [s.shape[coils_axis] for s in out_list]
             if all(c == chans[0] for c in chans):
-                x_aug = torch.cat(out_list, dim=0)
+                x_aug = ops.concatenate(out_list, axis=0)
             else:
                 # Return as list in this unusual case
                 x_aug = out_list
@@ -632,37 +622,25 @@ class SpatialAugmentations(BaseModule):
     #******************************#
     #   nifti conversion helpers   #
     #******************************#
-    def _nifti_to_tensor(self, nifti_list: List[NIfTI_MRS_Plus]) -> torch.Tensor:
+    def _nifti_to_tensor(self, nifti_list: List[NIfTI_MRS_Plus]):
         """
         Convert list of NIfTI_MRS_Plus objects to tensor format.
 
         Returns:
-            torch.Tensor: Shape [batch_size, channels, ...spatial dims]
+            Array of shape [batch_size, channels, ...spatial dims]
         """
         tensors = []
         for nifti in nifti_list:
             # Extract data from NIFTI object
             data = nifti[:]  # Assuming this returns the data array
 
-            # Convert to torch tensor
-            if isinstance(data, np.ndarray):
-                tensor = torch.from_numpy(data)
-            else:
-                tensor = data
-
-            # Ensure proper dtype
-            if torch.is_complex(tensor):
-                tensor = tensor.to(dtype=torch.complex64)
-            else:
-                tensor = tensor.to(dtype=torch.float32)
-
+            tensor = data if not isinstance(data, np.ndarray) else data
+            tensor = ops.cast(tensor, "complex64" if ops.is_complex(tensor) else "float32")
             tensors.append(tensor)
 
-        # Stack into batch
-        batch_tensor = torch.stack(tensors, dim=0)
-        return batch_tensor.to(self.device)
+        return ops.stack(tensors, axis=0)
 
-    def _tensor_to_nifti(self, tensor: torch.Tensor,
+    def _tensor_to_nifti(self, tensor,
                         original_nifti_list: List[NIfTI_MRS_Plus]) -> List[NIfTI_MRS_Plus]:
         """
         Convert tensor back to list of NIfTI_MRS_Plus objects.
@@ -684,14 +662,10 @@ class SpatialAugmentations(BaseModule):
             tensor_list = [tensor[i] for i in range(tensor.shape[0])]
 
         for i, (data_tensor, original_nifti) in enumerate(zip(tensor_list, original_nifti_list)):
-            # Remove batch dimension if present
-            if data_tensor.dim() > len(original_nifti.shape):
-                data_tensor = data_tensor.squeeze(0)
-
-            # Convert to numpy
-            if data_tensor.is_cuda:
-                data_tensor = data_tensor.cpu()
-            data_array = data_tensor.numpy()
+            # Convert to numpy, dropping the batch dimension if present
+            data_array = ops.to_numpy(data_tensor)
+            if data_array.ndim > len(original_nifti.shape):
+                data_array = data_array[0]
 
             # Create new NIFTI object with augmented data
             nifti_new = original_nifti.copy()
@@ -765,17 +739,10 @@ class SpatialAugmentations(BaseModule):
         pipeline = kwargs.get('pipeline', self.pipeline)
         aug_spec_list = kwargs.get('aug_spec_list', None)
 
-        # Convert to torch tensor if needed
+        # Stay on whatever backend the caller handed us
         return_numpy = False
-        if isinstance(data_array, np.ndarray):
-            return_numpy = True
-            data_array = torch.from_numpy(data_array)
-
-        # Ensure proper dtype
-        if torch.is_complex(data_array):
-            data_array = data_array.to(dtype=torch.complex64)
-        else:
-            data_array = data_array.to(dtype=torch.float32)
+        data_array = ops.cast(
+            data_array, "complex64" if ops.is_complex(data_array) else "float32")
 
         # Only relocate when a device was explicitly requested — otherwise leave
         # the tensor where the caller put it (moving it would drag GPU tensors
@@ -797,9 +764,9 @@ class SpatialAugmentations(BaseModule):
         if return_numpy:
             if isinstance(data_aug, list):
                 # Handle list of tensors (variable coil counts)
-                data_aug = [d.cpu().numpy() for d in data_aug]
+                data_aug = [ops.to_numpy(d) for d in data_aug]
             else:
-                data_aug = data_aug.cpu().numpy()
+                data_aug = ops.to_numpy(data_aug)
 
         return data_aug, water_array
 
@@ -807,9 +774,9 @@ class SpatialAugmentations(BaseModule):
     #   pipeline routing   #
     #**********************#
     def route_pipeline(self,
-                       data_list: Optional[Union[List[NIfTI_MRS_Plus], torch.Tensor, np.ndarray]] = None,
-                       water_list: Optional[Union[List[NIfTI_MRS_Plus], torch.Tensor, np.ndarray]] = None,
-                       csm_list: Optional[Union[List[NIfTI_MRS_Plus], torch.Tensor, np.ndarray]] = None,
+                       data_list: Optional[Union[List[NIfTI_MRS_Plus], Any]] = None,
+                       water_list: Optional[Union[List[NIfTI_MRS_Plus], Any]] = None,
+                       csm_list: Optional[Union[List[NIfTI_MRS_Plus], Any]] = None,
                        data_aug_list: Optional[List[Dict[str, Any]]] = None,
                        csm_aug_list: Optional[List[Dict[str, Any]]] = None,
                        **kwargs) -> Dict[str, Any]:
@@ -872,6 +839,7 @@ class SpatialAugmentations(BaseModule):
 if __name__ == "__main__":
     # All tensors below are in the NIfTI-MRS layout: spatial axes first,
     # channel-like axis (spectral points / coils) LAST.
+    import torch
     device = torch.device('cpu')
 
     print("=" * 80)

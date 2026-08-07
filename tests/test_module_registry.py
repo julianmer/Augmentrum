@@ -35,7 +35,7 @@ def test_every_registered_module_has_a_spec():
     This is the guard the suite was missing. The backend-compatibility matrix and
     the README support table both used to carry their own hand-written lists, so
     registering a module gave it coverage nowhere and nothing failed —
-    ``KspaceUndersampling`` was in neither, and ``AmplitudeScaling`` was not even
+    "KspaceUndersampling" was in neither, and "AmplitudeScaling" was not even
     reachable by name.
     """
     missing = uncovered_classes()
@@ -65,13 +65,13 @@ def test_every_spec_constructs():
 @pytest.mark.parametrize("spec", SPECS, ids=[s.label for s in SPECS])
 def test_constructor_params_reach_provenance(spec):
     """
-    Every constructor argument a module accepts must land in ``self.params``.
+    Every constructor argument a module accepts must land in "self.params".
 
-    ``self.params`` is what ``BaseModule`` embeds in ``operation_details`` and
+    "self.params" is what "BaseModule" embeds in "operation_details" and
     therefore what reaches the NIfTI header. A module that forwards only some of
-    its arguments to ``super().__init__`` produces a dataset whose provenance
+    its arguments to "super().__init__" produces a dataset whose provenance
     does not say what the module was configured to do —
-    ``SpatialAugmentations`` forwarded five of nineteen, so no run recorded which
+    "SpatialAugmentations" forwarded five of nineteen, so no run recorded which
     zoom or rotation range was permitted.
     """
     if spec.own_provenance:
@@ -107,12 +107,12 @@ def test_explicit_kwargs_are_recorded_by_value(spec):
 
 def test_volatile_skips_metadata_updates():
     """
-    ``volatile=True`` is documented as skipping metadata updates for speed.
+    "volatile=True" is documented as skipping metadata updates for speed.
 
     Provenance is metadata, so it is skipped too — the trade being bought. Pinned
     here so the meaning of the flag cannot drift silently.
     """
-    from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus
+    from nifti_mrs_plus import NIfTI_MRS_Plus
 
     source = inspect.getsource(NIfTI_MRS_Plus)
     assert 'self.volatile' in source, "NIfTI_MRS_Plus no longer honours volatile"
@@ -136,9 +136,9 @@ def test_registry_aliases_resolve_to_module_classes():
 
 def test_exported_augmentations_are_reachable_by_name():
     """
-    Anything exported from ``augmentrum.augmentation`` should be usable in a pipeline.
+    Anything exported from "augmentrum.augmentation" should be usable in a pipeline.
 
-    ``AmplitudeScaling`` was exported, documented in the README table and covered
+    "AmplitudeScaling" was exported, documented in the README table and covered
     by the backend tests, yet absent from the registry — so it could not be named
     in a pipeline at all.
     """
@@ -160,7 +160,7 @@ def test_exported_augmentations_are_reachable_by_name():
 #***************************#
 
 def _nifti_list(shape, n=2):
-    """*n* NIfTI-MRS objects of the given ``(X, Y, Z, T)`` shape."""
+    """*n* NIfTI-MRS objects of the given "(X, Y, Z, T)" shape."""
     import numpy as np
     from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 
@@ -186,13 +186,13 @@ def test_running_a_module_writes_provenance(spec):
     """
     Running a module must leave a record in both provenance stores.
 
-    ``self.params`` being populated is necessary but not sufficient — the record
+    "self.params" being populated is necessary but not sufficient — the record
     has to survive the call and reach the NIfTI header extension, which is what a
     downstream reader actually sees. Checked per module rather than once, because
     the four data paths (spectra, multi-coil, volume, image) route through
     different branches of BaseModule.
     """
-    from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
+    from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 
     shape = (8, 8, 4, 16) if spec.volume or spec.nifti_kwargs else (1, 1, 1, 512)
     plus = NIfTI_MRS_Plus(nifti_list=_nifti_list(shape),
@@ -215,8 +215,8 @@ def test_running_a_module_writes_provenance(spec):
 
 @pytest.mark.parametrize("spec", SPECS, ids=[s.label for s in SPECS])
 def test_volatile_writes_no_provenance(spec):
-    """``volatile=True`` buys speed by skipping exactly this bookkeeping."""
-    from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
+    """"volatile=True" buys speed by skipping exactly this bookkeeping."""
+    from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 
     shape = (8, 8, 4, 16) if spec.volume or spec.nifti_kwargs else (1, 1, 1, 512)
     plus = NIfTI_MRS_Plus(nifti_list=_nifti_list(shape),

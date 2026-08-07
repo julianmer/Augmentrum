@@ -75,15 +75,7 @@ class NIfTI_RawProcessor(BaseModule):
             shift_ref_method (str): Frequency shifting method.
             phase_correct_method (str): Phase correction method.
         """
-        # Not init_params(locals()): every operation this processor switches on
-        # writes its own FSL-MRS provenance entry (fsl_mrs.utils.preproc.
-        # nifti_mrs_proc.* and augmentrum.processing.utils.* all call
-        # update_processing_prov). So 'Coil combination' appearing in
-        # ProcessingApplied IS coil=True, and its absence is coil=False; the
-        # details string names the function, which is the *_method choice.
-        # Recording the constructor arguments too would duplicate that, and would
-        # record the intent rather than what actually ran.
-        super().__init__(**kwargs)
+        super().__init__()
 
         self.conj = conj
         self.coil = coil

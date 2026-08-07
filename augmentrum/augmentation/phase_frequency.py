@@ -19,7 +19,8 @@ import numpy as np
 from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
-from augmentrum.utils.tensor_ops import fft, ifft, fftshift, ifftshift, match_backend
+from nifti_mrs_plus import Backend
+from nifti_mrs_plus.ops import fft, ifft, fftshift, ifftshift, match_backend
 
 
 #**************************************************************************************************#
@@ -57,11 +58,11 @@ class PhaseShift(BaseModule):
     >>> phase = PhaseShift(zero_order_deg=30.0, first_order_deg=45.0)
     """
 
-    SUPPORTED_BACKENDS = []  # Supports all backends
+    SUPPORTED_BACKENDS = tuple(Backend)
 
     def __init__(self, zero_order_deg: float = 0.0, first_order_deg: float = 0.0):
         """Initialize phase shift module."""
-        super().__init__(zero_order_deg=zero_order_deg, first_order_deg=first_order_deg)
+        super().__init__()
 
         self.zero_order_deg = zero_order_deg
         self.first_order_deg = first_order_deg
@@ -100,14 +101,14 @@ class PhaseShift(BaseModule):
         """
         Apply phase shift to tensor/array data (**any backend**).
 
-        Uses ``keras.ops`` — works with NumPy, PyTorch, JAX, or TensorFlow.
+        Uses "keras.ops" — works with NumPy, PyTorch, JAX, or TensorFlow.
         Gradients are preserved.
 
         Args:
-            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            data_array: Input tensor of shape "(batch, ..., n_points)"
             water_array: Optional water reference tensor (unchanged)
             backend: Backend enum (unused — ops dispatch automatically)
-            **kwargs: Must contain ``'sw_hz'`` (spectral width in Hz)
+            **kwargs: Must contain "'sw_hz'" (spectral width in Hz)
 
         Returns:
             Tuple of (processed_data, water_array)
@@ -193,11 +194,11 @@ class FrequencyShift(BaseModule):
     >>> freq_shift = FrequencyShift(shift_hz=-20.0)
     """
 
-    SUPPORTED_BACKENDS = []  # Supports all backends
+    SUPPORTED_BACKENDS = tuple(Backend)
 
     def __init__(self, shift_hz: float = 0.0):
         """Initialize frequency shift module."""
-        super().__init__(shift_hz=shift_hz)
+        super().__init__()
 
         self.shift_hz = shift_hz
 
@@ -235,13 +236,13 @@ class FrequencyShift(BaseModule):
         """
         Apply frequency shift to tensor/array data (**any backend**).
 
-        Uses ``keras.ops`` — works with NumPy, PyTorch, JAX, or TensorFlow.
+        Uses "keras.ops" — works with NumPy, PyTorch, JAX, or TensorFlow.
 
         Args:
-            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            data_array: Input tensor of shape "(batch, ..., n_points)"
             water_array: Optional water reference tensor (unchanged)
             backend: Backend enum (unused — ops dispatch automatically)
-            **kwargs: Must contain ``'sw_hz'`` (spectral width in Hz)
+            **kwargs: Must contain "'sw_hz'" (spectral width in Hz)
 
         Returns:
             Tuple of (processed_data, water_array)

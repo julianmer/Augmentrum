@@ -253,7 +253,7 @@ class AugmentationPipeline:
 
                         # Ensure backend is a Backend enum
                         if isinstance(current_backend, str):
-                            from augmentrum.core.nifti_mrs_plus import Backend
+                            from nifti_mrs_plus import Backend
                             current_backend = Backend[current_backend.upper()]
 
                         if not step.supports_backend(current_backend):
@@ -285,7 +285,7 @@ class AugmentationPipeline:
 
                     # Ensure backend is a Backend enum
                     if isinstance(current_backend, str):
-                        from augmentrum.core.nifti_mrs_plus import Backend
+                        from nifti_mrs_plus import Backend
                         current_backend = Backend[current_backend.upper()]
 
                     if not step.supports_backend(current_backend):

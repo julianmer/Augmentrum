@@ -7,7 +7,7 @@ import numpy as np
 from augmentrum.augmentation.residual_water import ResidualWater
 from augmentrum.augmentation.spurious_echoes import SpuriousEchoes
 from augmentrum.augmentation.artificial_peaks import ArtificialPeaks
-from augmentrum.core.nifti_mrs_plus import NIfTI_MRS_Plus, Backend
+from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 
 
 #**************************************************************************************************#

@@ -46,38 +46,38 @@ class MRSIChallengeDataModule:
 
     Signal components
     -----------------
-    ``xtMeta``       metabolites only, noiseless — the ``signal='clean'`` default
-    ``xtNuisance``   residual water + lipid, summed (not separable)
-    ``xtAll``        the composite: metabolites + macromolecules + baseline
+    "xtMeta"       metabolites only, noiseless — the "signal='clean'" default
+    "xtNuisance"   residual water + lipid, summed (not separable)
+    "xtAll"        the composite: metabolites + macromolecules + baseline
                      + nuisance + noise
 
-    **Macromolecules are not inside** ``xtMeta``. The release keeps them in a
-    separate ``xtMM`` array, and that array ships only with the *test* ground-truth
+    **Macromolecules are not inside** "xtMeta". The release keeps them in a
+    separate "xtMM" array, and that array ships only with the *test* ground-truth
     files — the 24 training subjects do not carry it at all. For those, the only
-    handle on the macromolecular signal is ``xtAll - xtMeta - xtNuisance``, which
+    handle on the macromolecular signal is "xtAll - xtMeta - xtNuisance", which
     is MM *plus* baseline *plus* noise and cannot be separated further.
 
     So there is no "metabolites + macromolecules, nothing else" option for
     training. The two usable positions are:
 
-    * ``signal='clean'`` — metabolites alone, noiseless. Nothing to unpick, and
+    * "signal='clean'" — metabolites alone, noiseless. Nothing to unpick, and
       the macromolecular baseline and noise come from Augmentrum instead, where
       they are parameterised and reproducible.
-    * ``signal='nuisance_free'`` (``xtAll - xtNuisance``) — metabolites,
+    * "signal='nuisance_free'" ("xtAll - xtNuisance") — metabolites,
       macromolecules, baseline and the challenge's own noise. This is the input
       the organisers recommend for the quantification-only sub-challenge, but
       anything Augmentrum adds then stacks on top of noise that is already there.
 
     Splits
     ------
-    Training subjects are ``Sub1..Sub24``. The two test sets are the challenge's
+    Training subjects are "Sub1..Sub24". The two test sets are the challenge's
     own held-out subjects and are pinned, never sampled:
 
     ==============  ======================  ==============================
     split           subjects                task
     ==============  ======================  ==============================
-    ``test_track1`` ``TestSub1..TestSub5``  nuisance removal + quantification
-    ``test_track2`` ``TestSub10..TestSub12`` quantification only (no nuisance)
+    "test_track1" "TestSub1..TestSub5"  nuisance removal + quantification
+    "test_track2" "TestSub10..TestSub12" quantification only (no nuisance)
     ==============  ======================  ==============================
 
     For the test subjects the clean components live in the withheld ground-truth
@@ -85,16 +85,16 @@ class MRSIChallengeDataModule:
 
     Layout on disk
     --------------
-    ``<data_dir>/`` must contain ``contest_data/``, ``testing_data/``,
-    ``testing_data_2/`` and, for anything other than ``signal='composite'`` on the
-    test sets, ``testing_data_ground_truth/`` and ``testIng_data_2_ground_truth/``
+    "<data_dir>/" must contain "contest_data/", "testing_data/",
+    "testing_data_2/" and, for anything other than "signal='composite'" on the
+    test sets, "testing_data_ground_truth/" and "testIng_data_2_ground_truth/"
     (the capital I in that last name is the organisers', not a typo here).
 
     Caching
     -------
-    Every ``.mat`` is a 2.2 GB MATLAB v7.3 (HDF5) file. The requested component is
+    Every ".mat" is a 2.2 GB MATLAB v7.3 (HDF5) file. The requested component is
     extracted once and cached as an **uncompressed** NIfTI-MRS file, which
-    ``read_FID`` then memory-maps: 32 full volumes cost ~0 RAM until a batch
+    "read_FID" then memory-maps: 32 full volumes cost ~0 RAM until a batch
     actually touches them. Loading them eagerly instead would be ~13 GB.
 
     Examples
@@ -106,13 +106,13 @@ class MRSIChallengeDataModule:
     """
 
     #: The one quantity no released file records. Every NIfTI carries a 10000 mm
-    #: placeholder in ``pixdim`` and an identity-scaled sform, and the ``.mat``
+    #: placeholder in "pixdim" and an identity-scaled sform, and the ".mat"
     #: has no voxel size at all, so this is derived from the FOV quoted in the
     #: dataset description (179.2 x 224.0 x 128.0 mm over a 64 x 64 x 32 matrix).
     VOXEL_MM = (2.8, 3.5, 4.0)
 
-    #: Fallbacks, used only when a file does not record the value. The ``.mat``
-    #: stores ``hzpppm`` and ``ppmoff`` exactly and its ``t`` vector gives both
+    #: Fallbacks, used only when a file does not record the value. The ".mat"
+    #: stores "hzpppm" and "ppmoff" exactly and its "t" vector gives both
     #: dwell time and echo time, so on that path nothing here is consulted. The
     #: NIfTI path needs them: those headers round the centre frequency to 127.73
     #: and omit the ppm offset entirely.
@@ -160,32 +160,32 @@ class MRSIChallengeDataModule:
                  dtype: Any = np.complex64):
         """
         data_dir: root of the challenge release.
-        signal: which component to load — see ``SIGNALS``.
-        source: where to read the spectral data from — ``'mat'`` (default),
-                ``'nifti'``, or ``'auto'`` (NIfTI where shipped, else .mat).
+        signal: which component to load — see "SIGNALS".
+        source: where to read the spectral data from — "'mat'" (default),
+                "'nifti'", or "'auto'" (NIfTI where shipped, else .mat).
 
                 **The .mat is the default because the two sources do not agree.**
                 The release ships each component twice, and for training subjects
-                the NIfTI files carry a ``_v2`` suffix and are ~6 weeks newer than
-                the ``.mat``. Their composites match closely (complex correlation
+                the NIfTI files carry a "_v2" suffix and are ~6 weeks newer than
+                the ".mat". Their composites match closely (complex correlation
                 0.98 on a test voxel), but the *metabolite* components do not
                 (0.19): same peaks in the magnitude spectrum, different phase, and
-                a ~5% amplitude difference. Only the ``.mat`` is internally
+                a ~5% amplitude difference. Only the ".mat" is internally
                 self-consistent — every component comes from one generation run,
-                so ``xtAll - xtNuisance`` and ``xtMeta`` refer to the same signal.
+                so "xtAll - xtNuisance" and "xtMeta" refer to the same signal.
                 Mixing sources would silently break that.
 
                 The NIfTI files are also stored **conjugated** relative to the
-                ``.mat`` (this loader undoes that, so both give the same
-                convention), and they carry no usable geometry: ``pixdim`` is a
-                10000 mm placeholder and ``SpectrometerFrequency`` is rounded to
+                ".mat" (this loader undoes that, so both give the same
+                convention), and they carry no usable geometry: "pixdim" is a
+                10000 mm placeholder and "SpectrometerFrequency" is rounded to
                 127.73, losing four decimals. Geometry comes from the class
                 constants either way.
 
                 Test subjects ship only the composite as NIfTI, so anything else
-                there comes from the withheld ground-truth ``.mat`` regardless.
+                there comes from the withheld ground-truth ".mat" regardless.
         cache_dir: where extracted volumes are cached. Defaults to
-                ``<data_dir>/_augmentrum_cache``.
+                "<data_dir>/_augmentrum_cache".
         use_cache: set False to always re-read the source files.
         dtype: complex dtype for the cached volumes. complex64 halves both the
                 cache size and the per-batch memory at no meaningful precision
@@ -230,7 +230,7 @@ class MRSIChallengeDataModule:
         Locate the .mat file holding *subject*.
 
         Test subjects appear twice in the release: the participant file, which has
-        only the composite ``xtAll``, and the withheld ground-truth file, which has
+        only the composite "xtAll", and the withheld ground-truth file, which has
         the separated components. *need_truth* selects between them.
         """
         if subject in self.TRAIN_SUBJECTS:
@@ -280,18 +280,18 @@ class MRSIChallengeDataModule:
         """
         Read the acquisition parameters for *subject* from the data itself.
 
-        The ``.mat`` records everything except voxel size: ``hzpppm`` is the exact
-        centre frequency, ``ppmoff`` the chemical-shift reference, and the ``t``
+        The ".mat" records everything except voxel size: "hzpppm" is the exact
+        centre frequency, "ppmoff" the chemical-shift reference, and the "t"
         vector gives both the dwell time (its spacing) and the echo time (its
         first sample — acquisition starts at TE, not at zero). Reading them beats
         hard-coding, which is how a loader ends up silently describing a different
         acquisition than the one it loaded.
 
-        Falls back to the ``DEFAULT_*`` constants only for values a given source
+        Falls back to the "DEFAULT_*" constants only for values a given source
         genuinely does not carry.
 
-        Returns a dict with ``spectrometer_frequency_mhz``, ``ppm_offset``,
-        ``dwell_time_s``, ``echo_time_s`` and ``n_points``.
+        Returns a dict with "spectrometer_frequency_mhz", "ppm_offset",
+        "dwell_time_s", "echo_time_s" and "n_points".
         """
         acq = {
             'spectrometer_frequency_mhz': self.DEFAULT_SPECTROMETER_FREQUENCY_MHZ,
@@ -346,7 +346,7 @@ class MRSIChallengeDataModule:
         Paths to the NIfTI-MRS files making up the configured signal, or None if
         this subject does not ship them (every test subject except the composite).
 
-        Training subjects carry a ``_v2`` suffix that the test subjects lack.
+        Training subjects carry a "_v2" suffix that the test subjects lack.
         """
         suffixes = self.NIFTI_SIGNALS.get(self.signal)
         if suffixes is None:
@@ -382,7 +382,7 @@ class MRSIChallengeDataModule:
         """
         Read the configured signal component for *subject* as (X, Y, Z, T).
 
-        Honours ``source``: NIfTI when available and permitted, otherwise the .mat.
+        Honours "source": NIfTI when available and permitted, otherwise the .mat.
         """
         if self.source in ('auto', 'nifti'):
             paths = self.nifti_paths(subject)
@@ -420,7 +420,7 @@ class MRSIChallengeDataModule:
         reference and — where available — the ground-truth metabolite amplitudes.
 
         All are returned in (X, Y, Z) order to match the spectral volumes.
-        ``metaMap`` gains a trailing metabolite axis: (X, Y, Z, n_metabolites).
+        "metaMap" gains a trailing metabolite axis: (X, Y, Z, n_metabolites).
         """
         import h5py
 
@@ -452,12 +452,12 @@ class MRSIChallengeDataModule:
         size and the full-precision centre frequency, so downstream consumers can
         read geometry off the object instead of being told it separately.
 
-        ``no_conj=False`` stores the FIDs exactly as released, which is the
-        orientation FSL-MRS expects. Note the flag reads backwards: ``no_conj=True``
+        "no_conj=False" stores the FIDs exactly as released, which is the
+        orientation FSL-MRS expects. Note the flag reads backwards: "no_conj=True"
         *applies* a conjugation. Both released sources already store FIDs such
-        that ``fft`` gives a correctly ordered spectrum, and ``FIDToSpec`` — the
-        transform behind ``MRS.get_spec()``, ``NIfTI_MRS_Plus.plot`` and the
-        spectral augmentations — uses ``fft``. Conjugating here would mirror the
+        that "fft" gives a correctly ordered spectrum, and "FIDToSpec" — the
+        transform behind "MRS.get_spec()", "NIfTI_MRS_Plus.plot" and the
+        spectral augmentations — uses "fft". Conjugating here would mirror the
         axis and put NAA at 7.3 ppm instead of 2.008 for every one of them.
         """
         from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
@@ -483,7 +483,7 @@ class MRSIChallengeDataModule:
         """
         Return one subject as a NIfTI-MRS object, using the cache when possible.
 
-        The cache is written uncompressed so ``read_FID`` can memory-map it; a
+        The cache is written uncompressed so "read_FID" can memory-map it; a
         gzipped file would have to be inflated into RAM in full.
         """
         from fsl_mrs.utils import mrs_io
@@ -512,7 +512,7 @@ class MRSIChallengeDataModule:
             with_aux: also read the auxiliary maps (brain mask, B0, metaMap).
 
         Returns:
-            (nifti_list, subject_names, aux_list). ``aux_list`` is a list of empty
+            (nifti_list, subject_names, aux_list). "aux_list" is a list of empty
             dicts when *with_aux* is False.
         """
         names = list(self.subjects(split))
@@ -536,8 +536,8 @@ class MRSIChallengeDataModule:
         """
         Chemical-shift axis for this dataset, in ppm.
 
-        Uses the release convention ``ppm = f / hzpppm + ppmoff``, with both
-        constants read from the data by :meth:`read_acquisition` unless overridden
+        Uses the release convention "ppm = f / hzpppm + ppmoff", with both
+        constants read from the data by "read_acquisition" unless overridden
         here. Note the shipped example scripts use 123.23 and 4.7, which belong to
         an older example dataset and put NAA visibly off its 2.008 ppm position on
         the release data.
@@ -555,10 +555,10 @@ class MRSIChallengeDataModule:
                     dwell_time: Optional[float] = None,
                     echo_time: Optional[float] = None) -> np.ndarray:
         """
-        Transform FIDs to spectra on the axis returned by :meth:`ppm_axis`.
+        Transform FIDs to spectra on the axis returned by "ppm_axis".
 
-        Uses ``fft``, matching FSL-MRS's ``FIDToSpec`` so that this helper and
-        ``MRS.get_spec()`` agree on the same data. Swapping in ``ifft`` mirrors
+        Uses "fft", matching FSL-MRS's "FIDToSpec" so that this helper and
+        "MRS.get_spec()" agree on the same data. Swapping in "ifft" mirrors
         the axis and lands NAA at 7.3 ppm instead of 2.008.
 
         Also applies the first-order phase for the echo time, without which the
@@ -597,7 +597,7 @@ def MRSIChallengeData(data_dir: str,
                       with_aux: bool = False,
                       **kwargs) -> Augmentrum:
     """
-    Load the MRSI Challenge into an :class:`~augmentrum.core.augmentrum.Augmentrum`.
+    Load the MRSI Challenge into an "~augmentrum.core.augmentrum.Augmentrum".
 
     Train and validation are carved out of the 24 contest subjects; both test sets
     are the challenge's own held-out subjects and are pinned by index rather than
@@ -605,7 +605,7 @@ def MRSIChallengeData(data_dir: str,
 
     Args:
         data_dir: root of the challenge release.
-        signal: which component to load (see :class:`MRSIChallengeDataModule`).
+        signal: which component to load (see "MRSIChallengeDataModule").
                 Defaults to the clean, noiseless metabolite signal.
         n_train: total contest subjects to use, train + val. None uses all 24.
         n_val: how many of those are held out for validation.
@@ -622,9 +622,9 @@ def MRSIChallengeData(data_dir: str,
                 undersampling and noise at fixed parameters, and leaves both test
                 sets untouched.
         with_aux: attach the per-subject brain mask, B0 map and metabolite maps to
-                the returned object as ``.aux`` (a dict keyed by split).
+                the returned object as ".aux" (a dict keyed by split).
         **kwargs: module parameters forwarded to Augmentrum, e.g.
-                ``acceleration_factor=(2.0, 6.0)`` or ``sigma=1e-3``.
+                "acceleration_factor=(2.0, 6.0)" or "sigma=1e-3".
 
     Returns:
         Augmentrum with splits 'train', 'val', 'test_track1' and 'test_track2'.

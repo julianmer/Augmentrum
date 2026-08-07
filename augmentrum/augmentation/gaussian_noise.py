@@ -18,7 +18,7 @@ import numpy as np
 from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
-from augmentrum.utils.tensor_ops import to_numpy, match_backend, is_torch, is_jax, is_tf
+from nifti_mrs_plus import Backend, ops
 
 
 #**************************************************************************************************#
@@ -32,7 +32,7 @@ class GaussianNoise(BaseModule):
     """
     Add uncorrelated complex Gaussian noise (AWGN) to MRS data.
 
-    **Backend-agnostic** (zea pattern): ``process_tensor`` works transparently
+    **Backend-agnostic** (zea pattern): "process_tensor" works transparently
     with NumPy, PyTorch, JAX, or TensorFlow tensors.
 
     Parameters
@@ -48,16 +48,16 @@ class GaussianNoise(BaseModule):
     seed : int, optional
         Random seed for reproducibility
     global_scale : bool, default False
-        Controls how the reference statistic for ``snr`` / ``snr_db`` /
-        ``sigma_frac`` is reduced.  ``False`` (default) measures it **per FID
-        trace**, which is the right thing for SVS.  ``True`` measures a single
+        Controls how the reference statistic for "snr" / "snr_db" /
+        "sigma_frac" is reduced.  "False" (default) measures it **per FID
+        trace**, which is the right thing for SVS.  "True" measures a single
         statistic **per batch element**, reduced over every other axis.
 
-        Use ``global_scale=True`` for MRSI.  A per-trace statistic on a
-        ``(B, X, Y, Z, T)`` volume gives every voxel its own sigma, so
+        Use "global_scale=True" for MRSI.  A per-trace statistic on a
+        "(B, X, Y, Z, T)" volume gives every voxel its own sigma, so
         background voxels (whose signal power is ~0) receive almost no noise
         while brain voxels receive plenty.  The resulting noise field traces the
-        anatomy and hands a network a free brain mask.  ``sigma`` is an absolute
+        anatomy and hands a network a free brain mask.  "sigma" is an absolute
         scale and is unaffected by this flag.
 
     Notes
@@ -74,7 +74,7 @@ class GaussianNoise(BaseModule):
     >>> noise = GaussianNoise(sigma_frac=0.02, global_scale=True)  # MRSI volumes
     """
 
-    SUPPORTED_BACKENDS = []  # Supports all backends
+    SUPPORTED_BACKENDS = tuple(Backend)
 
     def __init__(self,
                  snr: Optional[float] = None,
@@ -83,8 +83,7 @@ class GaussianNoise(BaseModule):
                  sigma_frac: Optional[float] = None,
                  seed: Optional[int] = None,
                  global_scale: bool = False):
-        super().__init__(snr=snr, snr_db=snr_db, sigma=sigma, sigma_frac=sigma_frac,
-                         seed=seed, global_scale=global_scale)
+        super().__init__()
 
         self.snr = snr
         self.snr_db = snr_db
@@ -115,18 +114,16 @@ class GaussianNoise(BaseModule):
         """
         Add Gaussian noise to tensor/array data (**any backend, natively**).
 
-        Scale statistics (sigma_frac / snr modes) are measured with a tiny
-        ``to_numpy`` scalar reduction.  Noise is then **generated in the
-        native framework's own RNG** — ``torch.randn`` for PyTorch,
-        ``jax.random.normal`` for JAX, ``tf.random.normal`` for TF/Keras,
-        or ``numpy`` as the universal fallback.  This keeps gradients intact
-        and avoids the old "numpy noise → match_backend" workaround that
-        broke under JIT tracing.
+        Both the scale statistics and the noise itself are computed on the
+        tensor's own backend, so the data is never converted and the noise is
+        created directly on its device. Randomness comes from
+        "nifti_mrs_plus.ops.SeedGenerator": a seeded run is reproducible while
+        still drawing fresh noise for every batch.
 
         Args:
-            data_array: Input tensor of shape ``(batch, ..., n_points)``
+            data_array: Input tensor of shape "(batch, ..., n_points)"
             water_array: Optional water reference tensor (unchanged)
-            backend: Backend enum (unused — ops dispatch automatically)
+            backend: Backend enum (unused — ops dispatch on the tensor)
 
         Returns:
             Tuple of (noisy_data, water_array)
@@ -134,78 +131,41 @@ class GaussianNoise(BaseModule):
         original_shape = tuple(data_array.shape)
         ndim = len(original_shape)
 
-        # ── Step 1: compute noise scale (small scalar reduction → numpy OK) ──
-        # `keepdims=True` throughout, so scale_np always broadcasts against
+        # ── Step 1: noise scale, on the data's own backend ────────────────────
+        # `keepdims=True` throughout, so scale always broadcasts against
         # original_shape without any further reshaping.  Reducing to a flat
         # (n_batch, 1) and reshaping only broadcasts correctly when every axis
         # between the batch and the points axis is singleton — true for SVS
         # (B, 1, 1, 1, N), false for MRSI (B, X, Y, Z, T).
+        magnitude = ops.abs(data_array)
+
         if self.sigma is not None:
-            # Fixed sigma — no data stats needed at all
-            scale_np = np.full((1,) * ndim, float(self.sigma), dtype=np.float64)
+            # Fixed sigma — no data stats needed, but still built on this
+            # backend so the multiply below never crosses frameworks.
+            scale = ops.cast_like(magnitude * 0.0 + float(self.sigma), magnitude)
         else:
-            arr_np = to_numpy(data_array)
             # global_scale: one statistic per batch element; otherwise per trace.
             red_axes = tuple(range(1, ndim)) if self.global_scale else (ndim - 1,)
 
             if self.sigma_frac is not None:
-                peak = np.max(np.abs(arr_np), axis=red_axes, keepdims=True)
-                peak = np.where(peak > 0, peak, 1.0)
-                scale_np = self.sigma_frac * peak
+                peak = ops.amax(magnitude, axis=red_axes, keepdims=True)
+                peak = ops.where(peak > 0, peak, ops.cast_like(peak * 0.0 + 1.0, peak))
+                scale = self.sigma_frac * peak
             else:
-                sig_pow = np.mean(np.abs(arr_np) ** 2, axis=red_axes, keepdims=True) + 1e-16
+                sig_pow = ops.mean(magnitude ** 2, axis=red_axes, keepdims=True) + 1e-16
                 if self.snr is not None:
                     noise_pow = sig_pow / float(self.snr)
                 else:
                     noise_pow = sig_pow / (10.0 ** (float(self.snr_db) / 10.0))
-                scale_np = np.sqrt(noise_pow / 2.0)  # per-channel std
+                scale = ops.sqrt(noise_pow / 2.0)  # per-channel std
 
-        # ── Step 2: generate noise in the native framework ────────────────────
-        if is_torch(data_array):
-            import torch
-            gen = torch.Generator(device=data_array.device)
-            if self.seed is not None:
-                gen.manual_seed(self.seed)
-            # Determine real dtype for noise
-            if data_array.is_complex():
-                rdtype = data_array.real.dtype
-            else:
-                rdtype = data_array.dtype
-            scale_t = torch.as_tensor(scale_np, device=data_array.device, dtype=rdtype)
-            r = torch.randn(*original_shape, generator=gen, device=data_array.device, dtype=rdtype)
-            i_ = torch.randn(*original_shape, generator=gen, device=data_array.device, dtype=rdtype)
-            noise = torch.complex(r, i_) * scale_t
-            return data_array + noise, water_array
+        # ── Step 2: noise, on the data's own backend and device ───────────────
+        real = self.rng.normal(original_shape, like=magnitude)
+        imag = self.rng.normal(original_shape, like=magnitude)
+        noise = ops.complex_from(real * ops.cast_like(scale, real),
+                                 imag * ops.cast_like(scale, imag))
 
-        elif is_jax(data_array):
-            import jax
-            import jax.numpy as jnp
-            seed = self.seed if self.seed is not None else 0
-            key = jax.random.PRNGKey(seed)
-            k1, k2 = jax.random.split(key)
-            r = jax.random.normal(k1, shape=original_shape, dtype=jnp.float32)
-            i_ = jax.random.normal(k2, shape=original_shape, dtype=jnp.float32)
-            scale_j = jnp.array(scale_np, dtype=jnp.float32)
-            noise = (r + 1j * i_).astype(jnp.complex64) * scale_j
-            return data_array + noise, water_array
-
-        elif is_tf(data_array):
-            import tensorflow as tf
-            if self.seed is not None:
-                tf.random.set_seed(self.seed)
-            r = tf.random.normal(original_shape, dtype=tf.float32)
-            i_ = tf.random.normal(original_shape, dtype=tf.float32)
-            scale_t = tf.constant(scale_np, dtype=tf.float32)
-            noise = tf.complex(r * scale_t, i_ * scale_t)
-            return data_array + noise, water_array
-
-        else:
-            # NumPy and any other framework (e.g. Keras-native): numpy noise + match_backend
-            rng = np.random.default_rng(self.seed)
-            r = rng.normal(0.0, 1.0, size=original_shape)
-            i_ = rng.normal(0.0, 1.0, size=original_shape)
-            noise = (r + 1j * i_) * scale_np
-            return data_array + match_backend(noise, data_array), water_array
+        return data_array + ops.cast_like(noise, data_array), water_array
 
     #********************************************************************#
     #   pure-numpy path for process_nifti_list (input is always numpy)   #
@@ -213,7 +173,9 @@ class GaussianNoise(BaseModule):
 
     def _add_noise_numpy(self, fid: np.ndarray) -> np.ndarray:
         """Add Gaussian noise to numpy FID data."""
-        rng = np.random.default_rng(self.seed)
+        # Draw from the module's own stream, so this path matches the tensor
+        # path: it advances between calls and reproduces from the same seed.
+        rng = self.rng.numpy_rng()
 
         original_shape = fid.shape
         fid_flat = fid.reshape(-1, original_shape[-1])
