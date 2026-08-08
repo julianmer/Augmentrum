@@ -136,8 +136,11 @@ dmypy.json
 .DS_Store
 Thumbs.db
 
-# Data files (too large for git)
-data/
+# Data files (too large for git). "data/*" rather than "data/", because git
+# cannot re-include anything from an excluded directory - and the OpenNeuro
+# submodule below is declared in .gitmodules and has to stay tracked.
+data/*
+!data/openneuro_ds006812
 *.nii
 *.nii.gz
 *.mat

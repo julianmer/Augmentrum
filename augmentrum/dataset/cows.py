@@ -156,11 +156,18 @@ class COWSDataModule():
         return data, refs, MM_data, MM_refs, names
     def load_twix_data(self, file_path, remove_oversampling=True):
         from fsl_mrs.core.nifti_mrs import split
-        from spec2nii.Siemens.twixfunctions import process_twix
         from spec2nii.Siemens.twixfunctions import process_twix, examineTwix
         from augmentrum.processing.utils import safe_squeeze
 
-        # call mapvbvd to load the twix file.
+        try:
+            from mapvbvd import mapVBVD
+        except ImportError as error:
+            raise ImportError(
+                "Reading Siemens twix files needs mapvbvd. Install it with "
+                "\"pip install pymapvbvd\", or point this at data already "
+                "converted to NIfTI-MRS."
+            ) from error
+
         twixObj = mapVBVD(os.path.join(file_path), quiet=True)
         # examineTwix(twixObj, file, 0)
 
