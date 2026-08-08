@@ -120,11 +120,11 @@ DEFAULT_CONFIG = {
 # through-plane structure and every z-direction ablation is vacuous.
 #
 # SHEPP_LOGAN_3D is the Kak & Slaney extension: the same ten features as
-# ellipsoids, with z centres and a semi-axis c. The two tumours sit at z = 0.25
+# ellipsoids, with z centers and a semi-axis c. The two tumours sit at z = 0.25
 # and the upper inclusion at z = -0.15, so slices genuinely differ and flip z,
 # translate z and z-shear have something real to act on.
 #
-# Columns (2-D): x centre, y centre, a, b, rotation [deg]
+# Columns (2-D): x center, y center, a, b, rotation [deg]
 SHEPP_LOGAN_GEOMETRY = (
     ( 0.00,  0.0000, 0.6900, 0.920,   0.0),   # skull
     ( 0.00, -0.0184, 0.6624, 0.874,   0.0),   # brain
@@ -138,7 +138,7 @@ SHEPP_LOGAN_GEOMETRY = (
     ( 0.06, -0.6050, 0.0230, 0.046,   0.0),
 )
 
-# Columns (3-D): x centre, y centre, z centre, a, b, c, rotation about z [deg]
+# Columns (3-D): x center, y center, z center, a, b, c, rotation about z [deg]
 SHEPP_LOGAN_3D = (
     ( 0.00,  0.0000,  0.00, 0.6900, 0.920, 0.810,   0.0),   # skull
     ( 0.00, -0.0184,  0.00, 0.6624, 0.874, 0.780,   0.0),   # brain
@@ -180,10 +180,10 @@ def shepp_logan(size=128, n_slices=1, variant='modified', z_extent=0.8):
     Args:
         variant: 'modified' (default, Toft contrast — internal structure and the
                 two tumours are visible) or 'original' (Shepp & Logan's, whose
-                features are 1% steps and will not show on a linear grey scale
+                features are 1% steps and will not show on a linear gray scale
                 windowed to the skull).
         z_extent: the slab spans z in [-z_extent, +z_extent] of the phantom's
-                normalised height. The default 0.8 covers essentially the whole
+                normalized height. The default 0.8 covers essentially the whole
                 head (the brain ellipsoid has c = 0.78), so the stack is a real
                 volume rather than a thin slab. Resolving the tumours needs
                 enough slices: their semi-axis is c = 0.05, so slice spacing
@@ -219,9 +219,9 @@ def shepp_logan(size=128, n_slices=1, variant='modified', z_extent=0.8):
 
 def load_ge_phantom(phantom_dir, size=128, n_slices=8):
     """
-    Load the GE phantom and crop a centred slab to *size* x *size* x *n_slices*.
+    Load the GE phantom and crop a centered slab to *size* x *size* x *n_slices*.
 
-    The file is a 192 x 192 x 176 int16 magnitude volume, so it is normalised to
+    The file is a 192 x 192 x 176 int16 magnitude volume, so it is normalized to
     a unit peak to make the error metrics comparable with the Shepp-Logan.
     """
     import nibabel as nib
@@ -246,7 +246,7 @@ def load_bigbrain(path, size=128, n_slices=8):
     Load the BigBrainMR T1-weighted volume, block-averaged down to the matrix.
 
     Downsampled rather than cropped, unlike "load_ge_phantom". The volume
-    is 388 x 480 x 408 at 0.4 mm and the brain fills it, so a centred crop of
+    is 388 x 480 x 408 at 0.4 mm and the brain fills it, so a centered crop of
     128 voxels would return a 51 mm block of white matter instead of a head.
     Averaging whole blocks — as opposed to striding — is what keeps that
     downsampling from aliasing the cortical detail it is being kept for.
@@ -272,7 +272,7 @@ def load_bigbrain(path, size=128, n_slices=8):
 
     # Streamed in one sequential pass rather than sliced out of "dataobj".
     # The 100 um volume is 1550 x 1920 x 1630 — 4.85 G voxels, 19 GB as float32,
-    # so it cannot be materialised. Slicing it instead is worse: without
+    # so it cannot be materialized. Slicing it instead is worse: without
     # indexed_gzip every seek decompresses from the top of the file, and one
     # eight-slice read at z = 800 measured 27.7 s. Reading forward once and
     # folding each xy plane into its output slice as it arrives costs a single
@@ -309,8 +309,8 @@ def load_bigbrain(path, size=128, n_slices=8):
 #******************#
 # Appendix-figure conventions: no metrics printed on the panels (those live in
 # metrics.csv and belong in a table, not burned into a PNG), lower-case (a) (b)
-# panel letters so a caption can refer to them, no coloured chrome, and a
-# consistent grey ramp. Titles stay short enough to read at column width.
+# panel letters so a caption can refer to them, no colored chrome, and a
+# consistent gray ramp. Titles stay short enough to read at column width.
 def _bare_axes(ax):
     """Strip an image axis down to the image."""
     ax.set_xticks([])
@@ -340,7 +340,7 @@ def _save(fig, save_path, name, dpi=200, pdf_dpi=600):
 
 
 def nrmse(reference, test):
-    """Normalised RMSE in percent, relative to the reference's dynamic range."""
+    """Normalized RMSE in percent, relative to the reference's dynamic range."""
     reference, test = np.asarray(reference), np.asarray(test)
     denom = np.ptp(np.abs(reference))
     if denom == 0:
@@ -364,13 +364,13 @@ def ssim_like(reference, test):
 
 def _display_slice(vol):
     """
-    The centre slice. Nothing else.
+    The center slice. Nothing else.
 
     Every "smarter" pick tried here has misfired on real data: "most distinct
     intensity levels" landed on a noisy end slice, and the energy-argmax
     fallback chose whichever slice happened to be brightest — on the GE
     phantom, whose intensity ramps along z, that was again an end slice
-    instead of the structured middle. The centre is predictable, comparable
+    instead of the structured middle. The center is predictable, comparable
     across phantoms, and the full through-plane structure is in the slice
     montage figure anyway.
     """
@@ -763,13 +763,13 @@ def _nufft_available():
 
 def _retained_coords(shots, mask, meta):
     """
-    Retained samples as normalised "[1, 1, D, K]" coordinates in the unit box.
+    Retained samples as normalized "[1, 1, D, K]" coordinates in the unit box.
 
     Every retained shot is concatenated into a single readout. Shots are kept
     separate elsewhere because undersampling drops whole shots, but that has
     already happened by the time we get here, and trajectories like
     "concentric_rings_2d" give each shot a different length — a ring near the
-    centre needs fewer samples than one at the edge — so there is no rectangular
+    center needs fewer samples than one at the edge — so there is no rectangular
     "[S, L]" to stack them into. The NUFFT flattens the two axes anyway.
     """
     from augmentrum.sampling import KspaceReconstructor
@@ -778,7 +778,7 @@ def _retained_coords(shots, mask, meta):
     pts = np.concatenate([np.atleast_2d(np.asarray(shots[int(i)])) for i in keep])
     coords = torch.from_numpy(pts.T).float()[None, None]           # [1, 1, D, K]
     ndim = coords.shape[2]
-    return KspaceReconstructor.normalise_trajectory(coords, meta['kmax'][:ndim])
+    return KspaceReconstructor.normalize_trajectory(coords, meta['kmax'][:ndim])
 
 
 def _nearest_bin_recon(coords, kdata, n):
@@ -814,7 +814,7 @@ def _measure(image, coords, osf):
 
     Using the exact NUFFT rather than our own interpolator is deliberate — it
     keeps this an honest test of the RECONSTRUCTION, instead of folding the
-    interpolator's error into the measurement. The interpolator is characterised
+    interpolator's error into the measurement. The interpolator is characterized
     separately in "ablate_interpolator".
     """
     import torchkbnufft as tkbn
@@ -892,7 +892,7 @@ def ablate_nufft(vol, config):
 
         gridded = _ls_scale(gridded, img)
         nufft = _ls_scale(nufft, img)
-        pattern = coords[0, 0].numpy().T          # [K, D], normalised to the unit box
+        pattern = coords[0, 0].numpy().T          # [K, D], normalized to the unit box
         results.append((name, pattern, gridded, nufft,
                         dict(nrmse=nrmse(img, gridded), nrmse_nufft=nrmse(img, nufft),
                              corr=ssim_like(img, gridded), corr_nufft=ssim_like(img, nufft),
@@ -900,9 +900,9 @@ def ablate_nufft(vol, config):
     return results
 
 
-def ablate_interpolator(vol, config):
+def ablate_interpolator(vol, config, interpolator=None):
     """
-    How accurately the cubic interpolator resamples k-space, against oversampling.
+    How accurately an interpolator resamples k-space, against oversampling.
 
     The interpolator is the forward half of the pair, so its job is to read a
     gridded volume at off-grid trajectory positions. On a critically sampled
@@ -912,11 +912,17 @@ def ablate_interpolator(vol, config):
     the image and the same interpolator converges quickly, so the sweep below is
     really a statement about how much oversampling the kernel needs.
 
+    Args:
+        interpolator: Any :class:"Interpolator"; bicubic Hermite by default.
+
     Returns [(oversampling, relative_error)].
     """
     import torchkbnufft as tkbn
+    from nifti_mrs_plus import ops
     from augmentrum.processing import BicubicHermiteMAkima2D
     from augmentrum.sampling import KspaceReconstructor, TrajectoryRegistry
+
+    interpolator = interpolator or BicubicHermiteMAkima2D()
 
     mid = _display_slice(vol)
     img = np.abs(vol[:, :, mid]).astype(np.float32)
@@ -929,7 +935,7 @@ def ablate_interpolator(vol, config):
     shots, meta = TrajectoryRegistry.generate('radial_2d', header,
                                               {'n_shots': 201})
     coords = _retained_coords(shots, np.ones(len(shots), bool), meta)
-    exact = _measure(img, coords, float(config['nufft_osf']))
+    exact = ops.to_numpy(_measure(img, coords, float(config['nufft_osf'])))
 
     rows = []
     for osf in config['interp_osf']:
@@ -939,13 +945,15 @@ def ablate_interpolator(vol, config):
         padded[pad:pad + n, pad:pad + n] = img
         kgrid = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(padded))).astype(np.complex64)
 
-        # Normalised k in [-1, 1] spans +-kmax. On the padded grid the bin
+        # Normalized k in [-1, 1] spans +-kmax. On the padded grid the bin
         # spacing shrinks by osf, so that half-extent is m/2 bins, not n/2 —
         # and the interpolator's own axis runs over m points, hence the (m - 1).
         axis = 2.0 * (coords * (m / 2.0) + m / 2.0) / (m - 1.0) - 1.0
-        got = BicubicHermiteMAkima2D(torch.from_numpy(kgrid)[None, None])(axis)
-        got = got.reshape(exact.shape)
-        rows.append((osf, float((got - exact).abs().mean() / exact.abs().mean())))
+
+        # the trajectory arrives as [ndim, K], the Interpolator contract wants [K, ndim]
+        pts = np.asarray(axis).reshape(len(kgrid.shape), -1).T
+        got = ops.to_numpy(interpolator.sample(kgrid[None], pts)).reshape(exact.shape)
+        rows.append((osf, float(np.abs(got - exact).mean() / np.abs(exact).mean())))
     return rows
 
 
@@ -966,7 +974,7 @@ def ablate_interpolator(vol, config):
 # at R = 6 alternates between 5 and 6, which shows up as visibly uneven spacing
 # in the sampling row and is a defect in the experiment, not just the picture.
 # Ordered by how far each departs from a Cartesian raster: straight lines, then
-# closed rings, then lines through the centre, then one continuous curve, then
+# closed rings, then lines through the center, then one continuous curve, then
 # overlapping petals. Reading left to right is reading up that progression.
 PANEL_2D = (
     ('cartesian_2d',        'cartesian',     {}),
@@ -1280,7 +1288,7 @@ def ablate_anisotropy(config):
 
       * corrected   -> it is a real rotation, the physical circle maps onto
                        itself, so the VOXEL aspect ratio is unchanged
-      * uncorrected -> the affine acts in per-axis normalised coordinates, so the
+      * uncorrected -> the affine acts in per-axis normalized coordinates, so the
                        ellipse's axes swap and the physical shape is destroyed
 
     So the metric is the aspect ratio, before and after.
@@ -1389,13 +1397,13 @@ def plot_trajectory_3d(entries, title, save_path, name, max_pts=6000):
         ax = fig.add_subplot(n_rows, n_cols, i + 1, projection='3d')
         c = np.asarray(coords, dtype=np.float64)
         # Deduplicate to one point per k-space bin: the figure is about which
-        # bins a trajectory covers, and without this a centre-out family
+        # bins a trajectory covers, and without this a center-out family
         # (spokes, cones) piles ~1/r^2 of its samples at k=0 and renders as a
         # blob with an invisible rim.
         if c.shape[0]:
             step = np.abs(c).max(axis=0)
             step[step == 0] = 1.0
-            # Normalised per-axis coordinates (k / k_max). In physical 1/m the
+            # Normalized per-axis coordinates (k / k_max). In physical 1/m the
             # anisotropic FOV squashes every panel into the same flat ellipsoid
             # (kz_max is 0.70 of kx_max here), which dominates the figure and
             # hides the between-trajectory differences it exists to show.
@@ -1494,17 +1502,17 @@ def plot_trajectory_ablation(results, title, save_path, name, reference=None):
 
 def _zoom_patch(pts, n_bins, radius=0.35, half_width=3.0):
     """
-    A small k-space window, in normalised units, that is guaranteed to hold samples.
+    A small k-space window, in normalized units, that is guaranteed to hold samples.
 
     Anchored on whichever sample sits closest to *radius* rather than on a fixed
-    location: a patch pinned near k=0 fills with the centre-out pile-up that every
-    trajectory shares, and a patch at a fixed off-centre spot misses concentric
+    location: a patch pinned near k=0 fills with the center-out pile-up that every
+    trajectory shares, and a patch at a fixed off-center spot misses concentric
     rings entirely whenever it lands between two rings.
     """
-    step = 2.0 / n_bins                                  # bin spacing, normalised
+    step = 2.0 / n_bins                                  # bin spacing, normalized
     r = np.hypot(pts[:, 0], pts[:, 1])
-    centre = pts[np.argmin(np.abs(r - radius))]
-    return centre, half_width * step
+    center = pts[np.argmin(np.abs(r - radius))]
+    return center, half_width * step
 
 
 def _draw_zoom_inset(ax, pts, n_bins):
@@ -1521,7 +1529,7 @@ def _draw_zoom_inset(ax, pts, n_bins):
     axins = ax.inset_axes([0.62, 0.62, 0.38, 0.38])
     step = 2.0 / n_bins
 
-    # Bin centres are at (2i - n)/n; draw the ones that fall inside the window.
+    # Bin centers are at (2i - n)/n; draw the ones that fall inside the window.
     lo_i = int(np.floor((cx - half + 1.0) * n_bins / 2.0))
     hi_i = int(np.ceil((cx + half + 1.0) * n_bins / 2.0))
     for i in range(lo_i, hi_i + 1):

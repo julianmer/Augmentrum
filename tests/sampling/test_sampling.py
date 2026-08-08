@@ -5,7 +5,7 @@ Tests for sampling modules.
 import pytest
 import numpy as np
 from augmentrum.sampling.subject_splitter import SubjectSplitter
-from augmentrum.sampling.coil_average_sampler import CoilAverageSampler
+from augmentrum.sampling.coil_sampling import CoilSampler
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 
 
@@ -380,49 +380,49 @@ class TestSubjectSplitterBackends:
 
 
 #**************************************************************************************************#
-#                               Class TestCoilAverageSamplerCreation                               #
+#                               Class TestCoilSamplerCreation                               #
 #**************************************************************************************************#
 #                                                                                                  #
-# Test CoilAverageSampler initialization.                                                          #
+# Test CoilSampler initialization.                                                          #
 #                                                                                                  #
 #**************************************************************************************************#
-class TestCoilAverageSamplerCreation:
-    """Test CoilAverageSampler initialization."""
+class TestCoilSamplerCreation:
+    """Test CoilSampler initialization."""
 
     def test_create_with_defaults(self):
         """Test creating sampler with defaults."""
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         assert sampler is not None
 
     def test_create_with_mode(self):
         """Test creating sampler with specific mode."""
-        sampler = CoilAverageSampler(mode='deterministic')
+        sampler = CoilSampler(mode='deterministic')
         assert sampler.mode == 'deterministic'
 
     def test_create_with_n_coils(self):
         """Test creating sampler with n_coils parameter."""
-        sampler = CoilAverageSampler(n_coils=(1, 4))
+        sampler = CoilSampler(mode='random', n_coils=(1, 4))
         assert sampler.n_coils == (1, 4)
 
     def test_supports_nifti_list_backend(self):
-        """Test that CoilAverageSampler supports NIFTI_LIST backend."""
-        sampler = CoilAverageSampler()
+        """Test that CoilSampler supports NIFTI_LIST backend."""
+        sampler = CoilSampler(mode='random')
         assert sampler.supports_backend(Backend.NIFTI_LIST)
 
 
 #**************************************************************************************************#
-#                              Class TestCoilAverageSamplerProcessing                              #
+#                              Class TestCoilSamplerProcessing                              #
 #**************************************************************************************************#
 #                                                                                                  #
-# Test CoilAverageSampler processing.                                                              #
+# Test CoilSampler processing.                                                              #
 #                                                                                                  #
 #**************************************************************************************************#
-class TestCoilAverageSamplerProcessing:
-    """Test CoilAverageSampler processing."""
+class TestCoilSamplerProcessing:
+    """Test CoilSampler processing."""
 
     def test_process_removes_coil_dimension(self, dummy_nifti_list):
         """Test that processing removes coil dimension."""
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         # Original should have coil dimension
@@ -436,7 +436,7 @@ class TestCoilAverageSamplerProcessing:
 
     def test_process_changes_data(self, dummy_nifti_list):
         """Test that averaging changes data."""
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         original_data = nifti_plus[0][:].copy()
@@ -447,7 +447,7 @@ class TestCoilAverageSamplerProcessing:
 
     def test_process_preserves_dtype(self, dummy_nifti_list):
         """Test that processing preserves complex dtype."""
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         result_data, _ = sampler(nifti_plus, None)
@@ -456,7 +456,7 @@ class TestCoilAverageSamplerProcessing:
 
     def test_process_all_subjects(self, dummy_nifti_list):
         """Test that all subjects are processed."""
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         result_data, _ = sampler(nifti_plus, None)
@@ -467,7 +467,7 @@ class TestCoilAverageSamplerProcessing:
     def test_process_with_water(self, dummy_nifti_list):
         """Test processing with water references."""
         from copy import deepcopy
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
         # Use COPIES and same length to avoid index errors
         water_niftis = [deepcopy(n) for n in dummy_nifti_list]
@@ -481,18 +481,18 @@ class TestCoilAverageSamplerProcessing:
 
 
 #**************************************************************************************************#
-#                                Class TestCoilAverageSamplerModes                                 #
+#                                Class TestCoilSamplerModes                                 #
 #**************************************************************************************************#
 #                                                                                                  #
 # Test different modes.                                                                            #
 #                                                                                                  #
 #**************************************************************************************************#
-class TestCoilAverageSamplerModes:
+class TestCoilSamplerModes:
     """Test different modes."""
 
     def test_random_mode(self, dummy_nifti_list):
         """Test random mode."""
-        sampler = CoilAverageSampler(mode='random')
+        sampler = CoilSampler(mode='random')
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
 
@@ -502,7 +502,7 @@ class TestCoilAverageSamplerModes:
     @pytest.mark.skip(reason="Deterministic mode requires coil_indices parameter")
     def test_deterministic_mode(self, dummy_nifti_list):
         """Test deterministic mode."""
-        sampler = CoilAverageSampler(mode='deterministic')
+        sampler = CoilSampler(mode='deterministic')
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         result_data, _ = sampler(nifti_plus, None)
@@ -510,7 +510,7 @@ class TestCoilAverageSamplerModes:
 
     def test_with_n_coils_range(self, dummy_nifti_list):
         """Test with n_coils range."""
-        sampler = CoilAverageSampler(n_coils=(2, 4))
+        sampler = CoilSampler(mode='random', n_coils=(2, 4))
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         result_data, _ = sampler(nifti_plus, None)
@@ -519,7 +519,7 @@ class TestCoilAverageSamplerModes:
     @pytest.mark.skip(reason="Reweighting not implemented yet")
     def test_with_reweight(self, dummy_nifti_list):
         """Test with reweight enabled."""
-        sampler = CoilAverageSampler(reweight=True)
+        sampler = CoilSampler(mode='random', reweight=True)
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         result_data, _ = sampler(nifti_plus, None)
@@ -527,20 +527,20 @@ class TestCoilAverageSamplerModes:
 
 
 #**************************************************************************************************#
-#                             Class TestCoilAverageSamplerIntegration                              #
+#                             Class TestCoilSamplerIntegration                              #
 #**************************************************************************************************#
 #                                                                                                  #
-# Integration tests for CoilAverageSampler.                                                        #
+# Integration tests for CoilSampler.                                                        #
 #                                                                                                  #
 #**************************************************************************************************#
-class TestCoilAverageSamplerIntegration:
-    """Integration tests for CoilAverageSampler."""
+class TestCoilSamplerIntegration:
+    """Integration tests for CoilSampler."""
 
     def test_in_pipeline(self, dummy_nifti_list):
-        """Test CoilAverageSampler in a pipeline."""
+        """Test CoilSampler in a pipeline."""
         from augmentrum.core.pipeline import AugmentationPipeline
 
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         pipeline = AugmentationPipeline([sampler])
 
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
@@ -553,7 +553,7 @@ class TestCoilAverageSamplerIntegration:
         from augmentrum.core.pipeline import AugmentationPipeline
         from augmentrum.augmentation.gaussian_noise import GaussianNoise
 
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         noise = GaussianNoise(sigma_frac=0.02)
         pipeline = AugmentationPipeline([sampler, noise])
 
@@ -564,37 +564,38 @@ class TestCoilAverageSamplerIntegration:
 
 
 #**************************************************************************************************#
-#                               Class TestCoilAverageSamplerBackends                               #
+#                               Class TestCoilSamplerBackends                               #
 #**************************************************************************************************#
 #                                                                                                  #
-# Test CoilAverageSampler with different backends.                                                 #
+# Test CoilSampler with different backends.                                                 #
 #                                                                                                  #
 #**************************************************************************************************#
-class TestCoilAverageSamplerBackends:
-    """Test CoilAverageSampler with different backends."""
+class TestCoilSamplerBackends:
+    """Test CoilSampler with different backends."""
 
     def test_supports_all_backends(self):
-        """Test that CoilAverageSampler can process data on all backends.
+        """Drawing is a gather along one axis, so it is native everywhere.
 
-        SUPPORTED_BACKENDS = [NIFTI_LIST] means it is natively implemented only
-        for NIFTI_LIST.  Other backends are handled by the base-class auto-routing
-        (~ in the README table), so supports_backend() correctly returns False for
-        them — but the sampler still *works* on them via the fallback path.
+        The NIfTI-list path is still implemented and still preferred for a
+        NIFTI_LIST input, because FSL-MRS carries the headers across properly
+        there. On a tensor it stays on the tensor, which is what keeps a
+        synthesize-then-draw pipeline differentiable.
         """
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
 
-        # Natively declared
-        assert sampler.supports_backend(Backend.NIFTI_LIST)
-        assert Backend.NIFTI_LIST in sampler.SUPPORTED_BACKENDS
+        for backend in Backend:
+            assert sampler.supports_backend(backend), backend
 
-        # Non-native backends are NOT in SUPPORTED_BACKENDS by design:
-        # the base class auto-routes them through process_nifti_list (~).
-        assert Backend.NUMPY   not in sampler.SUPPORTED_BACKENDS
-        assert Backend.PYTORCH not in sampler.SUPPORTED_BACKENDS
+    def test_synthesis_does_not_claim_the_nifti_list(self):
+        """A NIfTI list has no coil axis to write into, so synthesis routes."""
+        sampler = CoilSampler(mode='synthesize', n_coils=4)
+
+        assert not sampler.supports_backend(Backend.NIFTI_LIST)
+        assert sampler.supports_backend(Backend.PYTORCH)
 
     def test_process_with_nifti_list_backend(self, dummy_nifti_list):
         """Test processing with NIFTI_LIST backend (native)."""
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         result_data, _ = sampler(nifti_plus, None)
@@ -605,7 +606,7 @@ class TestCoilAverageSamplerBackends:
 
     def test_process_with_numpy_backend(self, dummy_nifti_list):
         """Test processing with NUMPY backend (auto-converts)."""
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NUMPY)
 
         result_data, _ = sampler(nifti_plus, None)
@@ -616,7 +617,7 @@ class TestCoilAverageSamplerBackends:
 
     def test_process_with_pytorch_backend(self, dummy_nifti_list):
         """Test processing with PYTORCH backend (auto-converts)."""
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.PYTORCH)
 
         result_data, _ = sampler(nifti_plus, None)
@@ -632,7 +633,7 @@ class TestCoilAverageSamplerBackends:
         except ImportError:
             pytest.skip("TensorFlow not installed")
 
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.TENSORFLOW)
 
         result_data, _ = sampler(nifti_plus, None)
@@ -648,7 +649,7 @@ class TestCoilAverageSamplerBackends:
         except ImportError:
             pytest.skip("Keras not installed")
 
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.KERAS)
 
         result_data, _ = sampler(nifti_plus, None)
@@ -664,7 +665,7 @@ class TestCoilAverageSamplerBackends:
         except ImportError:
             pytest.skip("JAX not installed")
 
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.JAX)
 
         result_data, _ = sampler(nifti_plus, None)
@@ -675,7 +676,7 @@ class TestCoilAverageSamplerBackends:
 
     def test_backend_conversion_preserves_data(self, dummy_nifti_list):
         """Test that backend conversion doesn't lose data."""
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
 
         # Process with NIFTI_LIST
         nifti_list_data = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
@@ -690,7 +691,7 @@ class TestCoilAverageSamplerBackends:
 
     def test_preserves_volatile_across_conversion(self, dummy_nifti_list):
         """Test that volatile setting is preserved through backend conversion."""
-        sampler = CoilAverageSampler()
+        sampler = CoilSampler(mode='random')
         nifti_plus = NIfTI_MRS_Plus(
             nifti_list=dummy_nifti_list,
             backend=Backend.PYTORCH,

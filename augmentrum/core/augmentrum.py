@@ -32,7 +32,8 @@ from augmentrum.sampling.subject_splitter import SubjectSplitter
 
 # Processing modules
 from augmentrum.processing.nifti_raw_processor import NIfTI_RawProcessor
-from augmentrum.sampling.coil_average_sampler import CoilAverageSampler
+from augmentrum.sampling.coil_sampling import CoilSampler
+from augmentrum.sampling.dimension_sampling import AverageSampler
 from augmentrum.sampling.kspace_sampling import KspaceUndersampling
 
 # Augmentation modules
@@ -158,8 +159,8 @@ class Augmentrum:
     # Available augmentation modules
     AVAILABLE_MODULES = {
         # Processing
-        'coil_sampling': CoilAverageSampler,
-        'average_sampling': CoilAverageSampler,
+        'coil_sampling': CoilSampler,
+        'average_sampling': AverageSampler,
         'processing': NIfTI_RawProcessor,
 
         # Noise
@@ -844,7 +845,8 @@ class Augmentrum:
     def _get_module_emoji(self, name: str) -> str:
         """Get emoji for module type."""
         emoji_map = {
-            'CoilAverageSampler': '📡',
+            'CoilSampler': '📡',
+            'AverageSampler': '🔁',
             'NIfTI_RawProcessor': '⚙️',
             'GaussianNoise': '🔊',
             'LineBroadening': '〰️',

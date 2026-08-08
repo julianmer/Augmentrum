@@ -9,7 +9,7 @@
 #                                                                                                  #
 # Purpose: Non-Cartesian k-space reconstruction. Holds the gridding NUFFT itself - forward,        #
 #          adjoint and density compensation - and the batched adapter that drives it from the      #
-#          shot-organised layout the pipeline uses. Backend-agnostic throughout; the grid is       #
+#          shot-organized layout the pipeline uses. Backend-agnostic throughout; the grid is       #
 #          read by an interpolator from processing.interpolating.                                  #
 #                                                                                                  #
 ####################################################################################################
@@ -24,7 +24,7 @@ import numpy as np
 
 from nifti_mrs_plus import ops
 from augmentrum.processing.interpolating import (
-    Interpolator, KaiserBesselInterpolator, kaiser_bessel_deapodization,
+    GriddingKernel, Interpolator, KaiserBesselInterpolator,
 )
 from typing import Any, Optional, Sequence, Tuple, Union
 
@@ -62,7 +62,7 @@ class GriddingNUFFT:
     Both directions are a gather or scatter against the kernel, so they run
     wherever "nifti_mrs_plus.ops" runs and gradients reach the data.
 
-    Trajectory coordinates are normalised to [-0.5, 0.5) per axis, the
+    Trajectory coordinates are normalized to [-0.5, 0.5) per axis, the
     convention that maps directly onto grid bins.
 
     Args:
@@ -93,22 +93,10 @@ class GriddingNUFFT:
             self.grid_size, osf=self.osf, width=self.width)
 
         # Gridding tapers the image by the kernel's transform. Only a kernel
-        # that tapers needs undoing, so this is asked of the interpolator rather
-        # than assumed.
-        self._deapod = self._build_deapodization()
-
-    def _build_deapodization(self) -> Optional[np.ndarray]:
-        """The image-domain correction for this interpolator's kernel, or None."""
-        if not isinstance(self.interpolator, KaiserBesselInterpolator):
-            return None
-
-        factors = [kaiser_bessel_deapodization(n, g, self.interpolator.width,
-                                               self.interpolator.beta)
-                   for n, g in zip(self.im_size, self.grid_size)]
-        deapod = factors[0]
-        for f in factors[1:]:
-            deapod = np.multiply.outer(deapod, f)
-        return deapod.astype(np.float32)
+        # that tapers knows how to undo it, so this is asked of the interpolator
+        # rather than assumed.
+        self._deapod = (self.interpolator.deapodization(self.im_size)
+                        if isinstance(self.interpolator, GriddingKernel) else None)
 
     #***************#
     #   adjoint     #
@@ -125,10 +113,10 @@ class GriddingNUFFT:
         Returns:
             Image "[C, *im_size]" on kdata's backend.
         """
-        if not hasattr(self.interpolator, "spread"):
+        if not isinstance(self.interpolator, GriddingKernel):
             raise TypeError(
                 f"{type(self.interpolator).__name__} can read the grid but not write to "
-                f"it, so it cannot run the adjoint. Use KaiserBesselInterpolator."
+                f"it, so it cannot run the adjoint. Use a GriddingKernel."
             )
 
         grid = self.interpolator.spread(kdata, np.asarray(coords))
@@ -169,12 +157,12 @@ class GriddingNUFFT:
         """
         Coordinates in the convention this object's interpolator expects.
 
-        Kaiser-Bessel addresses grid bins directly and so takes [-0.5, 0.5);
+        A gridding kernel addresses grid bins directly and so takes [-0.5, 0.5);
         every other interpolator works in the [-1, 1] box that
         :class:"Interpolator" specifies.
         """
         coords = np.asarray(coords)
-        if isinstance(self.interpolator, KaiserBesselInterpolator):
+        if isinstance(self.interpolator, GriddingKernel):
             return coords
         return 2.0 * coords
 
@@ -190,7 +178,7 @@ class GriddingNUFFT:
         return image / deapod
 
     def _pad(self, image, grid_n=None):
-        """Centre-pad the image up to *grid_n*, or to this object's grid."""
+        """Center-pad the image up to *grid_n*, or to this object's grid."""
         grid_n = self.grid_size if grid_n is None else grid_n
         out = image
         for d, (n, g) in enumerate(zip(self.im_size, grid_n)):
@@ -203,7 +191,7 @@ class GriddingNUFFT:
         return out
 
     def _crop(self, grid):
-        """Centre-crop the oversampled grid back to the image matrix."""
+        """Center-crop the oversampled grid back to the image matrix."""
         out = grid
         for d, (n, g) in enumerate(zip(self.im_size, self.grid_size)):
             start = (g - n) // 2
@@ -219,8 +207,8 @@ class GriddingNUFFT:
         """
         Pipe-style density compensation weights for *coords*.
 
-        Non-Cartesian trajectories visit the centre of k-space far more often
-        than the edges, so an unweighted adjoint is dominated by the centre.
+        Non-Cartesian trajectories visit the center of k-space far more often
+        than the edges, so an unweighted adjoint is dominated by the center.
         The Pipe iteration drives the weights towards those that make gridding
         followed by de-gridding the identity.
 
@@ -235,12 +223,12 @@ class GriddingNUFFT:
             Weights "[K]".
         """
         kernel = self.interpolator
-        if not hasattr(kernel, "neighbours"):
+        if not isinstance(kernel, GriddingKernel):
             # Density is a property of the trajectory and the grid, not of
             # whichever interpolator happens to be reading it.
             kernel = KaiserBesselInterpolator(self.grid_size, osf=self.osf, width=self.width)
 
-        idx, weight = kernel.neighbours(np.asarray(coords))
+        idx, weight = kernel.neighbors(np.asarray(coords))
         n_cells = int(np.prod(self.grid_size))
         flat_idx = idx.reshape(-1)
 
@@ -271,7 +259,7 @@ class KspaceReconstructor:
 
     1. zero out the shots an undersampling mask discards,
     2. weight the survivors by a Pipe-style density compensation function, since
-       most trajectories sample the centre of k-space far more densely than the
+       most trajectories sample the center of k-space far more densely than the
        edge,
     3. apply the adjoint NUFFT onto an oversampled grid.
 
@@ -279,8 +267,8 @@ class KspaceReconstructor:
     (batch, shots, dimensions, samples per shot), k-space data is "[B, S, C, L]"
     with "C" coils, and the reconstruction is "[B, C, *image_size]".
 
-    Coordinates must be normalised to "[-1, 1]"; "normalise_trajectory"
-    converts the cycles-per-metre output of "kspace_sampling" for you.
+    Coordinates must be normalized to "[-1, 1]"; "normalize_trajectory"
+    converts the cycles-per-meter output of "kspace_sampling" for you.
 
     Args:
         image_size: target volume shape, 2- or 3-D.
@@ -364,14 +352,14 @@ class KspaceReconstructor:
     #*****************#
 
     @staticmethod
-    def normalise_trajectory(coords: Any,
+    def normalize_trajectory(coords: Any,
                             k_max: Union[float, Sequence[float]]) -> Any:
         """
-        Scale a trajectory from cycles per metre to the "[-1, 1]" box.
+        Scale a trajectory from cycles per meter to the "[-1, 1]" box.
 
         Trajectories are generated in physical units, where the Nyquist edge sits
         at "k_max = 1 / (2 * voxel_size)". Both this module and
-        "processing.interpolating" work in normalised coordinates, so this is
+        "processing.interpolating" work in normalized coordinates, so this is
         the bridge between them.
 
         "k_max" is per axis whenever the voxels are anisotropic, which is how
@@ -379,7 +367,7 @@ class KspaceReconstructor:
         axis; a sequence must give one value per dimension of *coords*.
 
         Args:
-            coords: trajectory coordinates in cycles per metre, "[B, S, D, L]".
+            coords: trajectory coordinates in cycles per meter, "[B, S, D, L]".
             k_max: k-space half-extent, scalar or one value per axis. Trajectory
                 metadata carries it as "meta['kmax']".
         """
@@ -464,7 +452,7 @@ class KspaceReconstructor:
 
         Args:
             kdata: density-compensated k-space samples, "[B, S, C, L]".
-            coords: normalised trajectory coordinates, "[B, S, D, L]".
+            coords: normalized trajectory coordinates, "[B, S, D, L]".
         """
         ndim = ops.shape(coords)[2]
         if ndim != len(self.image_size):
@@ -496,7 +484,7 @@ class KspaceReconstructor:
         Mask, density-compensate and regrid in one call.
 
         Args:
-            coords: normalised trajectory coordinates, "[B, S, D, L]".
+            coords: normalized trajectory coordinates, "[B, S, D, L]".
             kdata: k-space samples, "[B, S, C, L]".
             mask: boolean shots to keep, "[B, S]"; all shots when omitted.
 

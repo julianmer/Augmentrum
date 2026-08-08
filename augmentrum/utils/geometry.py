@@ -8,7 +8,7 @@
 # Created: 2026-07-31                                                                              #
 #                                                                                                  #
 # Purpose: Quaternion and affine matrix construction for spatial resampling. Builds the theta      #
-#          matrices consumed by affine_grid, in the normalised [-1, 1] coordinate system.          #
+#          matrices consumed by affine_grid, in the normalized [-1, 1] coordinate system.          #
 #          NumPy-typed: these are small constant matrices built from Python floats, moved onto     #
 #          the data's own backend at the point of use.                                             #
 #                                                                                                  #
@@ -35,7 +35,7 @@ class Affine:
     """
     Builders for the "theta" matrices that drive "nifti_mrs_plus.ops.affine_grid".
 
-    Both builders map *normalised output* coordinates to *normalised input*
+    Both builders map *normalized output* coordinates to *normalized input*
     coordinates, which is the direction "affine_grid" expects, and both encode
     a flip as a negative scale on that axis.
 
@@ -90,13 +90,13 @@ class Affine:
                  flip_x: bool,
                  flip_y: bool) -> np.ndarray:
         """
-        Build the 2x3 affine mapping normalised output coords to normalised input coords.
+        Build the 2x3 affine mapping normalized output coords to normalized input coords.
 
         Args:
             rotation_rad: in-plane rotation angle.
             scale_xy: per-axis zoom factors.
             shear_xy: off-diagonal shear terms.
-            tx, ty: normalised translations in [-1, 1].
+            tx, ty: normalized translations in [-1, 1].
             flip_x, flip_y: applied as a negative scale on that axis.
         """
         c, s = math.cos(rotation_rad), math.sin(rotation_rad)
@@ -119,13 +119,13 @@ class Affine:
                  flip_y: bool,
                  flip_z: bool) -> np.ndarray:
         """
-        Build the 3x4 affine mapping normalised output coords to normalised input coords.
+        Build the 3x4 affine mapping normalized output coords to normalized input coords.
 
         Args:
             R: 3x3 rotation matrix, typically from "quat_to_rotmat".
             scale_xyz: per-axis zoom factors.
             shear_mat: 3x3 shear matrix with unit diagonal; "None" means identity.
-            t_xyz: normalised translations in [-1, 1].
+            t_xyz: normalized translations in [-1, 1].
             flip_x, flip_y, flip_z: applied as a negative scale on that axis.
         """
         sx, sy, sz = scale_xyz

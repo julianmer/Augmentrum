@@ -68,13 +68,13 @@ def plot_spec_and_fit(spec, fit, true=None, ppmAxis=None, ppmLim=None, name='',
                       save_path=None, real=True, clean=False):
     """Plot a measured spectrum, the model fit, and the residual on a ppm axis.
 
-    Visual style: Data (black) / Fit (red, α=0.6) / Residual offset above (dimgrey) /
+    Visual style: Data (black) / Fit (red, α=0.6) / Residual offset above (dimgray) /
     optional True spectrum (green dashed).  ppm-axis inverted, y-axis hidden.
 
     Parameters
     ----------
     spec      : np.ndarray (complex)  measured spectrum (1-D).
-    fit       : np.ndarray (complex)  forward-modelled fit (1-D).
+    fit       : np.ndarray (complex)  forward-modeled fit (1-D).
     true      : np.ndarray (complex), optional  ground-truth spectrum.
     ppmAxis   : np.ndarray, optional  chemical-shift axis matching *spec*. Defaults to
                 "linspace(0.5, 4.0, len(spec))".
@@ -105,7 +105,7 @@ def plot_spec_and_fit(spec, fit, true=None, ppmAxis=None, ppmLim=None, name='',
     fig, ax = plt.subplots(figsize=(4, 3.5))
     ax.plot(ppmAxis, spec,     'k',       label='Data',     linewidth=1)
     ax.plot(ppmAxis, fit,      'r',       label='Fit',      alpha=0.6, linewidth=2)
-    ax.plot(ppmAxis, residual, 'dimgrey', label='Residual', alpha=0.8, linewidth=1)
+    ax.plot(ppmAxis, residual, 'dimgray', label='Residual', alpha=0.8, linewidth=1)
     if true is not None:
         true = _pick_part(true, real)
         ax.plot(ppmAxis, true, 'g', label='True Spectrum',
@@ -133,7 +133,7 @@ def plot_spec(spec, ppmAxis=None, ppmLim=None, name='', save_path=None,
     name      : str  filename stem (without extension).
     save_path : str, optional  directory to save PNG into; created if missing.
     real      : bool  if True plot real part, else imaginary.
-    color     : str  matplotlib colour string for the spectrum line.
+    color     : str  matplotlib color string for the spectrum line.
     title     : str, optional  axes title (small font, publication-friendly).
     clean     : bool  if True hide all axes/labels (publication snippet style).
     """
@@ -657,13 +657,13 @@ def quick_plot(nifti_plus, index=0, ppmlim=(0.2, 4.2)):
 #   mrsi plots   #
 #****************#
 #
-#  Colour choices follow the jobs the data does:
+#  Color choices follow the jobs the data does:
 #    * a metabolite / intensity map encodes MAGNITUDE  -> one perceptually
 #      uniform sequential ramp (viridis), never a rainbow
-#    * a sampling mask encodes PRESENCE                -> binary greyscale
+#    * a sampling mask encodes PRESENCE                -> binary grayscale
 #    * overlaid spectra encode IDENTITY                -> a fixed categorical
 #      order, assigned by position and never cycled, so "clean" is the same
-#      colour in every figure of a run
+#      color in every figure of a run
 #
 #  _MRSI_SERIES is deliberately short. Past four overlaid traces a spectrum plot
 #  stops being readable and wants small multiples instead.
@@ -703,7 +703,7 @@ def plot_mrsi_map(volume, ppm_axis=None, band=(1.8, 2.2), slices=None,
         mask: optional (X, Y, Z) boolean; voxels outside are blanked.
         vmax_percentile: upper display limit, as a percentile of the shown voxels.
                 Guards against one hot voxel flattening everything else.
-        cbar_label: colour-bar label. Defaults to the integrated band.
+        cbar_label: color-bar label. Defaults to the integrated band.
 
     Returns:
         The saved path when *save_path* is given, else the Figure.

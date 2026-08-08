@@ -6,7 +6,7 @@
 #                                                                                                  #
 # Created: 2026-07-31                                                                              #
 #                                                                                                  #
-# Purpose: Verifies the NUFFT reconstruction path end to end: coordinate normalisation, the        #
+# Purpose: Verifies the NUFFT reconstruction path end to end: coordinate normalization, the        #
 #          forward/adjoint operator pair, and gridding reconstruction from real trajectories.      #
 #                                                                                                  #
 ####################################################################################################
@@ -36,15 +36,15 @@ HEADER = {"dim": [4, N, N, 1, 1, 1, 1, 1],
 #*************#
 
 def _trajectory(name, **params):
-    """Trajectory as normalised "[1, S, D, L]" coordinates, plus its metadata."""
+    """Trajectory as normalized "[1, S, D, L]" coordinates, plus its metadata."""
     shots, meta = TrajectoryRegistry.generate(name, HEADER, params)
     coords = np.stack([np.asarray(s) for s in shots]).transpose(0, 2, 1)   # [S, D, L]
     coords = torch.from_numpy(coords).float().unsqueeze(0)
-    return KspaceReconstructor.normalise_trajectory(coords, meta["kmax"]), meta
+    return KspaceReconstructor.normalize_trajectory(coords, meta["kmax"]), meta
 
 
 def _phantom():
-    """A small off-centre disc — band-limited enough to survive a disc trajectory."""
+    """A small off-center disc — band-limited enough to survive a disc trajectory."""
     y, x = np.mgrid[0:N, 0:N]
     img = ((x - N / 2 + 6) ** 2 + (y - N / 2 - 4) ** 2 < (N / 5) ** 2).astype(np.float32)
     return img
@@ -70,26 +70,26 @@ def _nrmse(ref, test):
 
 
 #******************************#
-#   coordinate normalisation   #
+#   coordinate normalization   #
 #******************************#
 
-def test_normalise_trajectory_is_per_axis():
+def test_normalize_trajectory_is_per_axis():
     """Anisotropic voxels give a per-axis kmax, and each axis must use its own."""
     coords = torch.ones(1, 2, 3, 4)
-    out = KspaceReconstructor.normalise_trajectory(coords, (250.0, 125.0, 500.0))
+    out = KspaceReconstructor.normalize_trajectory(coords, (250.0, 125.0, 500.0))
     assert np.allclose(out[0, 0, :, 0].tolist(), [1 / 250.0, 1 / 125.0, 1 / 500.0])
 
-    scalar = KspaceReconstructor.normalise_trajectory(coords, 250.0)
+    scalar = KspaceReconstructor.normalize_trajectory(coords, 250.0)
     assert np.allclose(scalar.numpy(), (coords / 250.0).numpy())
 
     with pytest.raises(ValueError, match="one value per axis"):
-        KspaceReconstructor.normalise_trajectory(coords, (1.0, 2.0))
+        KspaceReconstructor.normalize_trajectory(coords, (1.0, 2.0))
     with pytest.raises(ValueError, match="positive"):
-        KspaceReconstructor.normalise_trajectory(coords, (1.0, 0.0, 2.0))
+        KspaceReconstructor.normalize_trajectory(coords, (1.0, 0.0, 2.0))
 
 
 def test_real_trajectory_fills_the_unit_box():
-    """A trajectory normalised by its own kmax reaches the edge but never leaves."""
+    """A trajectory normalized by its own kmax reaches the edge but never leaves."""
     for name, params in [("radial_2d", {"n_shots": 33}),
                          ("spiral_2d", {"n_shots": 8}),
                          ("cartesian_2d", {})]:
@@ -158,7 +158,7 @@ def test_non_cartesian_reconstructs_the_phantom(name, params):
 
     It is not exact and cannot be: a single DCF-weighted adjoint approximates
     the inverse, and a disc trajectory never reaches the corners of k-space.
-    The bar is 'recognisably the phantom', which the undersampled comparison
+    The bar is 'recognizably the phantom', which the undersampled comparison
     below turns into a strict statement.
     """
     img = _phantom()

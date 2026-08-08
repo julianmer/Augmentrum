@@ -49,6 +49,11 @@ class BaseModule(ABC):
     # support everything. Use tuple(Backend) for a module that works anywhere.
     SUPPORTED_BACKENDS: Tuple[Backend, ...] = ()
 
+    # Dimension tags a module adds to the data, outermost first. A module that
+    # grows the array's rank must name the axes it added: a rebuilt NIfTI object
+    # takes its tags from the source, which by definition does not have them.
+    ADDS_DIM_TAGS: Tuple[str, ...] = ()
+
     def __init_subclass__(cls, **kwargs):
         """
         Wrap a subclass's "__init__" so its arguments are recorded automatically.
@@ -226,7 +231,7 @@ class BaseModule(ABC):
 
         3. **Slow (~ routing)** — module only implements "process_nifti_list":
            falls back to the NIfTI-list path, processes each subject individually.
-           This is what sampling modules (CoilAverageSampler, NIfTI_RawProcessor)
+           This is what sampling modules (CoilSampler, NIfTI_RawProcessor)
            always use because they change DIM_COIL / DIM_DYN, not just values.
 
         Rule of thumb: keep **N_PTS and all extra dimensions uniform** across the
@@ -268,6 +273,12 @@ class BaseModule(ABC):
             except Exception:
                 pass
 
+        # Inject the dimension tags too. A bare tensor has no way to say which
+        # of its trailing axes is coils and which is averages, so a module that
+        # addresses one by name needs to be told.
+        if 'dim_tags' not in kwargs and data.n_subjects > 0:
+            kwargs['dim_tags'] = data.dim_tags
+
         # ── Get data in native backend format (not forced to numpy!) ──
         data_array = data.get_data(backend)
         water_array = water.get_data(backend) if water is not None else None
@@ -282,12 +293,12 @@ class BaseModule(ABC):
         operation_details = {'method': 'process_tensor', 'backend': backend.value,
                            'params': self.params}
 
-        data_out = self._wrap_processed(data, data_array, processed_data, backend,
+        data_out = self._wrap_processed(data, processed_data, backend,
                                         operation_name, operation_details)
 
         water_out = None
         if water is not None:
-            water_out = self._wrap_processed(water, water_array, processed_water, backend,
+            water_out = self._wrap_processed(water, processed_water, backend,
                                              operation_name, operation_details)
 
         return data_out, water_out
@@ -296,104 +307,41 @@ class BaseModule(ABC):
     #   write-back    #
     #*****************#
 
-    def _wrap_processed(self, source: NIfTI_MRS_Plus, in_array, processed,
+    def _wrap_processed(self, source: NIfTI_MRS_Plus, processed,
                         backend: Backend, operation_name: str,
                         operation_details: Dict) -> NIfTI_MRS_Plus:
         """
         Wrap a processed tensor back into a "NIfTI_MRS_Plus".
 
-        Unchanged shape is both the common case and the fast one: the tensor is
-        installed with "set_data" and never converted, so an autograd graph and
-        device placement survive to the end of the pipeline. A shape change
-        forces the NumPy rebuild, because a NIfTI object's length is fixed when
-        it is constructed.
+        The tensor is installed with "set_data" and never converted, so an
+        autograd graph and device placement survive to the end of the pipeline.
+        A module that resized or added a dimension is no exception: fitting the
+        NIfTI objects to it is deferred to materialization, which is the single
+        point at which data becomes NumPy again.
         """
-        if processed is None:
-            nifti_list = source.nifti_list
-        elif self._same_shape(in_array, processed):
-            nifti_list = source.nifti_list
-        else:
-            self._warn_shape_change(in_array, processed)
-            nifti_list = self._rebuild_nifti_list(source, processed)
-            processed = None            # values are already in the rebuilt objects
-
-        out = NIfTI_MRS_Plus(nifti_list=nifti_list, backend=backend,
+        out = NIfTI_MRS_Plus(nifti_list=source.nifti_list, backend=backend,
                              volatile=source.volatile)
         if processed is not None:
-            out.set_data(processed, backend)
+            out.set_data(processed, backend, dim_tags=self._output_dim_tags(source))
 
         if not source.volatile:
             out.update_metadata(operation_name, operation_details)
 
         return out
 
-    @staticmethod
-    def _same_shape(a, b) -> bool:
-        """True when both carry a shape and the two agree."""
-        if not (hasattr(a, 'shape') and hasattr(b, 'shape')):
-            return False
-        return tuple(a.shape) == tuple(b.shape)
+    def _output_dim_tags(self, source: NIfTI_MRS_Plus) -> List:
+        """
+        Higher-dimension tags the processed data carries.
 
-    def _warn_shape_change(self, in_array, processed):
-        """Warn that the rebuild path is slower and ends any autograd graph."""
-        import warnings
-        warnings.warn(
-            f"{self.__class__.__name__}: shape changed "
-            f"{tuple(in_array.shape)} → {tuple(processed.shape)}. "
-            f"NIfTI objects will be rebuilt at the new length, which goes through "
-            f"NumPy and therefore ends any autograd graph. "
-            f"For maximum throughput and to keep gradients, hold N_PTS and all "
-            f"extra dimensions constant through the pipeline (e.g. prefer "
-            f"Apodization[exponential] over Apodization[truncate] when batching "
-            f"on a tensor backend).",
-            stacklevel=4,
-        )
-
-    @staticmethod
-    def _rebuild_nifti_list(source: NIfTI_MRS_Plus, processed) -> List:
-        """Rebuild each NIFTI_MRS at the new length, carrying its header across."""
-        from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
-        from nifti_mrs_plus.ops import to_numpy
-
-        processed_np = to_numpy(processed)
-        nifti_list = list(source.nifti_list)
-
-        for i, nifti in enumerate(nifti_list):
-            if i >= processed_np.shape[0]:
-                break
-            sample_np = processed_np[i]
-            if sample_np.shape == nifti[:].shape:
-                nifti[:] = sample_np
-                continue
-
-            try:
-                affine = nifti.getAffine('voxel', 'world')
-            except Exception:
-                affine = None
-            nucleus = (nifti.nucleus[0]
-                       if hasattr(nifti, 'nucleus') and nifti.nucleus else '1H')
-            dim_tags = (list(nifti.dim_tags)
-                        if hasattr(nifti, 'dim_tags') else [None, None, None])
-            new_nifti = gen_nifti_mrs(
-                data=sample_np,
-                dwelltime=nifti.dwelltime,
-                spec_freq=nifti.spectrometer_frequency[0],
-                nucleus=nucleus,
-                dim_tags=dim_tags,
-                affine=affine,
-            )
-            # Copy extra header fields
-            if hasattr(nifti, 'hdr_ext'):
-                for key in nifti.hdr_ext:
-                    if key not in ('SpectrometerFrequency', 'ResonantNucleus',
-                                   'dim_5', 'dim_6', 'dim_7'):
-                        try:
-                            new_nifti.add_hdr_field(key, nifti.hdr_ext[key])
-                        except Exception:
-                            pass
-            nifti_list[i] = new_nifti
-
-        return nifti_list
+        Stated in full rather than as what this module added, because the
+        objects being wrapped are the source's own and may already be behind by
+        several steps. A full list composes; a delta against a stale list does
+        not.
+        """
+        tags = list(source.dim_tags or [None, None, None])
+        for position, tag in enumerate(self.ADDS_DIM_TAGS):
+            tags.insert(position, tag)
+        return tags[:3]
 
     def _process_via_forward(self, data: NIfTI_MRS_Plus, water: Optional[NIfTI_MRS_Plus],
                             **kwargs) -> Tuple[NIfTI_MRS_Plus, Optional[NIfTI_MRS_Plus]]:

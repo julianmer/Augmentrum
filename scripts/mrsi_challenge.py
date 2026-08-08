@@ -279,7 +279,7 @@ def run_training_demo(augmenter, n_batches=3):
             return self.head(self.net(x).squeeze(-1))
 
     model = VoxelEncoder()
-    optimiser = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     criterion = nn.MSELoss()
 
     loader = augmenter.train_dataloader()
@@ -294,9 +294,9 @@ def run_training_demo(augmenter, n_batches=3):
 
         target = torch.zeros(voxels.shape[0], 16)
         loss = criterion(model(voxels), target)
-        optimiser.zero_grad()
+        optimizer.zero_grad()
         loss.backward()
-        optimiser.step()
+        optimizer.step()
         print(f"  batch {i + 1}/{n_batches}: {b} volumes {(nx, ny, nz, nt)}, "
               f"512 voxels sampled, loss {loss.item():.5f}")
 
@@ -318,7 +318,7 @@ examples:
   # the full contest set, heavier acceleration
   python scripts/mrsi_challenge.py --n-train 24 --n-val 5 --acceleration 8
 
-  # keep the challenge's macromolecules and baseline instead of synthesising them
+  # keep the challenge's macromolecules and baseline instead of synthesizing them
   python scripts/mrsi_challenge.py --signal nuisance_free
 
   # non-Cartesian coverage from a spiral trajectory

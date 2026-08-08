@@ -66,7 +66,7 @@ class KspaceGeometry:
         "dim":                  "matrix dimensions stored at dim[1:4]",
         "qform_code":           "qform code (non-zero -> use qform)",
         "sform_code":           "sform code (non-zero -> use sform)",
-        "SpectrometerFrequency": "transmitter centre frequency [Hz] list",
+        "SpectrometerFrequency": "transmitter center frequency [Hz] list",
         "DwellTime":            "ADC dwell time [s] per spectral point",
         "ResonantNucleus":      "nucleus label e.g. '1H'",
     }
@@ -145,10 +145,10 @@ class KspaceGeometry:
             straight off the data via "header_dict_from_nifti" and cannot drift from
             it.  A plain dict is still accepted for synthetic geometries and tests.
 
-            Recognised dict fields (see _NIFTI_MRS_FIELDS):
+            Recognized dict fields (see _NIFTI_MRS_FIELDS):
               - "dim"    : array-like, dim[1..3] → matrix [nx, ny, nz]
               - "pixdim" : array-like, pixdim[1..3] → voxel size [vx, vy, vz] in mm
-              - "SpectrometerFrequency" : list[float] → centre frequency in Hz
+              - "SpectrometerFrequency" : list[float] → center frequency in Hz
               - "DwellTime"             : float → ADC dwell time in seconds
               Fallback keys also accepted: "matrix", "voxel_size_mm",
               "fov_mm", "dwell_time".
@@ -261,7 +261,7 @@ class Trajectory(ABC):
     """
     Base class for k-space trajectories.
 
-    A trajectory is a *parameterised object*: construct it with the parameters
+    A trajectory is a *parameterized object*: construct it with the parameters
     that shape it, then ask it for coordinates in a given geometry. This
     replaces the previous arrangement where every trajectory was a private
     static method reached by "getattr" through a name -> method-name table,
@@ -329,7 +329,7 @@ class Trajectory(ABC):
             "kmax":             kmax,
             "note":             (
                 "For Cartesian: density = 1 everywhere by definition. "
-                "For radial: density ∝ |k| (centre-heavy). "
+                "For radial: density ∝ |k| (center-heavy). "
                 "For spirals: use gradient-delay-corrected NUFFT pipe density."
             ),
         }
@@ -511,7 +511,7 @@ class TrajectoryRegistry:
     def generate(cls, name: str, header: Dict[str, Any], params: Dict[str, Any],
                  like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """
-        Build a trajectory by name and return shot-organised coordinates.
+        Build a trajectory by name and return shot-organized coordinates.
 
         Parameters
         ----------
@@ -582,7 +582,7 @@ class Cartesian2D(Trajectory):
         -------------------
         ordering : str
             'linear' (default) — ky from -N/2 to N/2-1
-            'centric' — ky ordered from centre outwards
+            'centric' — ky ordered from center outwards
         n_shots : int, optional
             Number of phase encodes to generate (default: ny).
 
@@ -765,8 +765,8 @@ class Radial2D(Trajectory):
         samples_per_shot : int
             Samples per spoke (default: max(nx, ny)).
         center_out : bool
-            If True (default), spoke goes from centre outward.
-            If False, spoke is symmetric (–kmax → +kmax, centre at midpoint).
+            If True (default), spoke goes from center outward.
+            If False, spoke is symmetric (–kmax → +kmax, center at midpoint).
         golden_angle_rad : float
             Golden angle override (default: GOLDEN_ANGLE_RAD).
 
@@ -781,11 +781,11 @@ class Radial2D(Trajectory):
 
         n_shots = int(params.get("n_shots", max(1, int(math.pi / 2 * max(nx, ny)))))
         sps = int(params.get("samples_per_shot", max(nx, ny)))
-        # Full diameters by default (-kmax -> +kmax through the centre).
+        # Full diameters by default (-kmax -> +kmax through the center).
         #
         # This has to agree with the angular range, and for the uniform case the
-        # range is [0, pi). A centre-out ray only covers the half-plane its
-        # angle points into, so centre-out spokes over [0, pi) rasterise to HALF
+        # range is [0, pi). A center-out ray only covers the half-plane its
+        # angle points into, so center-out spokes over [0, pi) rasterise to HALF
         # a disc — the other half is never visited and the reconstruction is
         # missing every conjugate line. Full diameters over [0, pi) cover the
         # disc exactly once, which is what "radial" means in MRI and what a
@@ -891,7 +891,7 @@ class Spiral2D(Trajectory):
             counter-rotating arms, and only a couple of visible lobes) rather
             than the spiral itself.
         vd_alpha : float
-            Variable-density exponent ≥ 1 (1 = Archimedean, >1 = denser centre).
+            Variable-density exponent ≥ 1 (1 = Archimedean, >1 = denser center).
             r(t) ∝ t^(1/vd_alpha).
         ordering : str
             How successive arms are rotated.
@@ -936,7 +936,7 @@ class Spiral2D(Trajectory):
                 f"spiral_2d ordering must be 'golden' or 'linear', got {ordering!r}"
             )
 
-        t = ops.linspace_like(like, 0.0, 1.0, sps)           # normalised parameter
+        t = ops.linspace_like(like, 0.0, 1.0, sps)           # normalized parameter
         # r(t) ∝ t^(1/vd_alpha), ensures r ∈ [0, 1]
         r = t ** (1.0 / vd_alpha)
         theta_base = r * (2.0 * math.pi * turns)
@@ -1425,7 +1425,7 @@ class Cones3D(Trajectory):
 
         By default the polar range is [0, π], covering both the upper (+kz) and
         lower (−kz) hemispheres symmetrically.  Set "polar_max=π/2" to restrict
-        to the upper hemisphere only (legacy behaviour).
+        to the upper hemisphere only (legacy behavior).
 
         Parameters (params)
         -------------------
@@ -1484,7 +1484,7 @@ class Cones3D(Trajectory):
             for ai in range(arms_per_cone):
                 az0 = ai * 2.0 * math.pi / arms_per_cone + ci * GOLDEN_ANGLE_RAD
                 theta_spiral = t * (2.0 * math.pi * turns) + az0
-                r = t  # centre-out
+                r = t  # center-out
 
                 kx = r * ops.cos(theta_spiral) * sin_ca * kmax_x
                 ky = r * ops.sin(theta_spiral) * sin_ca * kmax_y
@@ -1817,7 +1817,7 @@ class EggRosette3D(Trajectory):
         The 3D analogue of rosette_2d_petals, and the geometry of the
         egg-shaped modified rosette / PETALUTE family: every shot is ONE
         petal — a circle of radius kmax/2 passing exactly through the k-space
-        centre — whose tip direction walks a Fibonacci lattice over the FULL
+        center — whose tip direction walks a Fibonacci lattice over the FULL
         sphere with golden-angle azimuth, so any prefix of shots covers the
         egg near-uniformly and the interior is sampled along every petal.
 
@@ -1834,7 +1834,7 @@ class EggRosette3D(Trajectory):
 
         Two earlier versions of this generator were wrong in instructive ways:
         the original placed every sample ON the sphere surface (radius
-        identically kmax — a hollow shell, no centre crossings); the first fix
+        identically kmax — a hollow shell, no center crossings); the first fix
         used a sin(w1 t)[cos(w2 t)u + sin(w2 t)p] "figure-eight" whose w1 = w2
         default degenerates to a twice-traced circle tipped along p, so tip
         directions clustered in a band and left a void on the opposite side.
@@ -1952,7 +1952,7 @@ class _Eccentric2D:
         samples_per_ring : int
             Samples per ring (default: 2*π*ring_radius → proportional to circumference).
         min_ring_radius : float
-            Minimum ring radius in normalised units (default: 1e-3).
+            Minimum ring radius in normalized units (default: 1e-3).
         """
         nx, ny, _ = geom["matrix"]
         fov_x_m = geom["fov_mm"][0] / 1000.0
@@ -2260,33 +2260,33 @@ class ShotUndersampler:
                       coords_per_shot: List[Any], like=None) -> np.ndarray:
         """
         Variable-density random undersampling.
-        Centre shots (lower norm) are kept with higher probability.
+        Center shots (lower norm) are kept with higher probability.
 
         params
         ------
         vd_beta : float
-            Density decay exponent. 0 = uniform random, >0 = centre-weighted (default 2).
+            Density decay exponent. 0 = uniform random, >0 = center-weighted (default 2).
         acs_fraction : float
-            Fraction of shots nearest to k-centre always kept (default 0.05).
+            Fraction of shots nearest to k-center always kept (default 0.05).
         """
         n_keep = math.ceil(n_shots / af)
         vd_beta = float(params.get("vd_beta", 2.0))
         acs_frac = float(params.get("acs_fraction", 0.05))
 
-        # Compute shot centre norms (use numpy via to_cpu)
+        # Compute shot center norms (use numpy via to_cpu)
         norms = []
         for shot in coords_per_shot:
             cpu = ops.to_numpy(shot)
             norms.append(float(np.linalg.norm(cpu.mean(axis=0))))
         norms = np.array(norms, dtype=np.float32)
 
-        # Normalise to [0,1]
+        # Normalize to [0,1]
         if norms.max() > 0:
             norms_n = norms / norms.max()
         else:
             norms_n = norms
 
-        # Probability: centre gets high prob
+        # Probability: center gets high prob
         prob = np.exp(-vd_beta * norms_n)
         prob /= prob.sum()
 
@@ -2311,7 +2311,7 @@ class ShotUndersampler:
                      coords_per_shot: List[Any], traj_name: str,
                      like=None) -> np.ndarray:
         """
-        Keep shots whose centre lies within the ACS region (innermost fraction of k-space).
+        Keep shots whose center lies within the ACS region (innermost fraction of k-space).
 
         params
         ------
@@ -2335,10 +2335,10 @@ class ShotUndersampler:
             norms_n = np.zeros(n_shots, dtype=np.float32)
 
         if "acs_n_lines" in params and "cartesian" in traj_name:
-            # Centre the selection
+            # Center the selection
             acs_n = int(params["acs_n_lines"])
-            centre_idx = np.argsort(norms_n)[:acs_n]
-            mask[centre_idx] = True
+            center_idx = np.argsort(norms_n)[:acs_n]
+            mask[center_idx] = True
         else:
             mask[norms_n <= acs_frac] = True
 
@@ -2358,7 +2358,7 @@ class ShotUndersampler:
         Variable-density Poisson-disc undersampling for Cartesian trajectories.
 
         Full Poisson-disc is expensive; this uses a simplified VD-random approach
-        with a centre-dense probability map as a practical stand-in compatible
+        with a center-dense probability map as a practical stand-in compatible
         with MRI pipelines.
 
         params
@@ -2379,7 +2379,7 @@ class ShotUndersampler:
         vd_beta = float(params.get("vd_beta", 3.0))
         rng = np.random.default_rng(params.get("seed", None))
 
-        # Phase encode index from shot centre
+        # Phase encode index from shot center
         norms = []
         for shot in coords_per_shot:
             cpu = ops.to_numpy(shot)
@@ -2437,7 +2437,7 @@ class ShotUndersampler:
             outer_mask = ShotUndersampler._us_drop_every(n_outer, outer_af, params)
         else:
             raise ValueError(
-                f"combined outer_method '{outer_method}' not recognised. "
+                f"combined outer_method '{outer_method}' not recognized. "
                 "Use 'prefix', 'random_vd', or 'drop_every'."
             )
 
@@ -2449,7 +2449,7 @@ class ShotUndersampler:
     def _us_variable_density_spiral(n_shots: int, af: float, params: dict) -> np.ndarray:
         """
         Spiral undersampling by removing outer arms.
-        Arms are assumed ordered centre-to-outer; keep first ceil(n/acceleration_factor).
+        Arms are assumed ordered center-to-outer; keep first ceil(n/acceleration_factor).
         """
         return ShotUndersampler._us_prefix(n_shots, af, params)
 
@@ -2641,7 +2641,7 @@ class GridMask:
             i = round(k [cycles/m] * FOV_m) + N // 2
 
         which is exact for "cartesian_2d" / "cartesian_3d" (whose coordinates are
-        generated on exactly this lattice) and nearest-neighbour for everything else.
+        generated on exactly this lattice) and nearest-neighbor for everything else.
 
         The mapping goes through the *coordinates*, never the shot index. Shot index
         is not a k-space index: with "ordering='centric'" the "cartesian_2d"
@@ -2651,11 +2651,11 @@ class GridMask:
         Parameters
         ----------
         coords_per_shot : list of arrays
-            One (n_samples, n_dims) array per shot, in cycles per metre.
+            One (n_samples, n_dims) array per shot, in cycles per meter.
         shot_mask : array of bool, shape (n_shots,)
             Which shots were retained. Discarded shots contribute nothing.
         fov_m : tuple of float
-            Field of view per axis **in metres** (i.e. fov_mm / 1000).
+            Field of view per axis **in meters** (i.e. fov_mm / 1000).
         matrix : tuple of int
             Grid size per axis. Length determines the output rank (2-D or 3-D).
         like : array, optional
@@ -2714,8 +2714,8 @@ class GridMask:
         """
         Draw a variable-density Cartesian sampling mask directly on the grid.
 
-        Sampling probability falls off with normalised distance from the k-space
-        centre as "exp(-vd_beta * r)", with a fully-sampled central region (the
+        Sampling probability falls off with normalized distance from the k-space
+        center as "exp(-vd_beta * r)", with a fully-sampled central region (the
         auto-calibration region) always retained.
 
         Unlike "_us_poisson_disc_cartesian", which reduces every shot to a single
@@ -2731,10 +2731,10 @@ class GridMask:
             Note "acs_frac" sets a floor: an ACS region larger than the target
             budget caps the achievable acceleration.
         acs_frac : float, default 0.06
-            Fraction of the grid width forming the fully-sampled centre, per axis.
+            Fraction of the grid width forming the fully-sampled center, per axis.
         vd_beta : float, default 3.0
             Density exponent. 0 gives uniform random sampling; larger values
-            concentrate samples nearer the k-space centre.
+            concentrate samples nearer the k-space center.
         seed : int, optional
             RNG seed. Omit for a fresh draw per call — the right default when this
             is used as an augmentation.
@@ -2763,7 +2763,7 @@ class GridMask:
         # own independent random draw.
         sub_shape = tuple(matrix[d] for d in undersampled)
 
-        # Normalised radius in [0, 1] from the k-space centre of the sub-grid.
+        # Normalized radius in [0, 1] from the k-space center of the sub-grid.
         coords = np.meshgrid(
             *[(np.arange(n) - n // 2) / max(n / 2.0, 1.0) for n in sub_shape],
             indexing="ij",
@@ -2771,7 +2771,7 @@ class GridMask:
         r = np.sqrt(np.sum([c ** 2 for c in coords], axis=0))
         r = r / max(r.max(), 1e-12)
 
-        # Fully-sampled centre, sized per axis so anisotropic grids behave.
+        # Fully-sampled center, sized per axis so anisotropic grids behave.
         acs = np.ones(sub_shape, dtype=bool)
         for i, n in enumerate(sub_shape):
             half = max(1, int(round(0.5 * acs_frac * n)))
@@ -3167,7 +3167,7 @@ class KspaceUndersampling(BaseModule):
     timepoint. Doing it literally — forward NUFFT, drop shots, adjoint NUFFT —
     costs "batch x Z x T" separate 2-D NUFFTs, roughly 240 GFLOP and tens of
     seconds per batch on CPU for a 64x64x32x384 volume. Masking on the Cartesian
-    grid gets the coverage pattern, the aliasing behaviour, and exact zeros in
+    grid gets the coverage pattern, the aliasing behavior, and exact zeros in
     unacquired bins for about 1/100th of that, with no extra dependency.
 
     Modes
@@ -3177,7 +3177,7 @@ class KspaceUndersampling(BaseModule):
     "'gridded'"
         Generate any of the trajectories in "augmentrum.sampling.kspace_sampling"
         (radial, spiral, rosette, concentric rings, ...), undersample its shots,
-        and rasterise the retained samples onto the grid. Nearest-neighbour, so
+        and rasterise the retained samples onto the grid. Nearest-neighbor, so
         the off-grid point-spread function is approximated.
 
         Careful with what "acceleration_factor" means here: it undersamples
@@ -3233,7 +3233,7 @@ class KspaceUndersampling(BaseModule):
                  undersampling: str = 'prefix',
                  traj_params: Optional[Dict[str, Any]] = None,
                  us_params: Optional[Dict[str, Any]] = None,
-                 # geometry / behaviour
+                 # geometry / behavior
                  undersample_axes: Optional[Sequence[int]] = (0, 1),
                  per_sample_masks: bool = True,
                  noise_sigma_k: Optional[float] = None,
@@ -3253,10 +3253,10 @@ class KspaceUndersampling(BaseModule):
         acceleration_factor: target acceleration (>= 1). 4.0 keeps ~1/4 of k-space.
                 Pass a (min, max) tuple to Augmentrum to sample it per batch.
         acs_frac: fraction of the grid width kept fully sampled at the k-space
-                centre. This is a floor on the retained samples, so a large ACS
+                center. This is a floor on the retained samples, so a large ACS
                 caps the achievable acceleration.
         vd_beta: variable-density exponent. 0 is uniform random; larger values
-                concentrate samples near the k-space centre.
+                concentrate samples near the k-space center.
         trajectory: trajectory name for 'gridded' mode — any key of
                 "TrajectoryGenerator.GENERATORS".
         undersampling: shot-undersampling method for 'gridded' mode.
@@ -3418,7 +3418,7 @@ class KspaceUndersampling(BaseModule):
         from augmentrum.sampling.kspace_reconstructor import KspaceReconstructor
 
         coords = _torch.from_numpy(pts.T).float()[None, None]          # [1, 1, D, K]
-        coords = KspaceReconstructor.normalise_trajectory(coords, kmax)
+        coords = KspaceReconstructor.normalize_trajectory(coords, kmax)
 
         was_numpy = not is_torch(data_array)
         vol = _torch.as_tensor(np.asarray(data_array)) if was_numpy else data_array
@@ -3553,9 +3553,10 @@ class KspaceUndersampling(BaseModule):
         Undersample a batch of MRSI volumes.
 
         Args:
-            data_array: (batch, X, Y, Z, T) complex, NumPy or PyTorch.
+            data_array: (batch, X, Y, Z, T) complex, or (batch, X, Y, Z, T, C)
+                to undersample a receive array coil by coil.
             water_array: passed through unchanged.
-            like=None enum (unused; kept for the BaseModule signature).
+            backend: Backend enum (unused; kept for the BaseModule signature).
             **kwargs: absorbs sw_hz / sf_mhz / geometry injected by BaseModule.
 
         Returns:
@@ -3566,11 +3567,14 @@ class KspaceUndersampling(BaseModule):
 
         geometry = kwargs.get('geometry')
 
-        if data_array.ndim != 5:
+        if data_array.ndim not in (5, 6):
             raise ValueError(
                 "KspaceUndersampling expects (batch, X, Y, Z, T) in the NIfTI "
-                f"layout, got shape {tuple(data_array.shape)}."
+                "layout, or (batch, X, Y, Z, T, C) with a receive array, got "
+                f"shape {tuple(data_array.shape)}."
             )
+        if data_array.ndim == 6:
+            return self._apply_per_coil(data_array, **kwargs), water_array
         n_batch = int(data_array.shape[0])
         matrix = tuple(int(s) for s in data_array.shape[1:4])
 
@@ -3585,6 +3589,41 @@ class KspaceUndersampling(BaseModule):
         return self._apply_masks(data_array, masks), water_array
 
     #***************#
+    #   coils       #
+    #***************#
+
+    def _apply_per_coil(self, data_array, **kwargs):
+        """
+        Undersample a receive array, one element at a time.
+
+        An acquisition visits one trajectory and every element of the array
+        measures along it, so each coil must see the same pattern. Each pass
+        redraws from "us_seed" rather than advancing a shared generator, which
+        gives exactly that. Thermal noise does advance, since it is independent
+        per element.
+
+        Looping also keeps memory where it is: the NUFFT already carries the
+        spectral axis in its channel slot, and multiplying that by the coil
+        count would put tens of thousands of channels through one transform.
+
+        Args:
+            data_array: "(batch, X, Y, Z, T, C)" complex, on any backend.
+
+        Returns:
+            The same shape, each coil undersampled by the same acquisition.
+        """
+        n_coils = int(ops.shape(data_array)[5])
+        shape = tuple(int(n) for n in ops.shape(data_array))[:5]
+
+        per_coil = []
+        for c in range(n_coils):
+            volume = ops.reshape(ops.take(data_array, np.array([c]), axis=5), shape)
+            sampled, _ = self.process_tensor(volume, **kwargs)
+            per_coil.append(sampled)
+
+        return ops.stack(per_coil, axis=5)
+
+    #***************#
     #   masking     #
     #***************#
 
@@ -3596,7 +3635,7 @@ class KspaceUndersampling(BaseModule):
         FFT over the spatial axes, add k-space noise, zero the unacquired bins,
         transform back.
 
-        The mask is in fftshift order, with the k-space centre in the middle, so
+        The mask is in fftshift order, with the k-space center in the middle, so
         the spectrum is shifted to match rather than the mask being rolled.
 
         Runs on whatever backend *x* belongs to. Chunks are collected and joined

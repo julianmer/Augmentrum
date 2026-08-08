@@ -285,7 +285,7 @@ class SpatialAugmentations(BaseModule):
             if do_rot90:
                 k_rot90 = int(rng.integers(1, 4))
 
-            # Zoom, per axis. One range feeds both behaviours: do_anisotropic
+            # Zoom, per axis. One range feeds both behaviors: do_anisotropic
             # draws each axis independently, do_zoom draws once and broadcasts —
             # isotropic being the special case ax = ay = az. They used to be two
             # separate parameters that multiplied, so the reachable maximum was
@@ -443,7 +443,7 @@ class SpatialAugmentations(BaseModule):
         """
         Rewrite the affine so rotations are physical when voxels are anisotropic.
 
-        "grid_sample" works in coordinates normalised to [-1, 1] *per axis*, so a
+        "grid_sample" works in coordinates normalized to [-1, 1] *per axis*, so a
         rotation matrix applied there is conjugated by the wrong metric whenever
         the field of view is not isotropic.  For a 179.2 x 224.0 mm FOV, a nominal
         30 degree rotation comes out as a rotation composed with a 1.25x stretch —
@@ -591,8 +591,8 @@ class SpatialAugmentations(BaseModule):
 
         # Skip resampling entirely when nothing was drawn.  Beyond saving the work,
         # this keeps "no augmentation" bit-exact: grid_sample through an identity
-        # affine still blends neighbours at the 1e-6 level because the normalised
-        # sampling coordinates are not exactly on voxel centres in float32.
+        # affine still blends neighbors at the 1e-6 level because the normalized
+        # sampling coordinates are not exactly on voxel centers in float32.
         identity = np.eye(self.dim, self.dim + 1,
                              dtype=theta.dtype, device=theta.device)
         if np.allclose(theta, identity[None], atol=1e-7, rtol=0.0):

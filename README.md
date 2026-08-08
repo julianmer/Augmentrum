@@ -93,18 +93,18 @@ no manual conversion needed.
 | `AmplitudeScaling` | uniform, normal                                         |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `Apodization` | exponential, truncate                                   |   ✓   | ✓† | ✓† | ✓† | ✓† | ✓† |
 | `ArtificialPeaks` | Lorentzian, Gaussian, Voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `AverageSampler` | random, deterministic                                   |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `BaselineAugmentation` | random_walk, bspline, polynomial                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `CoilAverageSampler` | random, deterministic                                   |   ✓   | ~ | ~ | ~ | ~ | ~ |
+| `CoilSampler` | synthesize ‡, random, deterministic                     |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `EddyCurrent` | synthetic, water                                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `FrequencyShift` | shift_hz                                                |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `GaussianNoise` | sigma, sigma_frac, snr, snr_db                          |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `KspaceUndersampling[cartesian, gridded]` | trajectory-derived Cartesian masks   |   ~   | ✓ | ✓ | ~ | ~ | ~ |
-| `KspaceUndersampling[nufft]` | samples the real trajectory ‖                     |   ~   | ~ | ✓ | ~ | ~ | ~ |
+| `KspaceUndersampling` | cartesian, gridded, nufft ‖                             |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `LineBroadening` | lorentzian, gaussian, voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `NIfTI_RawProcessor` | coil combination, alignment, averaging, ECC, phase/freq |   ✓   | ~ | ~ | ~ | ~ | ~ |
 | `PhaseShift` | zero_order, first_order                                 |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `ResidualWater` | lorentzian                                              |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `SpatialAugmentations` | 2-D / 3-D affine, flip, zoom, shear                     |  ✓ ‡  | ✓ ‡ | ✓ | ~ | ~ | ~ |
+| `SpatialAugmentations` | 2-D / 3-D affine, flip, zoom, shear                     |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `SpuriousEchoes` | replica, hybrid                                         |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `ZeroFill` | pad FID to target length                                |   ✓   | ✓† | ✓† | ✓† | ✓† | ✓† |
 
@@ -114,11 +114,11 @@ no manual conversion needed.
 
 Modes that differ in backend support get a row each, named `Module[mode]`.
 
-> **†** `Apodization[truncate]` and `ZeroFill` both change `N_PTS`. Because `target_pts` / `n_pts` is a module-level scalar, the **same length is applied uniformly to every batch member** — the output is still a uniform tensor. On non-NIfTI backends the base class detects the shape change, rebuilds each NIfTI_MRS object at the new length, and emits a `RuntimeWarning`.
+> **†** `Apodization[truncate]` and `ZeroFill` both change `N_PTS`. Because `target_pts` / `n_pts` is a module-level scalar, the **same length is applied uniformly to every batch member** — the output is still a uniform tensor.
 
-> **‡** `SpatialAugmentations` uses `F.grid_sample` (PyTorch) internally; NIfTI-list and NumPy inputs are converted to PyTorch for processing and converted back. TensorFlow, JAX, and Keras are handled by the base-class automatic routing (~).
+> **‡** `CoilSampler[synthesize]` grows a `DIM_COIL` axis from sensitivity maps — synthetic, supplied, or measured via `T2starMove.maps()` — so that undersampling becomes parallel imaging rather than plain decimation. The other modes draw from the coils already there; averages have their own `AverageSampler`.
 
-> **‖** `KspaceUndersampling[nufft]` measures at the coordinates the trajectory actually visits and inverts with a density-compensated adjoint, instead of masking the Cartesian grid. Needs the optional `torchkbnufft` dependency.
+> **‖** `KspaceUndersampling[nufft]` measures at the coordinates the trajectory actually visits and inverts with a density-compensated adjoint, instead of masking the Cartesian grid. Runs on the built-in gridding NUFFT, so it needs no extra dependency.
 
 ---
 

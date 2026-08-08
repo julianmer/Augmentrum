@@ -44,7 +44,7 @@ from augmentrum.augmentation import (
     ResidualWater, SpuriousEchoes, SpatialAugmentations, ZeroFill,
 )
 from augmentrum.processing.nifti_raw_processor import NIfTI_RawProcessor
-from augmentrum.sampling.coil_average_sampler import CoilAverageSampler
+from augmentrum.sampling.coil_sampling import CoilSampler
 
 # ── optional frameworks ───────────────────────────────────────────────────────
 try:
@@ -352,7 +352,7 @@ class TestKspaceReconstructorTable:
             KspaceReconstructor(image_size=(8, 8), oversampling_factor=(1.5, 1.5, 1.5))
 
     @pytest.mark.skipif(not TORCH_AVAILABLE, reason="torch not installed")
-    def test_flatten_and_normalise_are_backend_free(self):
+    def test_flatten_and_normalize_are_backend_free(self):
         """The coordinate plumbing is plain torch and must work without torchkbnufft."""
         import torch
         from augmentrum.sampling.kspace_reconstructor import KspaceReconstructor
@@ -371,7 +371,7 @@ class TestKspaceReconstructorTable:
         # cycles/m -> [-1, 1]
         k_max = 250.0
         assert torch.allclose(
-            KspaceReconstructor.normalise_trajectory(coords * k_max, k_max), coords
+            KspaceReconstructor.normalize_trajectory(coords * k_max, k_max), coords
         )
 
         with pytest.raises(ValueError):

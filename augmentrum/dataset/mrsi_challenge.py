@@ -62,10 +62,10 @@ class MRSIChallengeDataModule:
 
     * "signal='clean'" — metabolites alone, noiseless. Nothing to unpick, and
       the macromolecular baseline and noise come from Augmentrum instead, where
-      they are parameterised and reproducible.
+      they are parameterized and reproducible.
     * "signal='nuisance_free'" ("xtAll - xtNuisance") — metabolites,
       macromolecules, baseline and the challenge's own noise. This is the input
-      the organisers recommend for the quantification-only sub-challenge, but
+      the organizers recommend for the quantification-only sub-challenge, but
       anything Augmentrum adds then stacks on top of noise that is already there.
 
     Splits
@@ -88,7 +88,7 @@ class MRSIChallengeDataModule:
     "<data_dir>/" must contain "contest_data/", "testing_data/",
     "testing_data_2/" and, for anything other than "signal='composite'" on the
     test sets, "testing_data_ground_truth/" and "testIng_data_2_ground_truth/"
-    (the capital I in that last name is the organisers', not a typo here).
+    (the capital I in that last name is the organizers', not a typo here).
 
     Caching
     -------
@@ -114,7 +114,7 @@ class MRSIChallengeDataModule:
     #: Fallbacks, used only when a file does not record the value. The ".mat"
     #: stores "hzpppm" and "ppmoff" exactly and its "t" vector gives both
     #: dwell time and echo time, so on that path nothing here is consulted. The
-    #: NIfTI path needs them: those headers round the centre frequency to 127.73
+    #: NIfTI path needs them: those headers round the center frequency to 127.73
     #: and omit the ppm offset entirely.
     DEFAULT_SPECTROMETER_FREQUENCY_MHZ = 127.732434     # 3 T, 1H
     DEFAULT_PPM_OFFSET = 4.65                           # ppm at zero offset
@@ -242,7 +242,7 @@ class MRSIChallengeDataModule:
                                  f'{subject}_all_truth.mat')
         elif subject in self.TRACK2_SUBJECTS:
             participant = os.path.join(self.data_dir, 'testing_data_2', subject, f'{subject}.mat')
-            # The organisers' directory name really does capitalise the I.
+            # The organizers' directory name really does capitalize the I.
             truth = os.path.join(self.data_dir, 'testIng_data_2_ground_truth',
                                  f'{subject}_all_truth.mat')
         else:
@@ -281,7 +281,7 @@ class MRSIChallengeDataModule:
         Read the acquisition parameters for *subject* from the data itself.
 
         The ".mat" records everything except voxel size: "hzpppm" is the exact
-        centre frequency, "ppmoff" the chemical-shift reference, and the "t"
+        center frequency, "ppmoff" the chemical-shift reference, and the "t"
         vector gives both the dwell time (its spacing) and the echo time (its
         first sample — acquisition starts at TE, not at zero). Reading them beats
         hard-coding, which is how a loader ends up silently describing a different
@@ -449,7 +449,7 @@ class MRSIChallengeDataModule:
         Wrap an (X, Y, Z, T) array as a NIfTI-MRS object with correct geometry.
 
         Unlike the files this data came from, the result carries a real voxel
-        size and the full-precision centre frequency, so downstream consumers can
+        size and the full-precision center frequency, so downstream consumers can
         read geometry off the object instead of being told it separately.
 
         "no_conj=False" stores the FIDs exactly as released, which is the
@@ -666,7 +666,7 @@ def MRSIChallengeData(data_dir: str,
         # signal='clean' is metabolites alone — no macromolecules, no baseline, no
         # noise (see MRSIChallengeDataModule for why MM cannot be recovered
         # separately for the training subjects). Augmentrum supplies the missing
-        # realism, which is the point: it is parameterised and reproducible,
+        # realism, which is the point: it is parameterized and reproducible,
         # whereas whatever the release happens to contain is fixed.
         #
         # Measured on one 64x64x32x384 volume, CPU: spatial 4.7 s, undersampling

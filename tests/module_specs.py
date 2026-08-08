@@ -116,7 +116,9 @@ SPECS: List[ModuleSpec] = [
                note="float32 precision -> bspline solver NaN/overflow (TODO)"),
     ModuleSpec("BaselineAugmentation[polynomial]", None, {"mode": "polynomial"}),
 
-    ModuleSpec("CoilAverageSampler", None, {}, needs_multicoil=True),
+    ModuleSpec("AverageSampler", None, {"mode": "random"}, needs_multicoil=True),
+
+    ModuleSpec("CoilSampler[draw]", None, {"mode": "random"}, needs_multicoil=True),
 
     ModuleSpec("EddyCurrent[synthetic]", None, {"mode": "synthetic"}),
 
@@ -125,6 +127,9 @@ SPECS: List[ModuleSpec] = [
     ModuleSpec("GaussianNoise[sigma]", None, {"sigma": 0.01}),
     ModuleSpec("GaussianNoise[snr_db]", None, {"snr_db": 20.0}),
     ModuleSpec("GaussianNoise[sigma_frac]", None, {"sigma_frac": 0.02}),
+
+    ModuleSpec("CoilSampler[synthesize]", None,
+               {"mode": "synthesize", "n_coils": 4, "seed": 0}, volume=True),
 
     ModuleSpec("KspaceUndersampling[cartesian]", None,
                {"ksp_mode": "cartesian", "acceleration_factor": 2.0, "us_seed": 0},

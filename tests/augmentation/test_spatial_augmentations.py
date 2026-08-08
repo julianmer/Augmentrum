@@ -73,7 +73,7 @@ def make_spec(**overrides):
 
 
 def physical_sphere(nx, ny, nz, pixdim, radius_mm):
-    """A blob that is a sphere in *millimetres*.
+    """A blob that is a sphere in *millimeters*.
 
     On an anisotropic grid its voxel-space footprint is an ellipsoid with
     semi-axes "radius_mm / pixdim_i" — the in-plane extent ratio is therefore
@@ -873,7 +873,7 @@ class TestAnisotropy:
     """pixdim makes rotations physical on an anisotropic grid.
 
     Setup: a square 48 x 48 voxel matrix with pixdim (1.0, 2.0, 1.0) mm, i.e. a
-    48 x 96 mm field of view, holding a blob that is a sphere in millimetres.
+    48 x 96 mm field of view, holding a blob that is a sphere in millimeters.
     In voxel space that blob is an ellipsoid whose in-plane extent ratio equals
     pixdim_y / pixdim_x = 2.
 
@@ -916,7 +916,7 @@ class TestAnisotropy:
         assert np.isclose(ex / ey, self.PIXDIM[1] / self.PIXDIM[0], rtol=0.05)
 
     def test_without_pixdim_sphere_is_distorted(self, sphere_volume):
-        """Without pixdim the rotation happens in normalised coordinates, so the
+        """Without pixdim the rotation happens in normalized coordinates, so the
         *voxel* extents swap and the object is no longer physically round."""
         aug = SpatialAugmentations(dim=3, prob=1.0, allow_rot90=False)
         out, _ = aug.apply(sphere_volume, aug_spec_list=[self._rot90_spec()])

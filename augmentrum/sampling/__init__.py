@@ -14,7 +14,14 @@
 #*************#
 #   imports   #
 #*************#
-from augmentrum.sampling.coil_average_sampler import CoilAverageSampler
+from augmentrum.sampling.coil_sampling import (
+    Birdcage,
+    CoilSampler,
+    MapSource,
+    Supplied,
+    T2starMove,
+)
+from augmentrum.sampling.dimension_sampling import AverageSampler, DimensionSampler
 from augmentrum.sampling.subject_splitter import SubjectSplitter
 from augmentrum.sampling.kspace_sampling import (
     KspaceGeometry,
@@ -29,7 +36,13 @@ from augmentrum.sampling.kspace_sampling import (
 )
 
 __all__ = [
-    'CoilAverageSampler',
+    'AverageSampler',
+    'CoilSampler',
+    'DimensionSampler',
+    'Birdcage',
+    'MapSource',
+    'Supplied',
+    'T2starMove',
     'SubjectSplitter',
     'KspaceReconstructor',
     'KspaceUndersampling',

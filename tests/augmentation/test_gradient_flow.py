@@ -17,10 +17,10 @@ Gradient-flow regression tests.
 An augmentation must not sever the autograd graph between its input and its
 output, or a pipeline cannot sit inside a training loop.
 
-One exception is deliberate and declared: a module that changes the spectral
-length has to rebuild its NIfTI objects at the new size, which goes through
-NumPy. "ModuleSpec.changes_length" already records exactly those, so the
-expectation is read from the registry rather than hand-listed here.
+No module is exempt, including those that resize the spectrum or add a
+dimension. Fitting the NIfTI objects to a new shape is deferred to
+materialization, so the NumPy round-trip happens once at the end rather than
+inside the operation that changed the shape.
 """
 
 #*************#
@@ -43,7 +43,7 @@ torch = pytest.importorskip("torch")
 # Spatial / volume modules and the NIfTI-list-only samplers are out of scope
 # here: they are covered by their own suites and are the subject of the separate
 # torch-port work.
-_EXCLUDED = {"NIfTI_RawProcessor", "CoilAverageSampler"}
+_EXCLUDED = {"NIfTI_RawProcessor", "CoilSampler[draw]", "AverageSampler"}
 
 SPECTRAL_SPECS = [s for s in SPECS
                   if not (s.spatial or s.volume)
@@ -93,22 +93,13 @@ def _grad_reaches_input(plus, module):
 
 @pytest.mark.parametrize("spec", SPECTRAL_SPECS, ids=lambda s: s.label)
 def test_gradient_survives_module(spec, seeded_batch):
-    """A module must pass gradients through, unless it resizes the spectrum."""
-    survived = _grad_reaches_input(seeded_batch, spec.build())
-
-    if spec.changes_length:
-        assert not survived, (
-            f"{spec.label} now preserves gradients through a length change. "
-            f"That is an improvement -- drop changes_length from its ModuleSpec "
-            f"so this test starts guarding the new behaviour."
-        )
-    else:
-        assert survived, (
-            f"{spec.label} severed the autograd graph. Something in its "
-            f"process_tensor path converted the data (to_numpy, .numpy(), or a "
-            f"NumPy kernel applied to the data itself) instead of staying on the "
-            f"tensor's own backend."
-        )
+    """Every module must pass gradients through, whether or not it resizes."""
+    assert _grad_reaches_input(seeded_batch, spec.build()), (
+        f"{spec.label} severed the autograd graph. Something in its "
+        f"process_tensor path converted the data (to_numpy, .numpy(), or a "
+        f"NumPy kernel applied to the data itself) instead of staying on the "
+        f"tensor's own backend."
+    )
 
 
 #***********************************#

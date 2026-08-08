@@ -43,7 +43,7 @@ N_PTS = 128
 #***********************#
 # Only modules that actually accept a seed, and only the spectral ones: the
 # spatial / volume modules and the NIfTI-only samplers have their own suites.
-_EXCLUDED = {"NIfTI_RawProcessor", "CoilAverageSampler"}
+_EXCLUDED = {"NIfTI_RawProcessor", "CoilSampler[draw]", "AverageSampler"}
 
 
 def _takes_seed(spec) -> bool:
