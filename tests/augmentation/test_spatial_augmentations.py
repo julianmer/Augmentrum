@@ -1195,9 +1195,9 @@ class TestSpatialPipelineIntegration:
         assert result_data.shape == (3, 8, 8, 4, 16)
 
     def test_in_pipeline_with_noise(self, spatial_nifti_list):
-        from augmentrum.augmentation.gaussian_noise import GaussianNoise
+        from augmentrum.augmentation.noise import Noise
         aug = SpatialAugmentations(dim=3, prob=0.5)
-        noise = GaussianNoise(sigma_frac=0.01)
+        noise = Noise(sigma_frac=0.01)
         pipeline = AugmentationPipeline([aug, noise])
         nifti_plus = NIfTI_MRS_Plus(nifti_list=spatial_nifti_list,
                                     backend=Backend.NIFTI_LIST)

@@ -111,7 +111,7 @@ PIPELINE ARCHITECTURE:
 │  │              │   • Samples random broadening (if range)          │   │
 │  │              │   • Output: pytorch tensor                        │   │
 │  │              │                                                   │   │
-│  │              └─> Module 4 (e.g., GaussianNoise)                  │   │
+│  │              └─> Module 4 (e.g., Noise)                  │   │
 │  │                  • Supports backend='pytorch'                    │   │
 │  │                  • Runs directly on pytorch tensors              │   │
 │  │                  • Samples random noise level (if range)         │   │

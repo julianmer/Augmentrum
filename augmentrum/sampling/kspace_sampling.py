@@ -3191,7 +3191,7 @@ class KspaceUndersampling(BaseModule):
     which is where thermal noise actually is. Adding white noise in the image
     domain instead would fill the unacquired bins that a real accelerated
     acquisition leaves exactly zero — a shortcut a network learns immediately.
-    Leave it None and use "~augmentrum.augmentation.gaussian_noise.GaussianNoise"
+    Leave it None and use "~augmentrum.augmentation.noise.Noise"
     if you want image-domain noise regardless.
 
     Examples

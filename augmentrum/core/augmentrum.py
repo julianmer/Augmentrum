@@ -38,7 +38,7 @@ from augmentrum.sampling.kspace_sampling import KspaceUndersampling
 
 # Augmentation modules
 from augmentrum.augmentation.amplitude_scaling import AmplitudeScaling
-from augmentrum.augmentation.gaussian_noise import GaussianNoise
+from augmentrum.augmentation.noise import Noise
 from augmentrum.augmentation.line_broadening import LineBroadening
 from augmentrum.augmentation.baseline_augmentation import BaselineAugmentation
 from augmentrum.augmentation.residual_water import ResidualWater
@@ -164,8 +164,8 @@ class Augmentrum:
         'processing': NIfTI_RawProcessor,
 
         # Noise
-        'noise': GaussianNoise,
-        'gaussian_noise': GaussianNoise,
+        'noise': Noise,
+        'noise': Noise,
 
         # Amplitude
         'amplitude': AmplitudeScaling,
@@ -597,7 +597,7 @@ class Augmentrum:
         # TODO: Maybe solve at module level instead
         DEFAULT_PARAMS = {
             'noise':          {'sigma_frac': 0.02},
-            'gaussian_noise': {'sigma_frac': 0.02},
+            'noise': {'sigma_frac': 0.02},
         }
 
         # Parameters that are alternative ways to say the same thing. A module
@@ -605,7 +605,7 @@ class Augmentrum:
         # rightly refuses, so a user-supplied member must suppress the default
         # for every other member rather than arriving alongside it.
         EXCLUSIVE_GROUPS = [
-            {'snr', 'snr_db', 'sigma', 'sigma_frac'},   # GaussianNoise
+            {'snr', 'snr_db', 'sigma', 'sigma_frac'},   # Noise
         ]
 
         for name in module_names:
@@ -848,7 +848,7 @@ class Augmentrum:
             'CoilSampler': '📡',
             'AverageSampler': '🔁',
             'NIfTI_RawProcessor': '⚙️',
-            'GaussianNoise': '🔊',
+            'Noise': '🔊',
             'LineBroadening': '〰️',
             'BaselineAugmentation': '📈',
             'PhaseShift': '🔄',
@@ -938,12 +938,12 @@ class Augmentrum:
 
         Args:
             split: Which split's pipeline to update ('train', 'val', 'test')
-            module_name: Name of the module class (e.g., 'GaussianNoise')
+            module_name: Name of the module class (e.g., 'Noise')
             **params: Parameters to update
 
         Example:
             >>> # Change noise level dynamically
-            >>> augmenter.update_module_params('train', 'GaussianNoise', sigma_frac=0.05)
+            >>> augmenter.update_module_params('train', 'Noise', sigma_frac=0.05)
             >>> # Change broadening parameters
             >>> augmenter.update_module_params('train', 'LineBroadening', lb_hz=(0, 10))
         """

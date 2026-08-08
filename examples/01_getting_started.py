@@ -40,7 +40,7 @@ The framework has 4 main components working together:
 ┌─────────────────────────────────────────────────────────────────┐
 │ 2. Modules: Individual processing/augmentation operations       │
 │    • PhaseShift: Rotate spectrum phase                          │
-│    • GaussianNoise: Add realistic noise                         │
+│    • Noise: Add realistic noise                         │
 │    • LineBroadening: Broaden spectral lines                     │
 │    • And 10+ more built-in modules                              │
 │    • You can create your own custom modules!                    │
@@ -88,7 +88,7 @@ from augmentrum.dataset.cows import COWSDataModule
 from augmentrum.processing.nifti_raw_processor import NIfTI_RawProcessor
 from augmentrum.augmentation.phase_frequency import PhaseShift, FrequencyShift
 from augmentrum.augmentation.line_broadening import LineBroadening
-from augmentrum.augmentation.gaussian_noise import GaussianNoise
+from augmentrum.augmentation.noise import Noise
 
 # Import plotting utilities (now integrated into augmentrum)
 import matplotlib.pyplot as plt
@@ -287,7 +287,7 @@ print("    • 'frequency_shift' - Frequency offset")
 print("    • 'line_broadening' - Lorentzian/Gaussian broadening")
 print("")
 print("  NOISE:")
-print("    • 'noise' or 'gaussian_noise' - Add white Gaussian noise")
+print("    • 'noise' or 'noise' - Add white Gaussian noise")
 print("")
 print("  ARTIFACTS:")
 print("    • 'baseline' - Baseline distortions")
@@ -641,7 +641,7 @@ custom_pipeline = AugmentationPipeline([
     NIfTI_RawProcessor(coil_method='fsl-mrs', conj=False),  # Built-in with COWS params
     AmplitudeScaling(scale_factor=(0.8, 1.2)),  # YOUR custom module!
     PhaseShift(zero_order_deg=15.0),  # Built-in (using fixed value for demo)
-    GaussianNoise(sigma_frac=0.02),   # Built-in
+    Noise(sigma_frac=0.02),   # Built-in
 ])
 
 aug_custom = Augmentrum(

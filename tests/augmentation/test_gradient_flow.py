@@ -107,13 +107,13 @@ def test_gradient_survives_a_chained_pipeline(seeded_batch):
     """The point of the exercise: a whole pipeline stays differentiable."""
     from augmentrum.augmentation.line_broadening import LineBroadening
     from augmentrum.augmentation.phase_frequency import PhaseShift
-    from augmentrum.augmentation.gaussian_noise import GaussianNoise
+    from augmentrum.augmentation.noise import Noise
     from augmentrum.core.pipeline import AugmentationPipeline
 
     pipeline = AugmentationPipeline([
         LineBroadening(lb_hz=5.0, mode="lorentzian"),
         PhaseShift(zero_order_deg=30.0),
-        GaussianNoise(sigma=0.01),
+        Noise(sigma=0.01),
     ])
 
     leaf = torch.tensor(2.0, requires_grad=True)

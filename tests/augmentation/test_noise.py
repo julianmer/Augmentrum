@@ -1,5 +1,5 @@
 """
-Tests for GaussianNoise augmentation module.
+Tests for Noise augmentation module.
 
 Tests cover:
 - Initialization with different noise parameters
@@ -12,7 +12,7 @@ Tests cover:
 
 import pytest
 import numpy as np
-from augmentrum.augmentation.gaussian_noise import GaussianNoise
+from augmentrum.augmentation.noise import Noise
 from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 
 
@@ -20,29 +20,29 @@ from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 #                                 Class TestGaussianNoiseCreation                                  #
 #**************************************************************************************************#
 #                                                                                                  #
-# Test GaussianNoise initialization.                                                               #
+# Test Noise initialization.                                                               #
 #                                                                                                  #
 #**************************************************************************************************#
 class TestGaussianNoiseCreation:
-    """Test GaussianNoise initialization."""
+    """Test Noise initialization."""
 
     def test_create_with_snr(self):
         """Test creating with SNR parameter."""
-        noise = GaussianNoise(snr_db=20.0)
+        noise = Noise(snr_db=20.0)
         assert noise.snr_db == 20.0
         assert noise.sigma is None
         assert noise.sigma_frac is None
 
     def test_create_with_sigma(self):
         """Test creating with sigma parameter."""
-        noise = GaussianNoise(sigma=0.01)
+        noise = Noise(sigma=0.01)
         assert noise.sigma == 0.01
         assert noise.snr_db is None
         assert noise.sigma_frac is None
 
     def test_create_with_sigma_frac(self):
         """Test creating with sigma_frac parameter."""
-        noise = GaussianNoise(sigma_frac=0.02)
+        noise = Noise(sigma_frac=0.02)
         assert noise.sigma_frac == 0.02
         assert noise.snr_db is None
         assert noise.sigma is None
@@ -50,16 +50,16 @@ class TestGaussianNoiseCreation:
     def test_error_with_no_parameters(self):
         """Test that error is raised with no parameters."""
         with pytest.raises(ValueError, match="Must provide one of"):
-            GaussianNoise()
+            Noise()
 
     def test_error_with_multiple_parameters(self):
         """Test that error is raised with multiple parameters."""
         with pytest.raises(ValueError, match="Provide only ONE of"):
-            GaussianNoise(snr_db=20.0, sigma=0.01)
+            Noise(snr_db=20.0, sigma=0.01)
 
     def test_supports_all_backends(self):
-        """Test that GaussianNoise supports all backends."""
-        noise = GaussianNoise(sigma_frac=0.02)
+        """Test that Noise supports all backends."""
+        noise = Noise(sigma_frac=0.02)
         assert noise.SUPPORTED_BACKENDS == tuple(Backend)
 
 
@@ -75,7 +75,7 @@ class TestGaussianNoiseSNRMode:
 
     def test_snr_changes_data(self, dummy_nifti_list):
         """Test that SNR-based noise modifies data."""
-        noise = GaussianNoise(snr_db=20.0)
+        noise = Noise(snr_db=20.0)
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         original_data = nifti_plus[0][:].copy()
@@ -86,7 +86,7 @@ class TestGaussianNoiseSNRMode:
 
     def test_snr_preserves_dtype(self, dummy_nifti_list):
         """Test that noise preserves complex dtype."""
-        noise = GaussianNoise(snr_db=20.0)
+        noise = Noise(snr_db=20.0)
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         result_data, _ = noise(nifti_plus, None)
@@ -95,8 +95,8 @@ class TestGaussianNoiseSNRMode:
     def test_higher_snr_less_noise(self, dummy_nifti_list):
         """Test that higher SNR results in less noise."""
         # Use independent copies and no seed to get different noise
-        low_snr = GaussianNoise(snr_db=10)
-        high_snr = GaussianNoise(snr_db=30)
+        low_snr = Noise(snr_db=10)
+        high_snr = Noise(snr_db=30)
 
         nifti_plus1 = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
         nifti_plus2 = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
@@ -126,7 +126,7 @@ class TestGaussianNoiseSigmaMode:
 
     def test_sigma_changes_data(self, dummy_nifti_list):
         """Test that sigma-based noise modifies data."""
-        noise = GaussianNoise(sigma=0.01)
+        noise = Noise(sigma=0.01)
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         original_data = nifti_plus[0][:].copy()
@@ -140,8 +140,8 @@ class TestGaussianNoiseSigmaMode:
         nifti_plus1 = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
         nifti_plus2 = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
-        noise1 = GaussianNoise(sigma=0.01, seed=42)
-        noise2 = GaussianNoise(sigma=0.01, seed=42)
+        noise1 = Noise(sigma=0.01, seed=42)
+        noise2 = Noise(sigma=0.01, seed=42)
 
         result1, _ = noise1(nifti_plus1, None)
         result2, _ = noise2(nifti_plus2, None)
@@ -161,7 +161,7 @@ class TestGaussianNoiseSigmaFracMode:
 
     def test_sigma_frac_changes_data(self, dummy_nifti_list):
         """Test that sigma_frac-based noise modifies data."""
-        noise = GaussianNoise(sigma_frac=0.02)
+        noise = Noise(sigma_frac=0.02)
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         original_data = nifti_plus[0][:].copy()
@@ -172,7 +172,7 @@ class TestGaussianNoiseSigmaFracMode:
 
     def test_sigma_frac_scales_with_signal(self, dummy_nifti_list):
         """Test that sigma_frac scales with signal amplitude."""
-        noise = GaussianNoise(sigma_frac=0.05)
+        noise = Noise(sigma_frac=0.05)
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         # Modify one FID to have higher amplitude
@@ -196,7 +196,7 @@ class TestGaussianNoiseMultipleSubjects:
 
     def test_processes_all_subjects(self, dummy_nifti_list):
         """Test that all subjects are processed."""
-        noise = GaussianNoise(sigma_frac=0.02)
+        noise = Noise(sigma_frac=0.02)
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         result_data, _ = noise(nifti_plus, None)
@@ -204,7 +204,7 @@ class TestGaussianNoiseMultipleSubjects:
 
     def test_different_noise_per_subject(self, dummy_nifti_list):
         """Test that each subject gets different noise."""
-        noise = GaussianNoise(sigma=0.01)
+        noise = Noise(sigma=0.01)
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         result_data, _ = noise(nifti_plus, None)
@@ -229,7 +229,7 @@ class TestGaussianNoiseWaterReference:
     def test_water_unchanged(self, dummy_nifti_list):
         """Test that water reference is not modified."""
         from copy import deepcopy
-        noise = GaussianNoise(sigma_frac=0.02)
+        noise = Noise(sigma_frac=0.02)
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
         # Use COPIES so they're not the same objects
         water_niftis = [deepcopy(dummy_nifti_list[0]), deepcopy(dummy_nifti_list[1])]
@@ -244,7 +244,7 @@ class TestGaussianNoiseWaterReference:
 
     def test_water_none_handled(self, dummy_nifti_list):
         """Test that None water is handled correctly."""
-        noise = GaussianNoise(sigma_frac=0.02)
+        noise = Noise(sigma_frac=0.02)
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         result_data, result_water = noise(nifti_plus, None)
@@ -263,7 +263,7 @@ class TestGaussianNoiseLogging:
 
     def test_logging_when_not_volatile(self, dummy_nifti_list):
         """Test that metadata is logged when volatile=False."""
-        noise = GaussianNoise(sigma_frac=0.02)
+        noise = Noise(sigma_frac=0.02)
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST, volatile=False)
 
         result_data, _ = noise(nifti_plus, None)
@@ -271,7 +271,7 @@ class TestGaussianNoiseLogging:
 
     def test_no_logging_when_volatile(self, dummy_nifti_list):
         """Test that metadata is not logged when volatile=True."""
-        noise = GaussianNoise(sigma_frac=0.02)
+        noise = Noise(sigma_frac=0.02)
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST, volatile=True)
 
         result_data, _ = noise(nifti_plus, None)
@@ -290,7 +290,7 @@ class TestGaussianNoiseEdgeCases:
 
     def test_with_single_subject(self, dummy_nifti_mrs):
         """Test with single subject."""
-        noise = GaussianNoise(sigma_frac=0.02)
+        noise = Noise(sigma_frac=0.02)
         nifti_plus = NIfTI_MRS_Plus(nifti_list=[dummy_nifti_mrs], backend=Backend.NIFTI_LIST)
 
         result_data, _ = noise(nifti_plus, None)
@@ -308,10 +308,10 @@ class TestGaussianNoiseIntegration:
     """Integration tests."""
 
     def test_in_pipeline(self, dummy_nifti_list):
-        """Test GaussianNoise in a pipeline."""
+        """Test Noise in a pipeline."""
         from augmentrum.core.pipeline import AugmentationPipeline
 
-        noise = GaussianNoise(sigma_frac=0.02)
+        noise = Noise(sigma_frac=0.02)
         pipeline = AugmentationPipeline([noise])
 
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
@@ -325,7 +325,7 @@ class TestGaussianNoiseIntegration:
         from augmentrum.augmentation.line_broadening import LineBroadening
 
         broadening = LineBroadening(lb_hz=5.0)
-        noise = GaussianNoise(sigma_frac=0.02)
+        noise = Noise(sigma_frac=0.02)
         pipeline = AugmentationPipeline([broadening, noise])
 
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)

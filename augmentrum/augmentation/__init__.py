@@ -15,7 +15,7 @@
 #*************#
 #   imports   #
 #*************#
-from augmentrum.augmentation.gaussian_noise import GaussianNoise
+from augmentrum.augmentation.noise import Noise
 from augmentrum.augmentation.line_broadening import LineBroadening
 from augmentrum.augmentation.baseline_augmentation import BaselineAugmentation
 from augmentrum.augmentation.residual_water import ResidualWater
@@ -29,7 +29,7 @@ from augmentrum.augmentation.spatial_augmentations import SpatialAugmentations
 from augmentrum.augmentation.zero_fill import ZeroFill
 
 __all__ = [
-    'GaussianNoise',
+    'Noise',
     'LineBroadening',
     'BaselineAugmentation',
     'ResidualWater',

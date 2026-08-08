@@ -31,7 +31,7 @@ from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 from augmentrum.core import Backend, NIfTI_MRS_Plus
 from augmentrum.core.pipeline import AugmentationPipeline
 from augmentrum.augmentation import (
-    ArtificialPeaks, GaussianNoise, LineBroadening, PhaseShift, ResidualWater,
+    ArtificialPeaks, Noise, LineBroadening, PhaseShift, ResidualWater,
 )
 from augmentrum.processing import Domain, DomainError, DomainTransform
 
@@ -130,7 +130,7 @@ def test_calling_a_module_directly_puts_the_data_back(batch):
 
 def test_a_module_that_needs_nothing_forces_nothing():
     """A scalar multiply commutes with the transform, so it should not force one."""
-    assert GaussianNoise(snr=30).DOMAIN is None
+    assert Noise(snr=30).DOMAIN is None
     assert PhaseShift(zero_order_deg=30.0).DOMAIN is None
 
 
@@ -189,7 +189,7 @@ def test_the_plan_leaves_the_data_where_it_can_be_written(batch):
 
 def test_the_end_domain_can_be_overridden(batch):
     """Staying in k-space is a legitimate thing to ask for."""
-    pipeline = AugmentationPipeline([GaussianNoise(snr=30, seed=0)],
+    pipeline = AugmentationPipeline([Noise(snr=30, seed=0)],
                                     end_domain=Domain(spatial='kspace'))
     out, _ = pipeline(batch)
 
@@ -203,7 +203,7 @@ def test_a_strict_module_refuses_rather_than_guessing():
     Being handed another is a mistake in the pipeline, and saying so is more
     use than a transform the caller never asked for.
     """
-    class OnlyInKspace(GaussianNoise):
+    class OnlyInKspace(Noise):
         DOMAIN = Domain(spatial='kspace')
         STRICT = True
 

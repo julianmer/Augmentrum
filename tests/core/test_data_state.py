@@ -30,7 +30,7 @@ from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 from nifti_mrs_plus.core import DataState
 
 from augmentrum.core import Backend, NIfTI_MRS_Plus
-from augmentrum.augmentation import GaussianNoise
+from augmentrum.augmentation import Noise
 from augmentrum.sampling import KspaceUndersampling
 
 from tests.module_specs import SPECS
@@ -55,9 +55,9 @@ def volume():
 @pytest.mark.parametrize("volatile", [True, False])
 def test_a_module_signs_its_name(volume, volatile):
     """Whoever ran last is recorded, on the fast path as well as the slow one."""
-    out, _ = GaussianNoise(snr=30, seed=0)(volume(volatile))
+    out, _ = Noise(snr=30, seed=0)(volume(volatile))
 
-    assert out.state.last == 'GaussianNoise'
+    assert out.state.last == 'Noise'
 
 
 @pytest.mark.parametrize("volatile", [True, False])
@@ -88,9 +88,9 @@ def test_state_accumulates_across_a_pipeline(volume):
     plus = volume()
     plus, _ = KspaceUndersampling(ksp_mode='cartesian', acceleration_factor=2.0,
                                   us_seed=0)(plus)
-    plus, _ = GaussianNoise(snr=30, seed=0)(plus)
+    plus, _ = Noise(snr=30, seed=0)(plus)
 
-    assert plus.state.last == 'GaussianNoise', "the later module should sign it"
+    assert plus.state.last == 'Noise', "the later module should sign it"
     assert plus.state.sampling == 'undersampled', "the earlier fact must survive"
 
 

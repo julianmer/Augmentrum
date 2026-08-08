@@ -40,7 +40,7 @@ from tests.module_specs import SPECS
 # ── augmentation imports ──────────────────────────────────────────────────────
 from augmentrum.augmentation import (
     AmplitudeScaling, Apodization, ArtificialPeaks, BaselineAugmentation,
-    EddyCurrent, FrequencyShift, GaussianNoise, LineBroadening, PhaseShift,
+    EddyCurrent, FrequencyShift, Noise, LineBroadening, PhaseShift,
     ResidualWater, SpuriousEchoes, SpatialAugmentations, ZeroFill,
 )
 from augmentrum.processing.nifti_raw_processor import NIfTI_RawProcessor

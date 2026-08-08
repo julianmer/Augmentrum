@@ -363,10 +363,10 @@ class TestLineBroadeningIntegration:
     def test_chained_with_other_modules(self, dummy_nifti_list):
         """Test chaining LineBroadening with other modules."""
         from augmentrum.core.pipeline import AugmentationPipeline
-        from augmentrum.augmentation.gaussian_noise import GaussianNoise
+        from augmentrum.augmentation.noise import Noise
 
         broadening = LineBroadening(lb_hz=10.0)
-        noise = GaussianNoise(sigma_frac=0.02)
+        noise = Noise(sigma_frac=0.02)
         pipeline = AugmentationPipeline([broadening, noise])
 
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)

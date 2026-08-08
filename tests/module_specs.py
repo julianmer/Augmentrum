@@ -24,7 +24,7 @@ Here the *discovery* is automatic and only the per-variant detail is written by
 hand. "uncovered_classes" is what closes the gap: a class in the registry
 with no spec is a test failure, not silence.
 
-A module may need several specs — "GaussianNoise" has three ways of stating a
+A module may need several specs — "Noise" has three ways of stating a
 noise level, "BaselineAugmentation" three baseline models — so specs are a flat
 list of variants, not one per class.
 """
@@ -53,7 +53,7 @@ class ModuleSpec:
     One testable configuration of a module.
 
     Args:
-        label: display name and pytest id, e.g. "GaussianNoise[snr_db]".
+        label: display name and pytest id, e.g. "Noise[snr_db]".
         cls: the module class.
         kwargs: constructor arguments for this variant.
         needs_multicoil: needs the multi-coil fixture (DIM_COIL + DIM_DYN).
@@ -124,9 +124,9 @@ SPECS: List[ModuleSpec] = [
 
     ModuleSpec("FrequencyShift", None, {"shift_hz": 5.0}),
 
-    ModuleSpec("GaussianNoise[sigma]", None, {"sigma": 0.01}),
-    ModuleSpec("GaussianNoise[snr_db]", None, {"snr_db": 20.0}),
-    ModuleSpec("GaussianNoise[sigma_frac]", None, {"sigma_frac": 0.02}),
+    ModuleSpec("Noise[sigma]", None, {"sigma": 0.01}),
+    ModuleSpec("Noise[snr_db]", None, {"snr_db": 20.0}),
+    ModuleSpec("Noise[sigma_frac]", None, {"sigma_frac": 0.02}),
 
     ModuleSpec("CoilSampler[synthesize]", None,
                {"mode": "synthesize", "n_coils": 4, "seed": 0}, volume=True),

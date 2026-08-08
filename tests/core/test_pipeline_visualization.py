@@ -62,7 +62,7 @@ class TestPipelineVisualization:
         viz = augmenter.visualize_pipeline()
 
         assert 'Pipeline Steps' in viz
-        assert 'GaussianNoise' in viz
+        assert 'Noise' in viz
         assert 'LineBroadening' in viz
 
     def test_visualization_detailed_shows_params(self, dummy_nifti_list):
@@ -90,7 +90,7 @@ class TestPipelineVisualization:
         viz = augmenter.visualize_pipeline(detailed=False)
 
         # Should show module name but not parameters
-        assert 'GaussianNoise' in viz
+        assert 'Noise' in viz
         assert 'sigma_frac' not in viz
 
     def test_show_pipeline_prints(self, dummy_nifti_list, capsys):
@@ -100,7 +100,7 @@ class TestPipelineVisualization:
 
         captured = capsys.readouterr()
         assert 'AUGMENTRUM PIPELINE' in captured.out
-        assert 'GaussianNoise' in captured.out
+        assert 'Noise' in captured.out
 
     def test_empty_pipeline_visualization(self, dummy_nifti_list):
         """Test visualization with empty pipeline."""

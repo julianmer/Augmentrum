@@ -626,7 +626,7 @@ EXAMPLE:
   Spectrum metadata shows:
     1. NIfTI_RawProcessor applied
     2. PhaseShift applied (zero_order=27.3°)
-    3. GaussianNoise applied (sigma_frac=0.021)
+    3. Noise applied (sigma_frac=0.021)
     ... complete audit trail!
 
 VOLATILE MODE (volatile=True):

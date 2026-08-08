@@ -23,7 +23,7 @@ from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 from nifti_mrs_plus import NIfTI_MRS_Plus, Backend, ops
 from tests.module_specs import SPECS
 from augmentrum.augmentation import (
-    GaussianNoise,
+    Noise,
     LineBroadening,
     PhaseShift,
     FrequencyShift,
@@ -192,12 +192,12 @@ def test_module_on_backend(
     )
 
 
-# ── Backend-specific GaussianNoise mode tests ─────────────────────────────────
+# ── Backend-specific Noise mode tests ─────────────────────────────────
 
-# ── Backend-specific GaussianNoise mode tests ─────────────────────────────────
+# ── Backend-specific Noise mode tests ─────────────────────────────────
 
 def _run_noise(mode_kwargs, nifti_list, backend_enum):
-    module = GaussianNoise(**mode_kwargs)
+    module = Noise(**mode_kwargs)
     nplus  = NIfTI_MRS_Plus(nifti_list=nifti_list, backend=backend_enum, volatile=True)
     orig   = nplus[0][:].copy()
     result, _ = module(nplus, None)
@@ -205,29 +205,29 @@ def _run_noise(mode_kwargs, nifti_list, backend_enum):
 
 
 @pytest.mark.parametrize("backend_enum,backend_name", ALL_BACKENDS)
-def test_gaussian_noise_sigma_mode(backend_enum, backend_name, single_coil_nifti_list):
-    """GaussianNoise(sigma=…) runs on every backend."""
+def test_noise_sigma_mode(backend_enum, backend_name, single_coil_nifti_list):
+    """Noise(sigma=…) runs on every backend."""
     result, orig = _run_noise({"sigma": 0.05}, single_coil_nifti_list, backend_enum)
     assert not np.allclose(result[0][:], orig, atol=1e-8)
 
 
 @pytest.mark.parametrize("backend_enum,backend_name", ALL_BACKENDS)
-def test_gaussian_noise_sigma_frac_mode(backend_enum, backend_name, single_coil_nifti_list):
-    """GaussianNoise(sigma_frac=…) runs on every backend."""
+def test_noise_sigma_frac_mode(backend_enum, backend_name, single_coil_nifti_list):
+    """Noise(sigma_frac=…) runs on every backend."""
     result, orig = _run_noise({"sigma_frac": 0.05}, single_coil_nifti_list, backend_enum)
     assert not np.allclose(result[0][:], orig, atol=1e-8)
 
 
 @pytest.mark.parametrize("backend_enum,backend_name", ALL_BACKENDS)
-def test_gaussian_noise_snr_db_mode(backend_enum, backend_name, single_coil_nifti_list):
-    """GaussianNoise(snr_db=…) runs on every backend."""
+def test_noise_snr_db_mode(backend_enum, backend_name, single_coil_nifti_list):
+    """Noise(snr_db=…) runs on every backend."""
     result, orig = _run_noise({"snr_db": 15.0}, single_coil_nifti_list, backend_enum)
     assert not np.allclose(result[0][:], orig, atol=1e-8)
 
 
 @pytest.mark.parametrize("backend_enum,backend_name", ALL_BACKENDS)
-def test_gaussian_noise_snr_mode(backend_enum, backend_name, single_coil_nifti_list):
-    """GaussianNoise(snr=…) runs on every backend."""
+def test_noise_snr_mode(backend_enum, backend_name, single_coil_nifti_list):
+    """Noise(snr=…) runs on every backend."""
     result, orig = _run_noise({"snr": 20.0}, single_coil_nifti_list, backend_enum)
     assert not np.allclose(result[0][:], orig, atol=1e-8)
 
@@ -282,7 +282,7 @@ class TestSpatialAugmentationsBackends:
 # ── Invariant: modules with SUPPORTED_BACKENDS=[] must have process_tensor ────
 
 _CLAIM_ALL_BACKENDS_FACTORIES = [
-    ("GaussianNoise",        lambda: GaussianNoise(sigma=0.01)),
+    ("Noise",        lambda: Noise(sigma=0.01)),
     ("LineBroadening",       lambda: LineBroadening(lb_hz=5.0)),
     ("PhaseShift",           lambda: PhaseShift(zero_order_deg=30.0)),
     ("FrequencyShift",       lambda: FrequencyShift(shift_hz=10.0)),
