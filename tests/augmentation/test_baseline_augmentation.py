@@ -239,3 +239,41 @@ class TestBaselineIntegration:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+#***********************#
+#   the size it asked   #
+#***********************#
+def test_every_mode_responds_to_baseline_frac():
+    """
+    All three modes are documented to scale by it, so all three must.
+
+    The polynomial mode used to ignore it entirely: it fits the spectrum and
+    added the raw fit, which came out about the size of the signal itself. That
+    is invisible unless the added amount is measured against the peak.
+    """
+    import numpy as np
+    from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+    from augmentrum.core import Backend, NIfTI_MRS_Plus
+    from augmentrum.processing import DomainTransform
+
+    t = np.arange(512) / 2000.0
+    fid = (np.exp(2j * np.pi * 120 * t) * np.exp(-t / 0.15)).astype(np.complex64)
+    plus = NIfTI_MRS_Plus(
+        nifti_list=[gen_nifti_mrs(fid.reshape(1, 1, 1, 512), 1 / 2000.0, 123.0)],
+        backend=Backend.NUMPY, volatile=True)
+
+    spectrum = np.asarray(
+        DomainTransform(spectral='frequency')(plus)[0].get_data(Backend.NUMPY))
+    peak = np.abs(spectrum).max()
+
+    for mode in ('random_walk', 'bspline', 'polynomial'):
+        added = []
+        for frac in (0.05, 0.20):
+            out, _ = BaselineAugmentation(mode=mode, baseline_frac=frac)(plus)
+            after = np.asarray(
+                DomainTransform(spectral='frequency')(out)[0].get_data(Backend.NUMPY))
+            added.append(np.abs(after - spectrum).max() / peak)
+
+        assert added[0] <= 0.08, f"{mode} added {added[0]:.2f} of the peak for frac=0.05"
+        assert added[1] > added[0], f"{mode} ignored baseline_frac"

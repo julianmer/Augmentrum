@@ -95,11 +95,12 @@ no manual conversion needed.
 | `ArtificialPeaks` | Lorentzian, Gaussian, Voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `AverageSampler` | random, deterministic                                   |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `BaselineAugmentation` | random_walk, bspline, polynomial                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `CoilSampler` | synthesize ‡, random, deterministic                     |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `CoilSampler[random, deterministic]` | draw from the coils present            |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `CoilSampler[synthesize]` | grow a `DIM_COIL` axis from sensitivity maps            |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `EddyCurrent` | synthetic, water                                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `FrequencyShift` | shift_hz                                                |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `GaussianNoise` | sigma, sigma_frac, snr, snr_db                          |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `KspaceUndersampling` | cartesian, gridded, nufft ‖                             |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `Noise` | sigma, sigma_frac, snr, snr_db                          |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `KspaceUndersampling` | cartesian, gridded, nufft                               |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `LineBroadening` | lorentzian, gaussian, voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `NIfTI_RawProcessor` | coil combination, alignment, averaging, ECC, phase/freq |   ✓   | ~ | ~ | ~ | ~ | ~ |
 | `PhaseShift` | zero_order, first_order                                 |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -115,10 +116,6 @@ no manual conversion needed.
 Modes that differ in backend support get a row each, named `Module[mode]`.
 
 > **†** `Apodization[truncate]` and `ZeroFill` both change `N_PTS`. Because `target_pts` / `n_pts` is a module-level scalar, the **same length is applied uniformly to every batch member** — the output is still a uniform tensor.
-
-> **‡** `CoilSampler[synthesize]` grows a `DIM_COIL` axis from sensitivity maps — synthetic, supplied, or measured via `T2starMove.maps()` — so that undersampling becomes parallel imaging rather than plain decimation. The other modes draw from the coils already there; averages have their own `AverageSampler`.
-
-> **‖** `KspaceUndersampling[nufft]` measures at the coordinates the trajectory actually visits and inverts with a density-compensated adjoint, instead of masking the Cartesian grid. Runs on the built-in gridding NUFFT, so it needs no extra dependency.
 
 ---
 

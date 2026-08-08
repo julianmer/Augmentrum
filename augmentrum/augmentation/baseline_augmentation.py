@@ -91,9 +91,8 @@ class BaselineAugmentation(BaseModule):
 
     SUPPORTED_BACKENDS = tuple(Backend)
 
-    # The baseline is built in a spectrum, but this module takes and
-    # returns a FID and does that transform itself.
-    DOMAIN = Domain(spectral='time')
+    # A baseline is a feature of a spectrum, so that is where it is built.
+    DOMAIN = Domain(spectral='frequency')
 
     #*****************#
     #   helper math   #
@@ -156,13 +155,12 @@ class BaselineAugmentation(BaseModule):
             ]
 
     @staticmethod
-    def _calculate_ppm_and_mask(fid, sw_hz, sf_hz, ref_ppm, ppm_windows):
-        """Internal function to transform FID, calculate PPM axis, and create the baseline mask.
+    def _calculate_ppm_and_mask(spec, sw_hz, sf_hz, ref_ppm, ppm_windows):
+        """Calculate the ppm axis for a spectrum and mark the baseline regions.
 
         Note: "sf_hz" is the Larmor frequency in **MHz** (matching NIfTI-MRS convention).
         It is converted to Hz internally for the ppm calculation.
         """
-        spec = np.fft.fftshift(np.fft.ifft(fid))
         N = spec.size
 
         # Larmor frequency in Hz (sf_hz is passed in MHz, hence *1e6)
@@ -247,14 +245,20 @@ class BaselineAugmentation(BaseModule):
             sf_mhz = nifti.spectrometer_frequency[0]
 
             # Add baseline based on mode
+            # The helpers work in the spectrum, which is where a baseline is a
+            # baseline. On this path the data is still a FID, so the transform
+            # happens here rather than inside each of them.
+            spectrum = np.fft.fftshift(np.fft.ifft(fid, axis=-1), axes=-1)
             if self.mode == 'random_walk':
-                fid_with_baseline = self._add_random_walk_baseline(fid, sw_hz, sf_mhz)
+                augmented = self._add_random_walk_baseline(spectrum, sw_hz, sf_mhz)
             elif self.mode == 'bspline':
-                fid_with_baseline = self._add_bspline_baseline(fid, sw_hz, sf_mhz)
+                augmented = self._add_bspline_baseline(spectrum, sw_hz, sf_mhz)
             elif self.mode == 'polynomial':
-                fid_with_baseline = self._add_polynomial_baseline(fid, sw_hz, sf_mhz)
+                augmented = self._add_polynomial_baseline(spectrum, sw_hz, sf_mhz)
             else:
                 raise ValueError(f"Invalid baseline mode: {self.mode}")
+
+            fid_with_baseline = np.fft.fft(np.fft.ifftshift(augmented, axes=-1), axis=-1)
 
             # Update NIFTI_MRS data
             nifti[:] = fid_with_baseline
@@ -317,7 +321,7 @@ class BaselineAugmentation(BaseModule):
 
         for i in range(fid_2d.shape[0]):
             fid_1d = fid_2d[i]
-            spec = np.fft.fftshift(np.fft.ifft(fid_1d))  # MRS convention: ifft for FID -> spectrum
+            spec = fid_1d               # already a spectrum: see DOMAIN
 
             # Get spectrum peak for scaling
             spec_max = np.max(np.abs(np.real(spec)))
@@ -333,9 +337,7 @@ class BaselineAugmentation(BaseModule):
             # This makes bounds_amp relative to the spectrum, and baseline_frac controls the final amplitude
             baseline = base_rw_complex * self.bounds_amp * spec_max * self.baseline_frac
 
-            spec_with_base = spec + baseline
-            fid_augmented = np.fft.fft(np.fft.ifftshift(spec_with_base))  # MRS convention: fft for spectrum -> FID
-            result[i] = fid_augmented
+            result[i] = spec + baseline
 
         return result.reshape(original_shape)
 
@@ -373,7 +375,7 @@ class BaselineAugmentation(BaseModule):
             fid_1d = fid_2d[i]
 
             # Go to the (shifted) frequency domain
-            spec = np.fft.fftshift(np.fft.ifft(fid_1d))
+            spec = fid_1d               # already a spectrum: see DOMAIN
             dt = 1.0 / float(sw_hz)
             freq_hz = np.fft.fftshift(np.fft.fftfreq(N, d=dt))
             ppm = ref_ppm - freq_hz / float(sf_mhz)    # descending axis (e.g., 6→0)
@@ -427,9 +429,7 @@ class BaselineAugmentation(BaseModule):
                 baseline = baseline * np.exp(1j * np.deg2rad(self.phase_deg))
 
             # ---- Add to spectrum and return to FID ----
-            spec_aug = spec + baseline
-            fid_with_baseline = np.fft.fft(np.fft.ifftshift(spec_aug))
-            result[i] = fid_with_baseline
+            result[i] = spec + baseline
 
         return result.reshape(original_shape)
 
@@ -448,22 +448,26 @@ class BaselineAugmentation(BaseModule):
         for i in range(fid_2d.shape[0]):
             fid_1d = fid_2d[i]
 
-            # calculate_ppm_and_mask uses ifft internally (correct for FID→spectrum)
-            spec, N_pts, mask_baseline = BaselineAugmentation._calculate_ppm_and_mask(fid_1d, sw_hz, sf_mhz, ref_ppm, self.ppm_windows)
+            spec, N_pts, mask_baseline = BaselineAugmentation._calculate_ppm_and_mask(
+                fid_1d, sw_hz, sf_mhz, ref_ppm, self.ppm_windows)
 
             idx = np.flatnonzero(mask_baseline)
             x = np.arange(N_pts)
 
-            # Fit polynomial to the actual spectrum values at baseline points
-            # (exact match to legacy baseline_add_poly)
+            # Fit a polynomial through the spectrum where no metabolite sits
             cr = np.polyfit(idx, np.real(spec)[idx], self.order)
             ci = np.polyfit(idx, np.imag(spec)[idx], self.order)
             fit = np.polyval(cr, x) + 1j * np.polyval(ci, x)
 
-            # Add baseline to spectrum and convert back using fft (spectrum→FID, MRS convention)
-            spec_corr = spec + fit
-            fid_with_baseline = np.fft.fft(np.fft.ifftshift(spec_corr))
-            result[i] = fid_with_baseline
+            # The fit follows the spectrum it was taken from, so on its own it
+            # would add a baseline the size of the signal. Scaling it to
+            # baseline_frac of the peak is what the other two modes do, and what
+            # the parameter is documented to mean.
+            fit_peak = np.abs(fit).max()
+            if fit_peak > 0:
+                fit = fit * (self.baseline_frac * np.abs(spec).max() / fit_peak)
+
+            result[i] = spec + fit
 
         return result.reshape(original_shape)
 

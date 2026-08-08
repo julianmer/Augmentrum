@@ -19,6 +19,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple, Union
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 from nifti_mrs_plus.core import DataState
+from nifti_mrs_plus import ops
 from nifti_mrs_plus.ops import SeedGenerator
 
 
@@ -343,9 +344,13 @@ class BaseModule(ABC):
         water_array = water.get_data(backend) if water is not None else None
 
         # ── Process (receives native tensors — preserves gradients) ──
+        moved = self._spectral_axis_last(data_array)
         processed_data, processed_water = self.process_tensor(
-            data_array, water_array, backend=backend, **kwargs
+            moved if moved is not None else data_array,
+            water_array, backend=backend, **kwargs
         )
+        if moved is not None:
+            processed_data = self._spectral_axis_back(processed_data)
 
         # ── Write back ──
         operation_name = self.__class__.__name__
@@ -387,6 +392,51 @@ class BaseModule(ABC):
             out.update_metadata(operation_name, operation_details)
 
         return out
+
+    #**********************#
+    #   the spectral axis  #
+    #**********************#
+    #: Where NIfTI-MRS keeps the spectral points once a batch axis is in front.
+    SPECTRAL_AXIS = 4
+
+    def _spectral_axis_last(self, data_array):
+        """
+        Bring the spectral axis to the end, if this module needs it there.
+
+        Every spectral module is written against the last axis, because that is
+        where the spectral points sit in the usual "(batch, X, Y, Z, T)". Add a
+        coil or average axis behind it and the last axis is no longer T - so a
+        line broadening would decay across coils instead of along the FID, and
+        return a perfectly plausible volume while doing it.
+
+        Only modules that named a spectral domain are moved: they are exactly
+        the ones that read along it. Modules working element by element do not
+        care what order the axes come in.
+
+        Args:
+            data_array: The batch, in the NIfTI layout.
+
+        Returns:
+            The batch with T last, or None when nothing needed moving.
+        """
+        if self.DOMAIN is None or self.DOMAIN.spectral is None:
+            return None
+
+        rank = len(ops.shape(data_array))
+        if rank <= self.SPECTRAL_AXIS + 1:
+            return None
+
+        self._axis_rank = rank
+        order = ([d for d in range(rank) if d != self.SPECTRAL_AXIS]
+                 + [self.SPECTRAL_AXIS])
+        return ops.transpose(data_array, order)
+
+    def _spectral_axis_back(self, data_array):
+        """Undo :meth:"_spectral_axis_last", leaving the caller's layout."""
+        rank = self._axis_rank
+        order = (list(range(self.SPECTRAL_AXIS)) + [rank - 1]
+                 + list(range(self.SPECTRAL_AXIS, rank - 1)))
+        return ops.transpose(data_array, order)
 
     def output_state(self, state: 'DataState') -> 'DataState':
         """

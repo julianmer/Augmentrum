@@ -30,7 +30,8 @@ from augmentrum.utils import download
 from augmentrum.sampling.dimension_sampling import DimensionSampler
 
 
-__all__ = ['MapSource', 'Birdcage', 'Supplied', 'T2starMove', 'CoilSampler']
+__all__ = ['MapSource', 'Birdcage', 'Supplied', 'Augmented', 'T2starMove',
+           'CoilSampler']
 
 
 #**************************************************************************************************#
@@ -284,6 +285,75 @@ class Supplied(MapSource):
                 f"{matrix}. Sensitivity maps must match the spatial matrix."
             )
         return self.array
+
+
+#**************************************************************************************************#
+#                                         Class Augmented                                          #
+#**************************************************************************************************#
+#                                                                                                  #
+# Another source's maps, moved as if the array had sat differently.                                #
+#                                                                                                  #
+#**************************************************************************************************#
+class Augmented(MapSource):
+    """
+    Another source's maps, moved as if the array had sat differently.
+
+    A receive array is not bolted to the subject. Between sessions - and within
+    one, if anybody moves - the coils sit at a different angle and offset
+    relative to the head, so the same array produces different sensitivities.
+    Training on one fixed placement teaches a model that geometry rather than
+    the anatomy under it.
+
+    This turns and shifts the maps, leaving the object alone, which is the same
+    thing seen from the other side. It is applied to the maps rather than to the
+    data, so it costs nothing per volume: the array is placed once and then used
+    as any other source would be.
+
+    Args:
+        source: The array to move - synthetic, supplied or measured.
+        rotation_deg: Largest turn to apply, in degrees.
+        shift_frac: Largest offset, as a fraction of the field of view.
+        seed: Fixes the sequence. Placements still vary from call to call.
+
+    Examples:
+        >>> Augmented(Birdcage(n_coils=8), rotation_deg=20.0)
+        >>> Augmented(T2starMove(), rotation_deg=10.0, shift_frac=0.05)
+    """
+
+    def __init__(self, source: MapSource, rotation_deg: float = 15.0,
+                 shift_frac: float = 0.05, seed=None):
+        self.source = source
+        self.rotation_deg = float(rotation_deg)
+        self.shift_frac = float(shift_frac)
+        self.seed = seed
+
+    def build(self, matrix, n_coils, rng):
+        """The wrapped source's maps, put somewhere else."""
+        from augmentrum.augmentation import SpatialAugmentations
+
+        maps = self.source.maps(matrix, n_coils, rng)
+        if not (self.rotation_deg or self.shift_frac):
+            return maps
+
+        mover = SpatialAugmentations(
+            dim=3, prob=1.0,
+            translation_frac=self.shift_frac,
+            max_z_angle_deg=self.rotation_deg,
+            csm_max_z_angle_deg=self.rotation_deg,
+            max_random_angle_deg=0.0,
+            zoom_min=1.0, zoom_max=1.0, shear_max=0.0,
+            allow_rot90=False,
+            min_coils=n_coils or maps.shape[-1],
+            max_coils=n_coils or maps.shape[-1],
+        )
+
+        # The csm pipeline exists for exactly this, and takes the layout maps
+        # already have once a batch axis is in front.
+        moved, _ = mover.apply(maps[None], pipeline='csm', coils_axis=-1)
+
+        # Moving them breaks the unit-sensitivity convention at the edges, where
+        # the turn brought in voxels the array never covered.
+        return self.normalize(np.asarray(moved)[0])
 
 
 #**************************************************************************************************#

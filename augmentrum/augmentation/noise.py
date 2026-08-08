@@ -97,9 +97,16 @@ class FromSensitivity(NoiseCovariance):
 
     Two elements that see the same part of the sample also share the noise that
     part contributes, so the overlap of their sensitivities stands in for how
-    correlated they are. It is a model, not a measurement: real coupling also
-    comes from mutual inductance between the coils, which no amount of looking
-    at their maps will reveal.
+    correlated they are.
+
+    This is a **model, not a measurement**, and the distinction matters for what
+    can be concluded from it. Real coupling has two sources: the shared sample,
+    which the overlap does capture, and mutual inductance between the coils,
+    which it cannot - that depends on the geometry and tuning of the array, not
+    on what it sees. A study comparing reconstruction methods under realistic
+    coupling should measure psi from a noise prescan and pass it to
+    :class:"SuppliedCovariance" instead. This is for making an array behave
+    plausibly, not for characterising a particular one.
 
     Args:
         maps: Sensitivity maps "(X, Y, Z, C)", as any MapSource produces.

@@ -15,6 +15,7 @@
 #   imports   #
 #*************#
 from augmentrum.sampling.coil_sampling import (
+    Augmented,
     Birdcage,
     CoilSampler,
     MapSource,
@@ -39,6 +40,7 @@ __all__ = [
     'AverageSampler',
     'CoilSampler',
     'DimensionSampler',
+    'Augmented',
     'Birdcage',
     'MapSource',
     'Supplied',
