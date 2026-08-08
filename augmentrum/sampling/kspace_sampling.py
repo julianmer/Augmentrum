@@ -3235,7 +3235,10 @@ class KspaceUndersampling(BaseModule):
                  noise_sigma_k: Optional[float] = None,
                  chunk_t: Optional[int] = 128,
                  us_seed: Optional[int] = None,
-                 pixdim: Optional[Tuple[float, ...]] = None):
+                 pixdim: Optional[Tuple[float, ...]] = None,
+                 # geometry applied to where the samples are taken
+                 traj_rotation_deg: float = 0.0,
+                 traj_scale: float = 1.0):
         """
         ksp_mode: 'cartesian', 'gridded', 'nufft' or 'off' (see class docstring).
         nufft_osf: NUFFT grid oversampling, used by ksp_mode='nufft' only.
@@ -3304,6 +3307,8 @@ class KspaceUndersampling(BaseModule):
         self.chunk_t = chunk_t
         self.us_seed = us_seed
         self.pixdim = tuple(pixdim) if pixdim is not None else None
+        self.traj_rotation_deg = float(traj_rotation_deg)
+        self.traj_scale = float(traj_scale)
 
         # Populated after every call — what was actually applied, for provenance.
         self.last_masks_: Optional[np.ndarray] = None
@@ -3351,12 +3356,52 @@ class KspaceUndersampling(BaseModule):
         # acceleration, so there is no empty case to guard against here.
         keep = np.flatnonzero(self.last_masks_)
         pts = np.concatenate([np.atleast_2d(np.asarray(shots[int(i)])) for i in keep])
+        pts = self._transform_trajectory(pts)
 
         ndim = pts.shape[1]
         kmax = np.asarray(meta['kmax'][:ndim], dtype=np.float64)
         if self.nufft_impl == 'torchkbnufft':
             return self._nufft_torchkbnufft(data_array, matrix, pts, kmax, ndim)
         return self._nufft_gridding(data_array, matrix, pts, kmax, ndim)
+
+    def _transform_trajectory(self, pts: np.ndarray) -> np.ndarray:
+        """
+        Rotate and scale where the samples are taken.
+
+        Both act on the sample locations rather than on any image, so neither
+        costs an interpolation. They do quite different things, though:
+
+        **Scaling** lowers the resolution. Keeping only the samples nearer the
+        centre of k-space is what a shorter, coarser acquisition measures, and
+        the point spread widens as 1/kmax. It is not the same as zero-padding at
+        regridding, which raises the grid without adding any information.
+
+        **Rotation** turns the sampling pattern, not the object. Reconstructing
+        with the same coordinates it was sampled on gives the object back
+        unchanged - at full sampling the image is identical. What it changes is
+        *which* parts of k-space are visited, so under acceleration a different
+        set of spokes is acquired and the aliasing takes a different form. That
+        is its use: a fresh undersampling artefact from the same trajectory. To
+        turn the object itself, use SpatialAugmentations, which does that in
+        either domain.
+
+        Args:
+            pts: Sample locations "(n_samples, ndim)", in cycles per metre.
+
+        Returns:
+            The transformed locations.
+        """
+        if self.traj_rotation_deg:
+            angle = np.deg2rad(self.traj_rotation_deg)
+            turn = np.array([[np.cos(angle), -np.sin(angle)],
+                             [np.sin(angle), np.cos(angle)]])
+
+            # A 3-D trajectory turns about z, leaving the stack axis alone.
+            rotation = np.eye(pts.shape[1])
+            rotation[:2, :2] = turn
+            pts = pts @ rotation.T
+
+        return pts * self.traj_scale if self.traj_scale != 1.0 else pts
 
     def _nufft_gridding(self, data_array, matrix, pts, kmax, ndim):
         """

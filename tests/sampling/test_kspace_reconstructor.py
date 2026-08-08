@@ -278,3 +278,59 @@ class TestKspaceUndersamplingNufft:
         assert 'nufft' in KspaceUndersampling.MODES
         with pytest.raises(ValueError, match='ksp_mode must be one of'):
             KspaceUndersampling(ksp_mode='nonsense')
+
+
+#*****************************#
+#   trajectory as geometry    #
+#*****************************#
+# Moving the sample locations is the cheap, exact half of spatial augmentation:
+# no interpolation anywhere. Scaling and rotating do different things, and the
+# difference is easy to state wrongly, so both are pinned here.
+
+def _reconstructed(accel=1.0, **kwargs):
+    """A small object put through the nufft path."""
+    from augmentrum.sampling import KspaceUndersampling
+
+    vol = np.zeros((1, 32, 32, 1, 4), np.complex64)
+    vol[0, 10:22, 12:20, 0, :] = 1.0
+    module = KspaceUndersampling(ksp_mode='nufft', trajectory='radial_2d',
+                                 acceleration_factor=accel, us_seed=0, **kwargs)
+    return np.abs(np.asarray(module.process_tensor(vol)[0])[0, :, :, 0, 0])
+
+
+def test_scaling_the_trajectory_lowers_the_resolution():
+    """Keeping only the centre of k-space is what a coarser acquisition measures."""
+    sharpness = []
+    for scale in (1.0, 0.5, 0.25):
+        image = _reconstructed(traj_scale=scale)
+        image = image / image.max()
+        sharpness.append(np.abs(np.diff(image[:, 16])).max())
+
+    assert sharpness[0] > sharpness[1] > sharpness[2], sharpness
+
+
+def test_rotating_the_trajectory_leaves_a_fully_sampled_image_alone():
+    """
+    It turns the sampling pattern, not the object.
+
+    Reconstructing on the same coordinates it was sampled on gives the object
+    back exactly, which is worth asserting because the opposite is a natural
+    thing to assume.
+    """
+    plain = _reconstructed(accel=1.0)
+    turned = _reconstructed(accel=1.0, traj_rotation_deg=30.0)
+
+    assert np.corrcoef(plain.ravel(), turned.ravel())[0, 1] > 0.999
+
+
+def test_rotating_the_trajectory_changes_the_aliasing_when_accelerated():
+    """
+    And this is what it is for.
+
+    Under acceleration a turned trajectory visits different spokes, so the
+    artefact is a different realization from the same acquisition scheme.
+    """
+    plain = _reconstructed(accel=4.0)
+    turned = _reconstructed(accel=4.0, traj_rotation_deg=30.0)
+
+    assert np.corrcoef(plain.ravel(), turned.ravel())[0, 1] < 0.9
