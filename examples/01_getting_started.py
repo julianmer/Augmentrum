@@ -156,7 +156,6 @@ def plot_comparison(nifti_list, labels, title, ppmlim=(0.2, 4.2)):
 #***********************************#
 #   part 1: loading real mrs data   #
 #***********************************#
-
 print("\n" + "="*80)
 print(" PART 1: LOADING REAL MRS DATA")
 print("="*80)
@@ -227,7 +226,6 @@ plt.show()
 #*******************************************************#
 #   part 2: building your first augmentation pipeline   #
 #*******************************************************#
-
 print("\n" + "="*80)
 print(" PART 2: BUILDING YOUR FIRST AUGMENTATION PIPELINE")
 print("="*80)
@@ -316,7 +314,6 @@ plot_comparison(
 #*********************************************************#
 #   part 3: understanding parameters - fixed vs. random   #
 #*********************************************************#
-
 print("\n" + "="*80)
 print(" PART 3: UNDERSTANDING PARAMETERS - THE KEY TO AUGMENTATION")
 print("="*80)
@@ -435,7 +432,6 @@ print("  • Random ranges + mode='on-the-fly' = infinite training data!")
 #**********************************************#
 #   part 4: combining multiple augmentations   #
 #**********************************************#
-
 print("\n" + "="*80)
 print(" PART 4: COMBINING MULTIPLE AUGMENTATIONS")
 print("="*80)
@@ -552,7 +548,6 @@ plot_comparison(
 #*********************************************#
 #   part 5: creating your own custom module   #
 #*********************************************#
-
 print("\n" + "="*80)
 print(" PART 5: CREATING YOUR OWN CUSTOM AUGMENTATION MODULE")
 print("="*80)
@@ -681,7 +676,6 @@ print("  • Mix custom modules with built-ins freely!")
 #****************************************************************#
 #   part 6: putting it all together - realistic training setup   #
 #****************************************************************#
-
 print("\n" + "="*80)
 print(" PART 6: PUTTING IT ALL TOGETHER FOR TRAINING")
 print("="*80)
@@ -773,7 +767,6 @@ for epoch in range(num_epochs):
 #*********************************************************#
 #   part 7: pre-pipeline - caching expensive operations   #
 #*********************************************************#
-
 print("\n" + "="*80)
 print(" PART 7: PRE-PIPELINE - EFFICIENT PREPROCESSING")
 print("="*80)
@@ -967,7 +960,6 @@ Result: Fast training with infinite variety! 🎉
 #****************************#
 #   summary and next steps   #
 #****************************#
-
 print("\n" + "="*80)
 print(" 🎉 TUTORIAL COMPLETE!")
 print("="*80)

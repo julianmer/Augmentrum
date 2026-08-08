@@ -19,6 +19,7 @@
 import numpy as np
 from typing import Optional, List, Tuple, Union
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
 from nifti_mrs_plus.ops import match_backend
@@ -88,6 +89,9 @@ class SpuriousEchoes(BaseModule):
     """
 
     SUPPORTED_BACKENDS = tuple(Backend)
+
+    # An echo is a delayed copy of the FID.
+    DOMAIN = Domain(spectral='time')
 
     def __init__(self, echoes=None,
                  mode: str = 'replica',

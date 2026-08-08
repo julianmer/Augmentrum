@@ -75,10 +75,9 @@ class DimensionSampler(BaseModule):
         self.mode = mode
         self.count = self.as_range(count)
 
-    #*************#
-    #   counts    #
-    #*************#
-
+    #************#
+    #   counts   #
+    #************#
     @staticmethod
     def as_range(count):
         """
@@ -126,7 +125,6 @@ class DimensionSampler(BaseModule):
     #*************#
     #   drawing   #
     #*************#
-
     def process_tensor(self, data_array, water_array=None,
                        backend: Backend = Backend.NUMPY, **kwargs):
         """

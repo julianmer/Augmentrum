@@ -73,7 +73,6 @@ from augmentrum.dataset.cows import COWSDataModule
 #***************************#
 #   visualization helpers   #
 #***************************#
-
 def plot_batch_variety(batch_data, title, max_plots=6):
     """
     Plot multiple spectra from a batch to show variability.
@@ -214,7 +213,6 @@ def plot_overlay(nifti_list, labels, title):
 #****************************************#
 #   part 1: loading data for splitting   #
 #****************************************#
-
 print("\n" + "="*80)
 print(" PART 1: LOADING DATA")
 print("="*80)
@@ -250,7 +248,6 @@ print(f"  Subject IDs: {subject_names[:5]}...\n")
 #*****************************#
 #   part 2: creating splits   #
 #*****************************#
-
 print("="*80)
 print(" PART 2: CREATING TRAIN/VAL/TEST SPLITS")
 print("="*80)
@@ -334,7 +331,6 @@ This ensures you can reproduce your experiments exactly.
 #*******************************************#
 #   part 3: different pipelines per split   #
 #*******************************************#
-
 print("\n" + "="*80)
 print(" PART 3: DIFFERENT AUGMENTATION STRATEGIES PER SPLIT")
 print("="*80)
@@ -410,7 +406,6 @@ This setup ensures:
 #*******************************************************#
 #   part 4: understanding modes - on-the-fly vs fixed   #
 #*******************************************************#
-
 print("\n" + "="*80)
 print(" PART 4: ON-THE-FLY VS FIXED MODE - THE CRITICAL DIFFERENCE")
 print("="*80)
@@ -513,7 +508,6 @@ KEY TAKEAWAY:
 #*******************************#
 #   part 5: using dataloaders   #
 #*******************************#
-
 print("\n" + "="*80)
 print(" PART 5: USING DATALOADERS FOR BATCH GENERATION")
 print("="*80)
@@ -614,7 +608,6 @@ for epoch in range(num_epochs):
 #*************************************************#
 #   part 6: provenance logging vs volatile mode   #
 #*************************************************#
-
 print("\n" + "="*80)
 print(" PART 6: PROVENANCE LOGGING VS VOLATILE MODE")
 print("="*80)
@@ -713,7 +706,6 @@ RECOMMENDATION:
 #***************************************#
 #   part 7: complete training example   #
 #***************************************#
-
 print("\n" + "="*80)
 print(" PART 7: PUTTING IT ALL TOGETHER - COMPLETE TRAINING SETUP")
 print("="*80)
@@ -841,7 +833,6 @@ with torch.no_grad():
 #*****************************************************#
 #   part 8: pre-pipeline - performance optimization   #
 #*****************************************************#
-
 print("\n" + "="*80)
 print(" PART 8: PRE-PIPELINE FOR FASTER TRAINING")
 print("="*80)
@@ -945,7 +936,6 @@ This gives maximum flexibility for different training strategies!
 #*************#
 #   summary   #
 #*************#
-
 print("\n" + "="*80)
 print(" 🎉 TUTORIAL 02 COMPLETE!")
 print("="*80)

@@ -22,6 +22,7 @@ from typing import Optional, Tuple, List, Dict, Any, Union
 
 import numpy as np
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from augmentrum.utils.geometry import Affine
 from nifti_mrs_plus import ops
@@ -70,6 +71,11 @@ class SpatialAugmentations(BaseModule):
     """
 
     SUPPORTED_BACKENDS = tuple(Backend)
+
+    # Works in either domain, so it never forces a transform. In k-space the
+    # linear part of the affine becomes its inverse transpose and the shift
+    # becomes a phase ramp; see "_kspace_theta".
+    DOMAIN = None
 
     def __init__(self,
                  dim: int = 3,
@@ -491,12 +497,22 @@ class SpatialAugmentations(BaseModule):
         """
         return (0,) + tuple(range(ndim - 1, 0, -1))
 
-    def _apply_affine_batch(self, x, theta):
+    def _apply_affine_batch(self, x, theta, domain: str = 'image'):
         """
         x: NIfTI layout — (N, X, Y, Z, C) for dim=3, (N, X, Y, C) for dim=2.
         theta: (N, 2, 3) or (N, 3, 4)
+        domain: "image" to resample voxels, "kspace" to apply the same
+            augmentation to the samples instead.
         returns the transformed tensor in the same layout.
         """
+        if domain == 'kspace':
+            spatial = tuple(int(n) for n in ops.shape(x)[1:1 + theta.shape[1]])
+            theta, shifts = self._kspace_theta(theta, spatial)
+            # The ramp belongs on the samples the resampling will read, not on
+            # the ones it writes: the displacement rides on the transformed
+            # coordinate, so it has to be in place before the matrix is applied.
+            x = self._phase_ramp(x, shifts)
+
         perm = self._axis_perm(len(ops.shape(x)))
         xg = ops.transpose(x, perm)                 # (N, C, [Z,] Y, X)
         n_batch, n_chan = ops.shape(xg)[0], ops.shape(xg)[1]
@@ -526,6 +542,87 @@ class SpatialAugmentations(BaseModule):
 
         return ops.transpose(ops.concatenate(outs, axis=1), perm)
 
+    #********************#
+    #   the k-space form #
+    #********************#
+    @staticmethod
+    def _kspace_theta(theta, spatial):
+        """
+        The same augmentation, written for k-space instead of for voxels.
+
+        An affine applied to an image acts on its transform as the inverse
+        transpose. For a rotation the two coincide, which is why only an
+        anisotropic zoom tells them apart - and why getting this wrong looks
+        perfectly correct on every rotation-only test.
+
+        A shift does not carry over as a shift at all: displacing an object
+        multiplies its transform by a linear phase, so it is taken out here and
+        applied by :meth:"_phase_ramp".
+
+        The last wrinkle is where the turn happens. A sampling grid is centred
+        between the middle two samples of an even axis, while DC lands on one of
+        them, so on such an axis the two centres sit half a voxel apart.
+
+        Args:
+            theta: "(N, 2, 3)" or "(N, 3, 4)" image-space affines.
+            spatial: Grid lengths, in the data's own axis order.
+
+        Returns:
+            "(kspace_theta, shifts)" - the matrix to resample k-space with, and
+            the shifts left for the phase ramp.
+        """
+        ndim = theta.shape[1]
+        linear, shifts = theta[:, :, :ndim], theta[:, :, ndim]
+
+        # The inverse-transpose relation holds between voxel coordinates, but a
+        # sampling grid normalizes every axis to [-1, 1] regardless of how long
+        # it is. On a square grid the two agree and the difference never shows;
+        # on a rectangular one it has to be undone and redone.
+        half = np.asarray(spatial, dtype=np.float64) / 2.0
+        aspect = half[None, :] / half[:, None]
+        matrix = (np.transpose(np.linalg.inv(linear), (0, 2, 1))
+                  * aspect[None]).astype(theta.dtype)
+
+        # A voxel spans 2/n of the normalized extent, so half of one is 1/n.
+        centre = np.array([1.0 / n if n % 2 == 0 else 0.0 for n in spatial],
+                          dtype=theta.dtype)
+
+        kspace = np.zeros_like(theta)
+        kspace[:, :, :ndim] = matrix
+        kspace[:, :, ndim] = centre - matrix @ centre
+        return kspace, shifts
+
+    def _phase_ramp(self, x, shifts):
+        """
+        Displace the object by multiplying its transform by a linear phase.
+
+        Args:
+            x: k-space data in the NIfTI layout.
+            shifts: "(N, ndim)" in the normalized coordinates affine_grid uses,
+                ordered as theta orders its axes.
+
+        Returns:
+            *x*, phase-ramped.
+        """
+        ndim = shifts.shape[1]
+        spatial = tuple(int(n) for n in ops.shape(x)[1:1 + ndim])
+
+        # Half the extent is one normalized unit, so a shift of s is s * n / 2
+        # voxels. The sign and the axis pairing are pinned against the image
+        # path rather than reasoned about: both are easy to get backwards and
+        # a wrong one still returns a plausible-looking volume.
+        phase = np.zeros((len(shifts),) + spatial, dtype=np.float64)
+        for axis, n in enumerate(spatial):
+            k = np.fft.fftshift(np.fft.fftfreq(n))
+            view = [1] * len(spatial)
+            view[axis] = n
+            voxels = shifts[:, axis] * n / 2.0
+            phase = phase + (2.0 * np.pi * k.reshape([1] + view)
+                             * voxels.reshape((-1,) + (1,) * len(spatial)))
+
+        ramp = np.exp(1j * phase).astype(np.complex64)[..., None]
+        return x * ops.cast_like(ops.match_backend(ramp, x), x)
+
     def _grid_sample(self, x, grid):
         return ops.grid_sample(x, grid, padding_mode=self.padding_mode)
 
@@ -547,7 +644,7 @@ class SpatialAugmentations(BaseModule):
     #***************************#
     #   public apply function   #
     #***************************#
-    def apply(self, x,
+    def apply(self, x, domain: str = 'image',
              pipeline: str = 'data',
              aug_spec_list: Optional[List[Dict[str, Any]]] = None,
              coils_axis: int = -1) -> Tuple[Any, List[Dict[str, Any]]]:
@@ -599,7 +696,7 @@ class SpatialAugmentations(BaseModule):
             x_aug = x
         else:
             # Apply affine to entire batch at once
-            x_aug = self._apply_affine_batch(x, theta)
+            x_aug = self._apply_affine_batch(x, theta, domain=domain)
 
         # If coil subsampling requested and is CSM pipeline, do it per-sample
         if is_csm:
@@ -753,6 +850,7 @@ class SpatialAugmentations(BaseModule):
         # Apply augmentations
         data_aug, aug_list = self.apply(
             data_array,
+            domain=(kwargs['state'].spatial if kwargs.get('state') else 'image'),
             pipeline=pipeline,
             aug_spec_list=aug_spec_list,
             coils_axis=-1

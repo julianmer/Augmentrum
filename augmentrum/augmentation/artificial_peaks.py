@@ -17,9 +17,10 @@
 import numpy as np
 from typing import Optional, List, Dict
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
-from nifti_mrs_plus.ops import fft, ifft, fftshift, ifftshift, match_backend
+from nifti_mrs_plus.ops import match_backend
 
 
 #**************************************************************************************************#
@@ -61,6 +62,9 @@ class ArtificialPeaks(BaseModule):
     """
 
     SUPPORTED_BACKENDS = tuple(Backend)
+
+    # A peak is a feature of a spectrum, so that is where it is added.
+    DOMAIN = Domain(spectral='frequency')
 
     def __init__(self, peaks: List[Dict] = None, ref_ppm: float = 4.7, amp_mode: str = 'real'):
         """Initialize artificial peaks module."""
@@ -129,8 +133,9 @@ class ArtificialPeaks(BaseModule):
 
         N = data_array.shape[-1]
 
-        # 1. Spectrum (backend-native FFT — preserves gradients)
-        spec = fftshift(ifft(data_array))  # shape = original_shape
+        # 1. The data arrives as a spectrum: this module declares that it works
+        #    in the frequency domain and is put there before it runs.
+        spec = data_array
 
         # 2. ppm axis (numpy — coordinate, no gradients needed)
         dt = 1.0 / float(sw_hz)
@@ -168,10 +173,7 @@ class ArtificialPeaks(BaseModule):
             * ops.cast_like(peak_ref, spec)
 
         # 5. Add contamination in spectral domain (backend-native)
-        spec_aug = spec + contam
-
-        # 6. Back to FID (backend-native IFFT)
-        return fft(ifftshift(spec_aug)), water_array
+        return spec + contam, water_array
 
     def _add_peaks(self, fid: np.ndarray, sw_hz: float, sf_mhz: float) -> np.ndarray:
         """

@@ -27,7 +27,6 @@ from tests.module_specs import SPECS, registered_classes, uncovered_classes
 #*************#
 #   the gap   #
 #*************#
-
 def test_every_registered_module_has_a_spec():
     """
     A module in the registry with no spec gets no coverage from any sweeping test.
@@ -61,7 +60,6 @@ def test_every_spec_constructs():
 #****************#
 #   provenance   #
 #****************#
-
 @pytest.mark.parametrize("spec", SPECS, ids=[s.label for s in SPECS])
 def test_constructor_params_reach_provenance(spec):
     """
@@ -104,7 +102,6 @@ def test_explicit_kwargs_are_recorded_by_value(spec):
 #**************#
 #   volatile   #
 #**************#
-
 def test_volatile_skips_metadata_updates():
     """
     "volatile=True" is documented as skipping metadata updates for speed.
@@ -125,7 +122,6 @@ def test_volatile_skips_metadata_updates():
 #**************#
 #   registry   #
 #**************#
-
 def test_registry_aliases_resolve_to_module_classes():
     """Every name a user can put in a pipeline must map to a BaseModule subclass."""
     for name, cls in Augmentrum.AVAILABLE_MODULES.items():
@@ -158,7 +154,6 @@ def test_exported_augmentations_are_reachable_by_name():
 #***************************#
 #   provenance end to end   #
 #***************************#
-
 def _nifti_list(shape, n=2):
     """*n* NIfTI-MRS objects of the given "(X, Y, Z, T)" shape."""
     import numpy as np

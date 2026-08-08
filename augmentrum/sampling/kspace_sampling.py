@@ -290,7 +290,6 @@ class Trajectory(ABC):
     #****************#
     #   generation   #
     #****************#
-
     @abstractmethod
     def generate(self, geometry: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
         """Return "(shots, meta)" for *geometry*, built on *like*'s backend."""
@@ -465,7 +464,6 @@ class TrajectoryRegistry:
     #****************#
     #   population   #
     #****************#
-
     @classmethod
     def register(cls, trajectory_cls: type) -> type:
         """Class decorator recording *trajectory_cls* under its "NAME"."""
@@ -480,10 +478,9 @@ class TrajectoryRegistry:
         cls._REGISTRY[name] = trajectory_cls
         return trajectory_cls
 
-    #****************#
-    #   lookup       #
-    #****************#
-
+    #************#
+    #   lookup   #
+    #************#
     @classmethod
     def available(cls) -> List[str]:
         """Every registered trajectory name, sorted."""
@@ -506,7 +503,6 @@ class TrajectoryRegistry:
     #****************#
     #   generation   #
     #****************#
-
     @classmethod
     def generate(cls, name: str, header: Dict[str, Any], params: Dict[str, Any],
                  like=None) -> Tuple[List[Any], Dict[str, Any]]:
@@ -3313,10 +3309,9 @@ class KspaceUndersampling(BaseModule):
         self.last_masks_: Optional[np.ndarray] = None
         self.last_meta_: Optional[Dict[str, Any]] = None
 
-    #**********************#
-    #   nufft undersampling #
-    #**********************#
-
+    #*************************#
+    #   nufft undersampling   #
+    #*************************#
     def _apply_nufft(self, data_array, matrix, geometry, rng):
         """
         Measure along the real trajectory and invert, instead of masking the grid.
@@ -3476,7 +3471,6 @@ class KspaceUndersampling(BaseModule):
     #***********************#
     #   mask construction   #
     #***********************#
-
     def _draw_mask(self, matrix: Tuple[int, ...], geometry: Optional[dict],
                    rng: np.random.Generator) -> np.ndarray:
         """Draw one boolean sampling mask of shape *matrix* (in fftshift order)."""
@@ -3546,6 +3540,17 @@ class KspaceUndersampling(BaseModule):
     #**************************#
     #   basemodule interface   #
     #**************************#
+    def output_state(self, state):
+        """
+        The data has now been undersampled, and that changes what is legitimate.
+
+        Anything added afterwards in the image domain - noise above all - is no
+        longer being added to what the scanner measured, because a zero-filled
+        reconstruction of undersampled k-space does not have white noise. This
+        is the flag that lets a later module notice.
+        """
+        state = super().output_state(state)
+        return state if self.ksp_mode == 'off' else state.having(sampling='undersampled')
 
     def process_tensor(self, data_array, water_array=None,
                        backend: Backend = Backend.PYTORCH, **kwargs):
@@ -3588,10 +3593,9 @@ class KspaceUndersampling(BaseModule):
 
         return self._apply_masks(data_array, masks), water_array
 
-    #***************#
-    #   coils       #
-    #***************#
-
+    #***********#
+    #   coils   #
+    #***********#
     def _apply_per_coil(self, data_array, **kwargs):
         """
         Undersample a receive array, one element at a time.
@@ -3623,10 +3627,9 @@ class KspaceUndersampling(BaseModule):
 
         return ops.stack(per_coil, axis=5)
 
-    #***************#
-    #   masking     #
-    #***************#
-
+    #*************#
+    #   masking   #
+    #*************#
     def _spatial_axes(self, ndim: int = 5) -> Tuple[int, ...]:
         return (1, 2, 3)
 

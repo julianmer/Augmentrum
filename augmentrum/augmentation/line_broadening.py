@@ -18,6 +18,7 @@ import math
 from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend, ops
 
 
@@ -61,6 +62,10 @@ class LineBroadening(BaseModule):
     """
 
     SUPPORTED_BACKENDS = tuple(Backend)
+
+    # Broadening multiplies the FID by a decay. The same operation in a
+    # spectrum would be a convolution, not a multiply.
+    DOMAIN = Domain(spectral='time')
 
     def __init__(self, lb_hz: float = 0.0, gb_hz: float = 0.0, mode: str = 'voigt'):
         """Initialize line broadening module."""

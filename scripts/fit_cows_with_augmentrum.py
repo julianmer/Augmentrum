@@ -54,7 +54,6 @@ from scripts.fsl_fitting_framework import FSLFittingFramework
 #****************************#
 #   configuration defaults   #
 #****************************#
-
 DEFAULT_CONFIG = {
     # Data paths
     'data_dir': 'data/openneuro_ds006812/',      # COWS data (openneuro TWIX format)
@@ -91,7 +90,6 @@ DEFAULT_CONFIG = {
 #***************************#
 #   data format detection   #
 #***************************#
-
 def _detect_data_format(data_dir):
     """
     Detect available data format, checking that files are actually readable
@@ -152,7 +150,6 @@ def _detect_data_format(data_dir):
 #***************************#
 #   main fitting pipeline   #
 #***************************#
-
 def run_fitting_pipeline(config):
     """
     Main pipeline: Load COWS → Process → Fit → Save.
@@ -632,7 +629,6 @@ def run_fitting_pipeline(config):
 #****************************************#
 #   demonstrate loading and conversion   #
 #****************************************#
-
 def demo_load_and_convert(save_dir):
     """
     Demonstrate loading saved results and converting to simulation definitions.
@@ -750,7 +746,6 @@ def demo_load_and_convert(save_dir):
 #**********************#
 #   argument parsing   #
 #**********************#
-
 def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
@@ -817,7 +812,6 @@ Examples:
 #**********#
 #   main   #
 #**********#
-
 if __name__ == '__main__':
     args = parse_args()
 

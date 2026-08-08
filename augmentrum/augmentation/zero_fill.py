@@ -18,6 +18,7 @@ import numpy as np
 from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend
 from nifti_mrs_plus.ops import is_torch, is_jax, is_tf
 from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
@@ -59,6 +60,9 @@ class ZeroFill(BaseModule):
     """
 
     SUPPORTED_BACKENDS = tuple(Backend)
+
+    # Padding lengthens the FID; in a spectrum it would interpolate.
+    DOMAIN = Domain(spectral='time')
 
     def __init__(self, target_pts: int):
         super().__init__()

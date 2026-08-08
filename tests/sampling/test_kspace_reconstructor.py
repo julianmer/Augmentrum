@@ -34,7 +34,6 @@ HEADER = {"dim": [4, N, N, 1, 1, 1, 1, 1],
 #*************#
 #   helpers   #
 #*************#
-
 def _trajectory(name, **params):
     """Trajectory as normalized "[1, S, D, L]" coordinates, plus its metadata."""
     shots, meta = TrajectoryRegistry.generate(name, HEADER, params)
@@ -72,7 +71,6 @@ def _nrmse(ref, test):
 #******************************#
 #   coordinate normalization   #
 #******************************#
-
 def test_normalize_trajectory_is_per_axis():
     """Anisotropic voxels give a per-axis kmax, and each axis must use its own."""
     coords = torch.ones(1, 2, 3, 4)
@@ -102,7 +100,6 @@ def test_real_trajectory_fills_the_unit_box():
 #***********************#
 #   operator identity   #
 #***********************#
-
 def test_forward_adjoint_are_a_true_pair():
     """Dot-product test: <Ax, y> == <x, A^H y> to within float32 precision."""
     coords, _ = _trajectory("radial_2d", n_shots=33)
@@ -124,7 +121,6 @@ def test_forward_adjoint_are_a_true_pair():
 #********************#
 #   reconstruction   #
 #********************#
-
 def test_cartesian_roundtrip_is_near_exact():
     """
     Cartesian samples land on the grid, so the NUFFT reduces to an FFT.
@@ -202,7 +198,6 @@ def test_mask_shape_is_validated():
 #*****************************#
 #   the nufft undersampling   #
 #*****************************#
-
 class TestKspaceUndersamplingNufft:
     """
     "ksp_mode='nufft'": the honest counterpart to "gridded".

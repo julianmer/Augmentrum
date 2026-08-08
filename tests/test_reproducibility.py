@@ -38,9 +38,9 @@ from tests.module_specs import SPECS
 
 N_PTS = 128
 
-#***********************#
-#   specs under test    #
-#***********************#
+#**********************#
+#   specs under test   #
+#**********************#
 # Only modules that actually accept a seed, and only the spectral ones: the
 # spatial / volume modules and the NIfTI-only samplers have their own suites.
 _EXCLUDED = {"NIfTI_RawProcessor", "CoilSampler[draw]", "AverageSampler"}
@@ -59,10 +59,9 @@ SEEDED_SPECS = [s for s in SPECS
                 and _takes_seed(s)]
 
 
-#***************#
-#   helpers     #
-#***************#
-
+#*************#
+#   helpers   #
+#*************#
 def _batch():
     """A fixed single-voxel batch, identical on every call."""
     rng = np.random.default_rng(0)
@@ -83,10 +82,9 @@ def _is_stochastic(spec) -> bool:
     return not np.allclose(draw(), draw())
 
 
-#***********************************#
-#   a seeded run must reproduce     #
-#***********************************#
-
+#*********************************#
+#   a seeded run must reproduce   #
+#*********************************#
 @pytest.mark.parametrize("spec", SEEDED_SPECS, ids=lambda s: s.label)
 def test_same_seed_reproduces(spec):
     """Two modules built with the same seed produce the same first batch."""

@@ -35,7 +35,6 @@ from scipy.io import loadmat
 #*****************************#
 #   basis loading utilities   #
 #*****************************#
-
 def read_LCModel_raw(filename, conjugate=True):
     """
     Read LCModel (.RAW, .raw, and .H2O) file format.

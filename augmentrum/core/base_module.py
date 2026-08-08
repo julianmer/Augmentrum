@@ -18,6 +18,7 @@ import inspect
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple, Union
 from augmentrum.core import NIfTI_MRS_Plus, Backend
+from nifti_mrs_plus.core import DataState
 from nifti_mrs_plus.ops import SeedGenerator
 
 
@@ -53,6 +54,14 @@ class BaseModule(ABC):
     # grows the array's rank must name the axes it added: a rebuilt NIfTI object
     # takes its tags from the source, which by definition does not have them.
     ADDS_DIM_TAGS: Tuple[str, ...] = ()
+
+    # Which domain this module works in. None means it does not care and runs
+    # wherever it finds the data, which is the common case. A module that names
+    # one is moved there and back; one that also sets STRICT is not moved at
+    # all, because it defines the domain it operates in and being handed another
+    # is a pipeline mistake rather than something to silently correct.
+    DOMAIN = None
+    STRICT: bool = False
 
     def __init_subclass__(cls, **kwargs):
         """
@@ -116,11 +125,54 @@ class BaseModule(ABC):
         """
         Main entry point - handles everything automatically.
 
+        - Moves the data to a domain this module works in, and back after
         - Checks backend compatibility
         - Routes to appropriate processing method
         - Handles logging/provenance (if not volatile)
         - Returns NIfTI_MRS_Plus objects
         """
+        if self.DOMAIN is not None and not self.DOMAIN.satisfied_by(data.state):
+            return self._via_domain(data, water, **kwargs)
+        return self._dispatch(data, water, **kwargs)
+
+    def _via_domain(self, data: NIfTI_MRS_Plus, water: Optional[NIfTI_MRS_Plus],
+                    **kwargs) -> Tuple[NIfTI_MRS_Plus, Optional[NIfTI_MRS_Plus]]:
+        """
+        Run this module in the domain it needs, and put the data back.
+
+        Calling a module directly is not a pipeline, so there is nothing to plan
+        against and the transform has to be undone straight away. A pipeline
+        does better: it looks at the whole chain and moves the data once for a
+        run of modules that want the same thing.
+
+        A module marked "STRICT" is not moved. Those define the domain they
+        operate in, so being handed another is a mistake in the pipeline rather
+        than something to paper over.
+        """
+        from augmentrum.processing.domain import DomainError, DomainTransform
+
+        if self.STRICT:
+            raise DomainError(
+                f"{self.__class__.__name__} works in {self.DOMAIN}, but the data is "
+                f"spectral={data.state.spectral}, spatial={data.state.spatial}. "
+                f"Insert a DomainTransform before it, or let a pipeline plan the "
+                f"transforms for you."
+            )
+
+        was = data.state
+        moved, water = DomainTransform(spectral=self.DOMAIN.spectral,
+                                       spatial=self.DOMAIN.spatial)(data, water)
+        out, water = self._dispatch(moved, water, **kwargs)
+
+        back = DomainTransform(
+            spectral=was.spectral if self.DOMAIN.spectral else None,
+            spatial=was.spatial if self.DOMAIN.spatial else None)
+        out, water = back(out, water)
+        return out.set_state(out.state.having(last=self.__class__.__name__)), water
+
+    def _dispatch(self, data: NIfTI_MRS_Plus, water: Optional[NIfTI_MRS_Plus] = None,
+                  **kwargs) -> Tuple[NIfTI_MRS_Plus, Optional[NIfTI_MRS_Plus]]:
+        """Pick the processing method that suits this module and the backend."""
         # Determine which method to use based on backend
         backend = data.backend
 
@@ -189,7 +241,8 @@ class BaseModule(ABC):
         data_out = NIfTI_MRS_Plus(
             nifti_list=processed_data,
             backend=data.backend,
-            volatile=data.volatile
+            volatile=data.volatile,
+            state=self.output_state(data.state)
         )
 
         # Update metadata if not volatile
@@ -201,7 +254,8 @@ class BaseModule(ABC):
             water_out = NIfTI_MRS_Plus(
                 nifti_list=processed_water,
                 backend=water.backend if water else Backend.NIFTI_LIST,
-                volatile=water.volatile if water else data.volatile
+                volatile=water.volatile if water else data.volatile,
+                state=self.output_state(water.state if water else data.state)
             )
             if water and not water.volatile:
                 water_out.update_metadata(operation_name, operation_details)
@@ -279,6 +333,11 @@ class BaseModule(ABC):
         if 'dim_tags' not in kwargs and data.n_subjects > 0:
             kwargs['dim_tags'] = data.dim_tags
 
+        # And where the data is, so a module can act on the domain it is in
+        # rather than assume one.
+        if 'state' not in kwargs:
+            kwargs['state'] = data.state
+
         # ── Get data in native backend format (not forced to numpy!) ──
         data_array = data.get_data(backend)
         water_array = water.get_data(backend) if water is not None else None
@@ -303,10 +362,9 @@ class BaseModule(ABC):
 
         return data_out, water_out
 
-    #*****************#
-    #   write-back    #
-    #*****************#
-
+    #****************#
+    #   write-back   #
+    #****************#
     def _wrap_processed(self, source: NIfTI_MRS_Plus, processed,
                         backend: Backend, operation_name: str,
                         operation_details: Dict) -> NIfTI_MRS_Plus:
@@ -320,7 +378,8 @@ class BaseModule(ABC):
         point at which data becomes NumPy again.
         """
         out = NIfTI_MRS_Plus(nifti_list=source.nifti_list, backend=backend,
-                             volatile=source.volatile)
+                             volatile=source.volatile,
+                             state=self.output_state(source.state))
         if processed is not None:
             out.set_data(processed, backend, dim_tags=self._output_dim_tags(source))
 
@@ -328,6 +387,23 @@ class BaseModule(ABC):
             out.update_metadata(operation_name, operation_details)
 
         return out
+
+    def output_state(self, state: 'DataState') -> 'DataState':
+        """
+        Where the data is once this module has run.
+
+        Recorded whether or not the batch is volatile, because it is a fixed
+        handful of facts rather than a growing record. Most modules leave the
+        data where they found it and only sign their name; one that moves it
+        between domains, or undersamples it, overrides this.
+
+        Args:
+            state: The state on the way in.
+
+        Returns:
+            The state on the way out.
+        """
+        return state.having(last=self.__class__.__name__)
 
     def _output_dim_tags(self, source: NIfTI_MRS_Plus) -> List:
         """

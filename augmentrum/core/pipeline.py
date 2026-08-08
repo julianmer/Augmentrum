@@ -17,6 +17,7 @@
 from typing import List, Optional, Tuple
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.domain import Domain
 import warnings
 
 
@@ -43,7 +44,8 @@ class AugmentationPipeline:
     Uses introspection to automatically discover module parameters!
     """
 
-    def __init__(self, steps: List[BaseModule], module_names=None, user_kwargs=None):
+    def __init__(self, steps: List[BaseModule], module_names=None, user_kwargs=None,
+                 end_domain=None):
         """
         Initializes the pipeline with a list of augmentation steps.
 
@@ -51,8 +53,13 @@ class AugmentationPipeline:
             steps: List of augmentation step instances (must inherit from BaseModule).
             module_names: List of module name strings (e.g., ['phase', 'noise'])
             user_kwargs: Dictionary of all user-provided parameters
+            end_domain: Where the data should be left. Defaults to the NIfTI-MRS
+                canonical form, time domain and image space, so the result can
+                be written out. Pass a "Domain" to stay somewhere else - staying
+                in k-space, for instance, so spatial augmentation acts there.
         """
         self.steps = steps
+        self.end_domain = end_domain
         self.module_names = module_names or []
         self.user_kwargs = user_kwargs or {}
         self._validate_steps()
@@ -211,6 +218,59 @@ class AugmentationPipeline:
         # Otherwise return as-is
         return param
 
+    def domain_plan(self, state=None):
+        """
+        The steps as they will actually run, with domain transforms inserted.
+
+        Planned once for the whole chain rather than left to each module, which
+        is what keeps the transforms down: a module that names a domain forces
+        one only if the data is not already there, so a run of modules wanting
+        the same thing shares a single move. Modules that name no domain never
+        force anything.
+
+        Args:
+            state: Where the data starts. Defaults to the canonical form.
+
+        Returns:
+            "[(index, step)]", where *index* is the step's position in this
+            pipeline and "-1" marks a transform the plan inserted - so a caller
+            can still match sampled parameters to the step they belong to.
+
+        Raises:
+            DomainError: If a strict module is reached in the wrong domain.
+                Those define the domain they operate in, so the plan says what
+                to insert rather than guessing.
+        """
+        from nifti_mrs_plus.core import DataState
+        from augmentrum.processing.domain import DomainError, DomainTransform
+
+        state = state if state is not None else DataState()
+        planned = []
+
+        for index, step in enumerate(self.steps):
+            wanted = getattr(step, 'DOMAIN', None)
+            if wanted is not None and not wanted.satisfied_by(state):
+                if getattr(step, 'STRICT', False):
+                    raise DomainError(
+                        f"{type(step).__name__} at step {index} works in {wanted}, but "
+                        f"the data reaches it as spectral={state.spectral}, "
+                        f"spatial={state.spatial}. Add a DomainTransform before it."
+                    )
+                move = DomainTransform(spectral=wanted.spectral, spatial=wanted.spatial)
+                planned.append((-1, move))
+                state = move.output_state(state)
+
+            planned.append((index, step))
+            if hasattr(step, 'output_state'):
+                state = step.output_state(state)
+
+        # Leave the data somewhere it can be written out, unless told otherwise
+        end = self.end_domain or Domain(spectral='time', spatial='image')
+        if not end.satisfied_by(state):
+            planned.append((-1, DomainTransform(spectral=end.spectral,
+                                                spatial=end.spatial)))
+        return planned
+
     def __call__(self, data: NIfTI_MRS_Plus, water: Optional[NIfTI_MRS_Plus] = None,
                  batch_params=None, **kwargs) -> Tuple[NIfTI_MRS_Plus, Optional[NIfTI_MRS_Plus]]:
         """
@@ -236,7 +296,7 @@ class AugmentationPipeline:
         current_data = data
         current_water = water
 
-        for i, step in enumerate(self.steps):
+        for i, step in self.domain_plan(data.state):
             # Inject batch parameters if provided (for on-the-fly mode)
             if batch_params and i in batch_params:
                 # Temporarily set sampled parameters on the step

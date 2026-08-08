@@ -37,7 +37,6 @@ __all__ = [
 #**********************#
 #   helper functions   #
 #**********************#
-
 def create_deterministic_indices(data: NIfTI_MRS_Plus, n_coils: Tuple, n_averages: Tuple) -> List[Tuple]:
     """
     Create all possible (subject_idx, coil_idx, average_idx) combinations.
@@ -86,7 +85,6 @@ def _get_limits(n: Tuple, n_max: int) -> Tuple[int, int]:
 #*********************************#
 #   backend-agnostic generators   #
 #*********************************#
-
 def _make_batch(data, water, indices, copy=False):
     """
     Build a (batch_data, batch_water) NIfTI_MRS_Plus pair from subject indices.
@@ -225,7 +223,6 @@ def create_deterministic_generator(data: NIfTI_MRS_Plus,
 #**********************************#
 #   backend conversion functions   #
 #**********************************#
-
 def convert_batch_to_backend(batch_data: List, batch_water: List, backend: Backend):
     """
     Convert batch of NIFTI_MRS objects to target backend format.
@@ -298,7 +295,6 @@ def convert_batch_to_backend(batch_data: List, batch_water: List, backend: Backe
 #***********************************#
 #   framework dataloader wrappers   #
 #***********************************#
-
 def wrap_generator_for_framework(generator: Callable,
                                  backend: Backend,
                                  framework: str = None):

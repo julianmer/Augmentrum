@@ -25,7 +25,6 @@ import warnings
 #*********************************#
 #   simple spectrum / fit plots   #
 #*********************************#
-
 def _crop_ppm(arr, ppmAxis, ppmLim):
     """Return (arr_cropped, ppmAxis_cropped) within *ppmLim* = (lo, hi)."""
     beg = int((np.abs(ppmAxis - ppmLim[0])).argmin())
@@ -159,7 +158,6 @@ def plot_spec(spec, ppmAxis=None, ppmLim=None, name='', save_path=None,
 #******************************#
 #   nifti-mrs batch plotting   #
 #******************************#
-
 try:
     from fsl_mrs.utils.plotting import plot_spectrum, plot_spectra
     from fsl_mrs.core.mrs import MRS

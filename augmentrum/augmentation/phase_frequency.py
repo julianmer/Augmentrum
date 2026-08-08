@@ -19,6 +19,7 @@ import numpy as np
 from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend
 from nifti_mrs_plus.ops import fft, ifft, fftshift, ifftshift, match_backend
 
@@ -66,6 +67,12 @@ class PhaseShift(BaseModule):
 
         self.zero_order_deg = zero_order_deg
         self.first_order_deg = first_order_deg
+
+        # A first-order shift is a ramp across the spectrum, so it needs one.
+        # A zero-order shift is a constant factor and works anywhere, so asking
+        # for a domain it does not need would force a transform for nothing.
+        if first_order_deg != 0.0:
+            self.DOMAIN = Domain(spectral='frequency')
 
     def process_nifti_list(self, data_list: List, water_list: Optional[List] = None, **kwargs):
         """
@@ -153,8 +160,9 @@ class PhaseShift(BaseModule):
         The linear phase ramp is a numpy array; multiplication with the
         spectrum tensor auto-promotes to the correct backend.
         """
-        # FFT to spectrum (backend-agnostic)
-        spec = fftshift(ifft(fid))
+        # The data is already a spectrum: a first-order shift declares the
+        # frequency domain, so the module is put there before it runs.
+        spec = fid
         N = fid.shape[-1]
 
         # Linear ramp (numpy — no gradients needed for coordinates)
@@ -162,8 +170,8 @@ class PhaseShift(BaseModule):
         ramp_shape = [1] * (len(fid.shape) - 1) + [N]
         ramp = np.exp(1j * np.deg2rad(phc1_deg * u)).reshape(ramp_shape)
 
-        # Apply ramp and back to FID (backend-agnostic)
-        return fft(ifftshift(spec * match_backend(ramp, spec)))
+        # Apply the ramp; the caller puts the data back where it was
+        return spec * match_backend(ramp, spec)
 
 
 #**************************************************************************************************#
@@ -195,6 +203,9 @@ class FrequencyShift(BaseModule):
     """
 
     SUPPORTED_BACKENDS = tuple(Backend)
+
+    # A frequency shift is applied as a phase that winds along the FID.
+    DOMAIN = Domain(spectral='time')
 
     def __init__(self, shift_hz: float = 0.0):
         """Initialize frequency shift module."""

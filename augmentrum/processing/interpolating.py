@@ -198,7 +198,6 @@ class KaiserBesselInterpolator(GriddingKernel):
     #************#
     #   kernel   #
     #************#
-
     @staticmethod
     def beatty_beta(width: float, osf: float) -> float:
         """
@@ -249,7 +248,6 @@ class KaiserBesselInterpolator(GriddingKernel):
     #**************#
     #   sampling   #
     #**************#
-
     def neighbors(self, coords: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """The bins within half a kernel width of each sample, and their weights."""
         half = int(math.ceil(self.width / 2.0))
@@ -407,7 +405,6 @@ class HermiteMAkimaInterpolator(Interpolator):
     #*******************#
     #   grid geometry   #
     #*******************#
-
     def _axis_view(self, d: int) -> torch.Tensor:
         """Axis *d* broadcast against the signal, i.e. "[1, 1, ..., n_d, ..., 1]"."""
         import torch

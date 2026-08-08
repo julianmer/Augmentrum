@@ -14,9 +14,13 @@
 #*************#
 #   imports   #
 #*************#
+from augmentrum.processing.domain import Domain, DomainError, DomainTransform
 from augmentrum.processing.nifti_raw_processor import NIfTI_RawProcessor
 
 __all__ = [
+    'Domain',
+    'DomainError',
+    'DomainTransform',
     'NIfTI_RawProcessor',
     'HermiteMAkimaInterpolator',
     'BicubicHermiteMAkima2D',
@@ -24,10 +28,9 @@ __all__ = [
 ]
 
 
-#*******************#
-#   lazy exports    #
-#*******************#
-
+#******************#
+#   lazy exports   #
+#******************#
 _INTERPOLATORS = ("HermiteMAkimaInterpolator", "BicubicHermiteMAkima2D",
                   "TricubicHermiteMAkima3D")
 

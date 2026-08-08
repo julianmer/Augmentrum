@@ -169,7 +169,6 @@ def plot_comparison(nifti_list, labels, title, ppmlim=(0.2, 4.2)):
 #**************************#
 #   part 1: loading data   #
 #**************************#
-
 print("\n" + "="*80)
 print(" PART 1: LOADING DATA")
 print("="*80)
@@ -197,7 +196,6 @@ print(f"✓ Loaded {len(data_list)} subjects\n")
 #************************************#
 #   part 2: understanding backends   #
 #************************************#
-
 print("="*80)
 print(" PART 2: EXPLORING DIFFERENT BACKENDS")
 print("="*80)
@@ -298,7 +296,6 @@ print(f"  • Integration with FSL/Osprey/TARQUIN")
 #******************************************#
 #   part 3: automatic backend conversion   #
 #******************************************#
-
 print("\n" + "="*80)
 print(" PART 3: AUTOMATIC BACKEND CONVERSION - THE MAGIC!")
 print("="*80)
@@ -374,7 +371,6 @@ except ImportError:
 #**************************************#
 #   part 4: exporting to nifti files   #
 #**************************************#
-
 print("\n" + "="*80)
 print(" PART 4: EXPORTING AUGMENTED DATA TO NIFTI FILES")
 print("="*80)
@@ -481,7 +477,6 @@ print(f"  ✓ Removed: {temp_dir}")
 #***********************************************#
 #   part 5: complete pytorch training example   #
 #***********************************************#
-
 print("\n" + "="*80)
 print(" PART 5: COMPLETE PYTORCH TRAINING EXAMPLE")
 print("="*80)
@@ -513,7 +508,6 @@ try:
     #******************************#
     #   step 1: define the model   #
     #******************************#
-
     print("\n" + "-"*60)
     print("STEP 1: Define Neural Network Architecture")
     print("-"*60)
@@ -562,7 +556,6 @@ try:
     #*************************************#
     #   step 2: setup data augmentation   #
     #*************************************#
-
     print("\n" + "-"*60)
     print("STEP 2: Setup Data Augmentation")
     print("-"*60)
@@ -606,7 +599,6 @@ try:
     #**************************************#
     #   step 3: create synthetic targets   #
     #**************************************#
-
     print("\n" + "-"*60)
     print("STEP 3: Create Synthetic Targets")
     print("-"*60)
@@ -622,7 +614,6 @@ try:
     #****************************#
     #   step 4: training setup   #
     #****************************#
-
     print("\n" + "-"*60)
     print("STEP 4: Training Setup")
     print("-"*60)
@@ -637,7 +628,6 @@ try:
     #***************************#
     #   step 5: training loop   #
     #***************************#
-
     print("\n" + "-"*60)
     print("STEP 5: Training (3 epochs for demonstration)")
     print("-"*60)
@@ -756,7 +746,6 @@ for epoch in range(num_epochs):
 #************************************#
 #   part 6: best practices summary   #
 #************************************#
-
 print("\n" + "="*80)
 print(" PART 6: BEST PRACTICES BY FRAMEWORK")
 print("="*80)
@@ -824,7 +813,6 @@ GENERAL TIPS:
 #*************#
 #   summary   #
 #*************#
-
 print("\n" + "="*80)
 print(" 🎉 TUTORIAL 03 COMPLETE - YOU'VE MASTERED AUGMENTRUM!")
 print("="*80)

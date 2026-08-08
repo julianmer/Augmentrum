@@ -34,7 +34,6 @@ from augmentrum.utils import download
 #*************#
 #   helpers   #
 #*************#
-
 def _serving(payload, monkeypatch):
     """Point the downloader at *payload* instead of the network."""
     monkeypatch.setattr(download, '_ssl_context', lambda host: None)
@@ -44,7 +43,6 @@ def _serving(payload, monkeypatch):
 #**************#
 #   fetching   #
 #**************#
-
 def test_a_complete_download_is_kept(tmp_path, monkeypatch):
     """The straightforward case, so the failure cases mean something."""
     import hashlib
@@ -64,12 +62,11 @@ def test_a_complete_download_is_kept(tmp_path, monkeypatch):
 def test_a_truncated_download_is_not_kept(tmp_path, monkeypatch):
     """Half a file that looks whole would be worse than no file."""
     _serving(b'only the first few bytes', monkeypatch)
-    monkeypatch.setattr(download, 'ATTEMPTS', 1)
 
     target = tmp_path / 'archive.zip'
     with pytest.raises(OSError, match="connection ended at"):
         download.fetch('https://example.invalid/archive.zip', target,
-                       size=5_000_000_000, progress=False)
+                       size=5_000_000_000, progress=False, attempts=1)
 
     assert not target.exists()
     assert not list(tmp_path.glob('*.part')), "a failed download left a partial file"
@@ -88,9 +85,9 @@ def test_a_truncated_download_is_retried(tmp_path, monkeypatch):
 
     with pytest.raises(OSError):
         download.fetch('https://example.invalid/archive.zip', tmp_path / 'a.zip',
-                       size=999, progress=False)
+                       size=999, progress=False, attempts=3)
 
-    assert len(attempts) == download.ATTEMPTS
+    assert len(attempts) == 3
 
 
 def test_a_download_that_fails_its_checksum_is_not_kept(tmp_path, monkeypatch):
@@ -110,7 +107,6 @@ def test_a_download_that_fails_its_checksum_is_not_kept(tmp_path, monkeypatch):
 #*************#
 #   caching   #
 #*************#
-
 def test_the_cache_location_can_be_moved(tmp_path, monkeypatch):
     """A shared machine should not be forced to write to a home directory."""
     monkeypatch.setenv('AUGMENTRUM_CACHE', str(tmp_path))

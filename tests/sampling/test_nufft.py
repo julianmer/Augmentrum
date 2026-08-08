@@ -44,10 +44,9 @@ except ImportError:
 N = 32
 
 
-#***************#
-#   fixtures    #
-#***************#
-
+#**************#
+#   fixtures   #
+#**************#
 def _radial(n_spokes=48, n_read=N):
     """Radial trajectory in [-0.5, 0.5), shaped [K, 2]."""
     angles = np.linspace(0, np.pi, n_spokes, endpoint=False)

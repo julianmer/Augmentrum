@@ -169,7 +169,6 @@ SPECS: List[ModuleSpec] = [
 #***************#
 #   discovery   #
 #***************#
-
 def registered_classes() -> Dict[str, Type[BaseModule]]:
     """Distinct module classes reachable through "Augmentrum.AVAILABLE_MODULES"."""
     return {c.__name__: c for c in Augmentrum.AVAILABLE_MODULES.values()}

@@ -21,6 +21,7 @@ from scipy.signal import convolve
 from scipy.interpolate import BSpline
 
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend
 from nifti_mrs_plus.ops import to_numpy, match_backend
 
@@ -90,10 +91,13 @@ class BaselineAugmentation(BaseModule):
 
     SUPPORTED_BACKENDS = tuple(Backend)
 
+    # The baseline is built in a spectrum, but this module takes and
+    # returns a FID and does that transform itself.
+    DOMAIN = Domain(spectral='time')
+
     #*****************#
     #   helper math   #
     #*****************#
-
     @staticmethod
     def _moving_average(x, w):
         """Apply moving average smoothing."""

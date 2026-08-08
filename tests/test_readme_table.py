@@ -130,7 +130,6 @@ class ModuleEntry:
 #****************************************************#
 #   ★  module registry  ★   ← add new modules here   #
 #****************************************************#
-
 _REGISTRY: list[ModuleEntry] = [
     ModuleEntry(spec.label, spec.factory, note=spec.note,
                 needs_multicoil=spec.needs_multicoil, spatial=spec.spatial,
@@ -156,7 +155,6 @@ _RESULTS: dict[tuple[str, str], CellResult] = {}
 #**************#
 #   fixtures   #
 #**************#
-
 @pytest.fixture(scope="module")
 def single_coil_nifti_list():
     rng = np.random.default_rng(42)
@@ -185,7 +183,6 @@ def multi_coil_nifti_list():
 #*************#
 #   helpers   #
 #*************#
-
 def _infer_outcome(module: BaseModule, backend_enum: Backend) -> str:
     sb = module.SUPPORTED_BACKENDS
     return NATIVE if (not sb or backend_enum in sb) else AUTO
@@ -247,7 +244,6 @@ def _run_spatial_module(module, backend_enum) -> float:
 #****************************#
 #   main parametrised test   #
 #****************************#
-
 @pytest.mark.parametrize("backend_enum", _ALL_BACKENDS,
                          ids=[b.value for b in _ALL_BACKENDS])
 @pytest.mark.parametrize("entry", _REGISTRY, ids=[e.name for e in _REGISTRY])
@@ -397,7 +393,6 @@ class TestKspaceReconstructorTable:
 #*******************************************************************************#
 #   summary tables  (zzz → sorts last, always runs after all discovery tests)   #
 #*******************************************************************************#
-
 def test_zzz_print_summary():
     """
     Prints two tables to stdout (requires -s / --capture=no):

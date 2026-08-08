@@ -214,7 +214,6 @@ class MRSIChallengeDataModule:
     #*********************#
     #   path resolution   #
     #*********************#
-
     def subjects(self, split: str) -> Tuple[str, ...]:
         """Subject IDs belonging to *split*."""
         if split == 'train':
@@ -262,7 +261,6 @@ class MRSIChallengeDataModule:
     #******************#
     #   .mat reading   #
     #******************#
-
     @staticmethod
     def _to_complex(dataset) -> np.ndarray:
         """
@@ -440,7 +438,6 @@ class MRSIChallengeDataModule:
     #****************************************#
     #   nifti-mrs construction and caching   #
     #****************************************#
-
     def _cache_path(self, subject: str) -> str:
         return os.path.join(self.cache_dir, f'{subject}_{self.signal}.nii')
 
@@ -528,7 +525,6 @@ class MRSIChallengeDataModule:
     #***************************#
     #   spectral axis helpers   #
     #***************************#
-
     def ppm_axis(self, n_points: Optional[int] = None,
                  dwell_time: Optional[float] = None,
                  hzpppm: Optional[float] = None,

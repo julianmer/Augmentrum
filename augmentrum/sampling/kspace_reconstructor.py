@@ -98,10 +98,9 @@ class GriddingNUFFT:
         self._deapod = (self.interpolator.deapodization(self.im_size)
                         if isinstance(self.interpolator, GriddingKernel) else None)
 
-    #***************#
-    #   adjoint     #
-    #***************#
-
+    #*************#
+    #   adjoint   #
+    #*************#
     def adjoint(self, kdata, coords: np.ndarray):
         """
         Grid non-Cartesian samples back onto an image.
@@ -127,10 +126,9 @@ class GriddingNUFFT:
 
         return self._deapodize(self._crop(image))
 
-    #***************#
-    #   forward     #
-    #***************#
-
+    #*************#
+    #   forward   #
+    #*************#
     def forward(self, image, coords: np.ndarray):
         """
         Sample an image along a trajectory.
@@ -169,7 +167,6 @@ class GriddingNUFFT:
     #*******************#
     #   grid geometry   #
     #*******************#
-
     def _deapodize(self, image):
         """Undo the kernel's image-domain taper, if it has one."""
         if self._deapod is None:
@@ -199,10 +196,9 @@ class GriddingNUFFT:
             out = ops.take(out, index, axis=d + 1)
         return out
 
-    #***********************#
-    #   density weights     #
-    #***********************#
-
+    #*********************#
+    #   density weights   #
+    #*********************#
     def density_weights(self, coords: np.ndarray, iterations: int = 15) -> np.ndarray:
         """
         Pipe-style density compensation weights for *coords*.
@@ -324,7 +320,6 @@ class KspaceReconstructor:
     #*************#
     #   backend   #
     #*************#
-
     def _gridder(self):
         """The backend-agnostic NUFFT this reconstructor is built on."""
         osf = max(self.oversampling_factor)
@@ -350,7 +345,6 @@ class KspaceReconstructor:
     #*****************#
     #   coordinates   #
     #*****************#
-
     @staticmethod
     def normalize_trajectory(coords: Any,
                             k_max: Union[float, Sequence[float]]) -> Any:
@@ -423,7 +417,6 @@ class KspaceReconstructor:
     #********************************#
     #   density compensation (dcf)   #
     #********************************#
-
     def density_weights(self, coords: Any) -> Any:
         """
         Pipe-style iterative density compensation weights, shaped "[B, S, L]".
@@ -445,7 +438,6 @@ class KspaceReconstructor:
     #**************************#
     #   regridding (adjoint)   #
     #**************************#
-
     def adjoint(self, kdata: Any, coords: Any) -> Any:
         """
         Adjoint NUFFT of *kdata* along *coords*, giving "[B, C, *image_size]".
@@ -477,7 +469,6 @@ class KspaceReconstructor:
     #********************#
     #   reconstruction   #
     #********************#
-
     def __call__(self, coords: Any, kdata: Any,
                  mask: Optional[Any] = None) -> Any:
         """

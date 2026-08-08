@@ -170,7 +170,6 @@ class GaussianNoise(BaseModule):
     #********************************************************************#
     #   pure-numpy path for process_nifti_list (input is always numpy)   #
     #********************************************************************#
-
     def _add_noise_numpy(self, fid: np.ndarray) -> np.ndarray:
         """Add Gaussian noise to numpy FID data."""
         # Draw from the module's own stream, so this path matches the tensor

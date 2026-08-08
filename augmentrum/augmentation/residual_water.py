@@ -19,9 +19,10 @@
 import numpy as np
 from typing import Optional, List
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
-from nifti_mrs_plus.ops import fft, ifft, fftshift, ifftshift, match_backend
+from nifti_mrs_plus.ops import match_backend
 
 
 #**************************************************************************************************#
@@ -74,6 +75,9 @@ class ResidualWater(BaseModule):
 
     SUPPORTED_BACKENDS = tuple(Backend)
 
+    # Water is a peak at a ppm position, which only exists in a spectrum.
+    DOMAIN = Domain(spectral='frequency')
+
     def __init__(self, center_ppm: float = 4.7,
                  peaks: tuple = ((0.0, 0.20, 1.0),
                                 (0.12, 0.18, 0.4),
@@ -91,7 +95,6 @@ class ResidualWater(BaseModule):
     #*****************#
     #   water lobes   #
     #*****************#
-
     @staticmethod
     def _water_lobe_profile(ppm_axis, *, center_ppm=4.7,
                             peaks=((0.0, 0.20, 1.0),   # (delta_ppm, FWHM_ppm, rel_amp)
@@ -211,8 +214,9 @@ class ResidualWater(BaseModule):
         N = data_array.shape[-1]
         ref_ppm = 4.7
 
-        # 1. Spectrum (backend-native FFT)
-        spec = fftshift(ifft(data_array))
+        # 1. The data arrives as a spectrum: this module declares that it works
+        #    in the frequency domain and is put there before it runs.
+        spec = data_array
 
         # 2. ppm axis (numpy)
         dt = 1.0 / float(sw_hz)
@@ -237,10 +241,7 @@ class ResidualWater(BaseModule):
             * ops.cast_like(water_amp, spec)
 
         # 5. Add water in spectral domain (backend-native)
-        spec_aug = spec + water_add
-
-        # 6. Back to FID (backend-native IFFT)
-        return fft(ifftshift(spec_aug)), water_array
+        return spec + water_add, water_array
 
     def _add_water_to_fid(self, fid: np.ndarray, sw_hz: float, sf_mhz: float,
                           ref_ppm: float = 4.7) -> np.ndarray:

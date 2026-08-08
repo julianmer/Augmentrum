@@ -50,7 +50,6 @@ except ImportError:
 #**************#
 #   fixtures   #
 #**************#
-
 @pytest.fixture
 def volume():
     """One small MRSI volume, "(batch, X, Y, Z, T)"."""
@@ -62,7 +61,6 @@ def volume():
 #*******************#
 #   map synthesis   #
 #*******************#
-
 @pytest.mark.parametrize("matrix", [(16, 16), (16, 16, 4)])
 def test_maps_are_unit_sensitivity(matrix):
     """Root-sum-of-squares across coils is 1, so the array does not rescale."""
@@ -121,7 +119,6 @@ def test_matrix_rank_is_checked(matrix):
 #***********************#
 #   applying the maps   #
 #***********************#
-
 def test_coil_axis_follows_the_nifti_convention(volume):
     """Coils land after the spectral axis, where NIfTI-MRS puts them."""
     out, _ = CoilSampler(mode='synthesize', n_coils=5, seed=0).process_tensor(volume)
@@ -173,7 +170,6 @@ def test_a_seed_replays_exactly(volume):
 #**************#
 #   backends   #
 #**************#
-
 def test_every_backend_agrees_and_stays_native(volume):
     """The same maps on any backend give the same answer, without converting."""
     maps = Birdcage(n_coils=3).maps((8, 8, 4))
@@ -257,7 +253,6 @@ def test_the_result_is_a_real_nifti_coil_dimension(volume):
 #***********************#
 #   per-coil sampling   #
 #***********************#
-
 @pytest.mark.parametrize("ksp_mode,kwargs", [
     ("cartesian", {}),
     ("gridded", {"trajectory": "radial_2d"}),
@@ -288,7 +283,6 @@ def test_every_coil_meets_the_same_acquisition(volume):
 #***************************#
 #   the encoding property   #
 #***************************#
-
 def test_coils_make_an_accelerated_acquisition_invertible():
     """
     The point of the whole exercise, asserted on the encoding itself.
@@ -342,10 +336,9 @@ def test_coils_make_an_accelerated_acquisition_invertible():
     assert errors[8] < 1e-6, "more coils should stay exact"
 
 
-#*******************#
-#   drawing         #
-#*******************#
-
+#*************#
+#   drawing   #
+#*************#
 def test_drawing_is_native_and_keeps_gradients(volume):
     """A draw is a gather along one axis, so it need not leave the backend."""
     array, _ = CoilSampler(mode='synthesize', n_coils=8, seed=0).process_tensor(volume)
@@ -393,10 +386,9 @@ def test_an_unknown_mode_is_refused():
         CoilSampler(mode='sythesize')
 
 
-#***********************#
-#   the whole chain     #
-#***********************#
-
+#*********************#
+#   the whole chain   #
+#*********************#
 @pytest.mark.skipif(not TORCH_AVAILABLE, reason="PyTorch not installed")
 def test_synthesize_draw_undersample_stays_differentiable():
     """
@@ -437,9 +429,9 @@ def test_synthesize_draw_undersample_stays_differentiable():
     assert obj.dim_tags[0] == 'DIM_COIL'
 
 
-#***********************#
-#   measured maps       #
-#***********************#
+#*******************#
+#   measured maps   #
+#*******************#
 # These never reach the network. Downloading itself is tested next to the code
 # that does it, in tests/utils/test_download.py; what is tested here is what is
 # specific to this dataset - the layout it stores maps in, the cache it leaves,
@@ -627,9 +619,9 @@ def test_supplied_maps_are_used_as_they_are_by_default(volume):
     assert out.shape[-1] == 7
 
 
-#*******************#
-#   map sources     #
-#*******************#
+#*****************#
+#   map sources   #
+#*****************#
 # Three ways to answer the same question, so a caller can swap between them
 # without anything else changing. Each keeps its own settings; resizing to a
 # coil count happens once, in the contract, not in each of them.

@@ -18,6 +18,7 @@ import numpy as np
 from typing import Optional, List
 from scipy.signal import butter, filtfilt
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus.ops import to_numpy, match_backend
 
@@ -73,6 +74,9 @@ class EddyCurrent(BaseModule):
     """
 
     SUPPORTED_BACKENDS = tuple(Backend)
+
+    # A time-varying phase is applied sample by sample along the FID.
+    DOMAIN = Domain(spectral='time')
 
     def __init__(self, mode: str = 'synthetic',
                  std_rad: float = 0.6, lp_cut_hz: float = 25.0,

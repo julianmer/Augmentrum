@@ -37,9 +37,9 @@ from tests.module_specs import SPECS
 torch = pytest.importorskip("torch")
 
 
-#*******************#
-#   spec selection  #
-#*******************#
+#********************#
+#   spec selection   #
+#********************#
 # Spatial / volume modules and the NIfTI-list-only samplers are out of scope
 # here: they are covered by their own suites and are the subject of the separate
 # torch-port work.
@@ -53,7 +53,6 @@ SPECTRAL_SPECS = [s for s in SPECS
 #**************#
 #   fixtures   #
 #**************#
-
 # 512 points, chosen so the resizing specs genuinely resize: truncate and crop
 # target 256 and pad targets 1024. At 256 the first two would be no-ops and the
 # test would pass without exercising the rebuild path at all.
@@ -87,10 +86,9 @@ def _grad_reaches_input(plus, module):
     return leaf.grad is not None and float(leaf.grad.abs().sum()) != 0.0
 
 
-#*******************************#
-#   per-module gradient flow    #
-#*******************************#
-
+#******************************#
+#   per-module gradient flow   #
+#******************************#
 @pytest.mark.parametrize("spec", SPECTRAL_SPECS, ids=lambda s: s.label)
 def test_gradient_survives_module(spec, seeded_batch):
     """Every module must pass gradients through, whether or not it resizes."""
@@ -102,10 +100,9 @@ def test_gradient_survives_module(spec, seeded_batch):
     )
 
 
-#***********************************#
-#   whole-pipeline gradient flow    #
-#***********************************#
-
+#**********************************#
+#   whole-pipeline gradient flow   #
+#**********************************#
 def test_gradient_survives_a_chained_pipeline(seeded_batch):
     """The point of the exercise: a whole pipeline stays differentiable."""
     from augmentrum.augmentation.line_broadening import LineBroadening

@@ -17,6 +17,7 @@
 import numpy as np
 from typing import Optional, List
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 from nifti_mrs_plus.ops import match_backend
@@ -67,6 +68,9 @@ class Apodization(BaseModule):
     """
 
     SUPPORTED_BACKENDS = tuple(Backend)
+
+    # A window and a truncation both act on the FID.
+    DOMAIN = Domain(spectral='time')
 
     def __init__(self, mode: str = 'exponential',
                  n_pts: Optional[int] = None,

@@ -47,7 +47,6 @@ class Affine:
     #*****************#
     #   quaternions   #
     #*****************#
-
     @staticmethod
     def quat_from_axis_angle(axis, angle_rad: float, device=None) -> np.ndarray:
         """
@@ -80,7 +79,6 @@ class Affine:
     #*********************#
     #   affine builders   #
     #*********************#
-
     @staticmethod
     def build_2d(rotation_rad: float,
                  scale_xy: Tuple[float, float],

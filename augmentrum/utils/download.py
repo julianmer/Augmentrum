@@ -7,8 +7,8 @@
 # Created: 2026-08-08                                                                              #
 #                                                                                                  #
 # Purpose: Fetching a large file once and keeping it. Public datasets are big, served by hosts     #
-#          that are not always well behaved, and worth downloading exactly one time - so this       #
-#          verifies what it got, survives a stalled connection, and caches the result.              #
+#          that are not always well behaved, and worth downloading exactly one time - so this      #
+#          verifies what it got, survives a stalled connection, and caches the result.             #
 #                                                                                                  #
 ####################################################################################################
 
@@ -28,18 +28,6 @@ from pathlib import Path
 __all__ = ['cache_root', 'fetch']
 
 
-# Seconds a read may stall before an attempt is abandoned, and how many attempts
-# to make. A host that serves no byte ranges cannot resume, so a stall means
-# starting over - worth doing twice before giving up on several gigabytes, and
-# far better than blocking forever, which is what no timeout at all does.
-READ_TIMEOUT = 120
-ATTEMPTS = 3
-
-
-#*************#
-#   caching   #
-#*************#
-
 def cache_root() -> Path:
     """
     Directory downloaded data is kept in.
@@ -53,9 +41,8 @@ def cache_root() -> Path:
 #**************#
 #   fetching   #
 #**************#
-
 def fetch(url: str, target: Path, md5: str = None, size: int = None,
-          progress: bool = True) -> Path:
+          progress: bool = True, timeout: int = 120, attempts: int = 3) -> Path:
     """
     Download *url* to *target*, verifying what arrives.
 
@@ -70,6 +57,11 @@ def fetch(url: str, target: Path, md5: str = None, size: int = None,
         size: Expected length in bytes, used to notice a connection that ends
             early and to report progress against.
         progress: Report progress to stdout.
+        timeout: Seconds a read may stall before the attempt is abandoned.
+            Without one a dead connection blocks forever.
+        attempts: How many times to try. A host serving no byte ranges cannot
+            resume, so an interrupted download starts over - worth repeating
+            once or twice before giving up on several gigabytes.
 
     Returns:
         *target*.
@@ -81,13 +73,13 @@ def fetch(url: str, target: Path, md5: str = None, size: int = None,
     partial = target.with_suffix(target.suffix + '.part')
     context = _ssl_context(urllib.parse.urlsplit(url).hostname)
 
-    for attempt in range(1, ATTEMPTS + 1):
+    for attempt in range(1, attempts + 1):
         try:
-            digest = _stream(url, context, partial, size, progress)
+            digest = _stream(url, context, partial, size, progress, timeout)
             break
         except OSError as error:
             partial.unlink(missing_ok=True)
-            if attempt == ATTEMPTS:
+            if attempt == attempts:
                 raise
             if progress:
                 print(f"  attempt {attempt} stopped ({error}); starting over", flush=True)
@@ -103,11 +95,11 @@ def fetch(url: str, target: Path, md5: str = None, size: int = None,
     return target
 
 
-def _stream(url, context, partial, size, progress):
+def _stream(url, context, partial, size, progress, timeout):
     """One attempt at the whole file, returning its running digest."""
     digest = hashlib.md5()
 
-    with urllib.request.urlopen(url, context=context, timeout=READ_TIMEOUT) as response, \
+    with urllib.request.urlopen(url, context=context, timeout=timeout) as response, \
             open(partial, 'wb') as out:
         seen = 0
         while True:
@@ -126,10 +118,9 @@ def _stream(url, context, partial, size, progress):
     return digest
 
 
-#**********************#
-#   certificates       #
-#**********************#
-
+#******************#
+#   certificates   #
+#******************#
 def _ssl_context(host):
     """
     Verification context for talking to *host*.

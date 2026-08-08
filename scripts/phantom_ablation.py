@@ -957,9 +957,9 @@ def ablate_interpolator(vol, config, interpolator=None):
     return rows
 
 
-#*******************#
-#   nufft panel     #
-#*******************#
+#*****************#
+#   nufft panel   #
+#*****************#
 # The trajectories the full-page panel sweeps, and the labels it prints. Labels
 # are set here rather than reusing the registry keys: a printed figure reads
 # better with words than identifiers, and the underscores survive badly at panel

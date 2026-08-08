@@ -90,10 +90,9 @@ class MapSource(ABC):
         ignores it and lets :meth:"maps" resize what comes back.
         """
 
-    #*************#
-    #   resizing  #
-    #*************#
-
+    #**************#
+    #   resizing   #
+    #**************#
     @classmethod
     def compress(cls, maps: np.ndarray, n_coils: int) -> np.ndarray:
         """
@@ -531,10 +530,9 @@ class CoilSampler(DimensionSampler):
 
         self.source = source or Birdcage()
 
-    #*****************#
-    #   synthesis     #
-    #*****************#
-
+    #***************#
+    #   synthesis   #
+    #***************#
     def maps_for(self, matrix) -> np.ndarray:
         """
         Sensitivity maps over a spatial matrix, from whichever source was given.

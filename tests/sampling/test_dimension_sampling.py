@@ -6,8 +6,8 @@
 #                                                                                                  #
 # Created: 2026-08-08                                                                              #
 #                                                                                                  #
-# Purpose: Holds the dimension sampler to what a shorter scan looks like, through its average       #
-#          variant: fewer repeats along DIM_DYN, nothing else touched, native on any backend.       #
+# Purpose: Holds the dimension sampler to what a shorter scan looks like, through its average      #
+#          variant: fewer repeats along DIM_DYN, nothing else touched, native on any backend.      #
 #                                                                                                  #
 ####################################################################################################
 
@@ -40,7 +40,6 @@ except ImportError:
 #**************#
 #   fixtures   #
 #**************#
-
 @pytest.fixture
 def batch():
     """A batch carrying both a coil and an average axis."""
@@ -52,10 +51,9 @@ def batch():
 TAGS = ['DIM_COIL', 'DIM_DYN', None]
 
 
-#**************#
-#   drawing    #
-#**************#
-
+#*************#
+#   drawing   #
+#*************#
 def test_averages_are_drawn(batch):
     """Fewer repeats is the whole point."""
     drawn, _ = AverageSampler(n_averages=4, seed=0).process_tensor(batch, dim_tags=TAGS)
@@ -127,7 +125,6 @@ def test_a_seed_replays_exactly(batch):
 #**************#
 #   backends   #
 #**************#
-
 def test_every_backend_stays_native(batch):
     """A draw is a gather, so it never needs to leave the backend it met."""
     reference = None

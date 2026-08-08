@@ -57,10 +57,9 @@ __all__ = [
 ]
 
 
-#*******************#
-#   lazy exports    #
-#*******************#
-
+#******************#
+#   lazy exports   #
+#******************#
 def __getattr__(name):
     """
     Import KspaceReconstructor only when it is asked for.
