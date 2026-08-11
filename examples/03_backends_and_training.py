@@ -810,6 +810,48 @@ GENERAL TIPS:
 """)
 
 
+#************************************#
+#   part 7: supervised pairs        #
+#************************************#
+print("\n" + "="*80)
+print(" PART 7: SUPERVISED PAIRS — TAPS AND OUTPUTS")
+print("="*80)
+print("""
+Supervised training (reconstruction, denoising) needs (input, target) pairs.
+Mark any pipeline stage with 'tap:<name>' and choose what the dataloaders
+yield with the `outputs` spec — a nested tuple of stage tokens:
+
+  'data' / 'water'              the pipeline end
+  '<tap>' / '<tap>.water'       a tapped stage
+
+Everything before the tap (properties of the object: macromolecules, line
+broadening, phase) lands in BOTH input and target; everything after the tap
+(undersampling, noise) degrades only the input.
+""")
+
+aug_pairs = Augmentrum(
+    data=data_list,
+    pipeline=['line_broadening', 'tap:clean', 'noise'],
+    lb_hz=(0, 6),
+    sigma_frac=(0.02, 0.05),
+    outputs=(('data', 'water'), ('clean', 'clean.water')),
+    batch_size=4,
+    backend='pytorch',
+    volatile=True,
+)
+
+(x, x_water), (y, y_water) = next(aug_pairs.dataloader())
+print(f"✓ input  x: {tuple(x.shape)} — broadened AND noisy")
+print(f"✓ target y: {tuple(y.shape)} — broadened only (frozen at the tap)")
+print(f"  pairs differ: {not (x == y).all().item()}")
+print("""
+For a full MRSI reconstruction training example, see
+examples/04_mrsi_recon_training.py — and scripts/train_deep_er.py for the
+real thing (a Deep-ER-style network on the MRSI Challenge with faithful
+ECCENTRIC undersampling).
+""")
+
+
 #*************#
 #   summary   #
 #*************#

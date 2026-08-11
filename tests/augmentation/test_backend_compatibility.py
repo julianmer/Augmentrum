@@ -97,6 +97,10 @@ MRS_MODULES = [
 # module name, which previously exempted anything with 'trunc' in its label.
 LENGTH_CHANGING = {spec.label for spec in SPECS if spec.changes_length}
 
+# Variants that pass data through unchanged by design, so the data-was-modified
+# assertion below does not apply to them.
+IDENTITY = {spec.label for spec in SPECS if spec.identity}
+
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
 
@@ -180,13 +184,19 @@ def test_module_on_backend(
         )
         return
 
-    # All other modules: shape must be identical and data must have changed
+    # All other modules: shape must be identical and data must have changed —
+    # except identity modules, which must leave the data exactly as it was.
     result_data = result[0][:]
 
     assert result_data.shape == original_data.shape, (
         f"{module_name}/{backend_name}: shape changed "
         f"{original_data.shape} → {result_data.shape}"
     )
+    if module_name in IDENTITY:
+        assert np.allclose(result_data, original_data, atol=1e-6), (
+            f"{module_name}/{backend_name}: identity module modified the data"
+        )
+        return
     assert not np.allclose(result_data, original_data, atol=1e-8), (
         f"{module_name}/{backend_name}: data was not modified"
     )

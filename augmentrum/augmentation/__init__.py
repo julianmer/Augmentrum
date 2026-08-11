@@ -27,12 +27,21 @@ from augmentrum.augmentation.phase_frequency import PhaseShift, FrequencyShift
 from augmentrum.augmentation.amplitude_scaling import AmplitudeScaling
 from augmentrum.augmentation.spatial_augmentations import SpatialAugmentations
 from augmentrum.augmentation.zero_fill import ZeroFill
+from augmentrum.augmentation.macromolecules import (
+    Macromolecules, MMSource, Parametrized, SemiParametrized, Measured, Supplied,
+)
 
 __all__ = [
     'Noise',
     'LineBroadening',
     'BaselineAugmentation',
     'ResidualWater',
+    'Macromolecules',
+    'MMSource',
+    'Parametrized',
+    'SemiParametrized',
+    'Measured',
+    'Supplied',
     'SpuriousEchoes',
     'ArtificialPeaks',
     'EddyCurrent',

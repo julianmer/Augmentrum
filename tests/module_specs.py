@@ -33,7 +33,7 @@ list of variants, not one per class.
 #*************#
 #   imports   #
 #*************#
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Type
 
 from augmentrum.core.augmentrum import Augmentrum
@@ -61,6 +61,8 @@ class ModuleSpec:
         volume: operates on 5-D volumes "(batch, X, Y, Z, T)".
         changes_length: rewrites the spectral length, so shape-preservation
             assertions do not apply — "ZeroFill" and "Apodization[truncate]".
+        identity: passes data through unchanged by design, so the
+            data-was-modified assertion does not apply — "Tap".
         own_provenance: records its own provenance per operation instead of
             through "self.params", so the constructor-argument check does not
             apply.
@@ -77,6 +79,7 @@ class ModuleSpec:
     spatial: bool = False
     volume: bool = False
     changes_length: bool = False
+    identity: bool = False
     own_provenance: bool = False
     nifti_kwargs: Dict[str, Any] = field(default_factory=dict)
     note: str = ""
@@ -138,6 +141,13 @@ SPECS: List[ModuleSpec] = [
                {"ksp_mode": "gridded", "trajectory": "radial_2d",
                 "acceleration_factor": 2.0, "us_seed": 0}, volume=True),
 
+    # 'measured' needs a one-time download of the MRSHub collection, so the
+    # sweeps cover the offline sources; the measured path has its own test.
+    ModuleSpec("Macromolecules[parametrized]", None,
+               {"mm_source": "parametrized", "mm_scale": 0.15, "seed": 0}),
+    ModuleSpec("Macromolecules[semi_parametrized]", None,
+               {"mm_source": "semi_parametrized", "mm_scale": 0.15, "seed": 0}),
+
     ModuleSpec("LineBroadening[lorentzian]", None, {"lb_hz": 5.0, "mode": "lorentzian"}),
     ModuleSpec("LineBroadening[gaussian]", None, {"gb_hz": 5.0, "mode": "gaussian"}),
     ModuleSpec("LineBroadening[voigt]", None, {"lb_hz": 3.0, "gb_hz": 2.0, "mode": "voigt"}),
@@ -160,6 +170,8 @@ SPECS: List[ModuleSpec] = [
 
     ModuleSpec("SpuriousEchoes[replica]", None, {"mode": "replica"}),
     ModuleSpec("SpuriousEchoes[hybrid]", None, {"mode": "hybrid"}),
+
+    ModuleSpec("Tap", None, {"name": "tap"}, identity=True),
 
     ModuleSpec("ZeroFill[pad]", None, {"target_pts": 1024}, changes_length=True),
     ModuleSpec("ZeroFill[crop]", None, {"target_pts": 256}, changes_length=True),
@@ -201,10 +213,7 @@ def _bind_classes() -> None:
                 f"SPECS[{i}] names {name!r}, which is not in "
                 f"Augmentrum.AVAILABLE_MODULES. Known: {sorted(known)}"
             )
-        SPECS[i] = ModuleSpec(spec.label, known[name], spec.kwargs,
-                              spec.needs_multicoil, spec.spatial, spec.volume,
-                              spec.changes_length, spec.own_provenance,
-                              spec.nifti_kwargs, spec.note)
+        SPECS[i] = replace(spec, cls=known[name])
 
 
 _bind_classes()
