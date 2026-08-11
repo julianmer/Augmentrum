@@ -16,7 +16,8 @@
 #*************#
 from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 from augmentrum.core.augmentrum import Augmentrum
-from augmentrum.core.base_module import BaseModule
+from augmentrum.core.base_module import BaseModule, Tap
 from augmentrum.core.pipeline import AugmentationPipeline
 
-__all__ = ['NIfTI_MRS_Plus', 'Backend', 'Augmentrum', 'BaseModule', 'AugmentationPipeline']
+__all__ = ['NIfTI_MRS_Plus', 'Backend', 'Augmentrum', 'BaseModule', 'Tap',
+           'AugmentationPipeline']

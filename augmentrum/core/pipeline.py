@@ -16,7 +16,7 @@
 #*************#
 from typing import List, Optional, Tuple
 from augmentrum.core import NIfTI_MRS_Plus, Backend
-from augmentrum.core.base_module import BaseModule
+from augmentrum.core.base_module import BaseModule, Tap
 from augmentrum.processing.domain import Domain
 import warnings
 
@@ -63,9 +63,31 @@ class AugmentationPipeline:
         self.module_names = module_names or []
         self.user_kwargs = user_kwargs or {}
         self._validate_steps()
-        
+
         # Store parameters for each module (extracted from user_kwargs using introspection)
         self.module_params = self._extract_module_params()
+
+        # Named taps: stages this pipeline snapshots as the data passes, so an
+        # outputs spec can yield any stage, not just the end.
+        self._tap_indices = {}
+        for i, step in enumerate(steps):
+            if isinstance(step, Tap):
+                if step.name in self._tap_indices:
+                    raise ValueError(
+                        f"Duplicate tap name '{step.name}' in pipeline. Each tap "
+                        f"must have a unique name to be referenced in outputs."
+                    )
+                self._tap_indices[step.name] = i
+
+    @property
+    def tap_names(self) -> Tuple[str, ...]:
+        """Names of the taps in this pipeline, in pipeline order."""
+        return tuple(self._tap_indices)
+
+    @property
+    def has_taps(self) -> bool:
+        """Whether this pipeline snapshots any stage."""
+        return bool(self._tap_indices)
 
     def _extract_module_params(self):
         """
@@ -165,9 +187,11 @@ class AugmentationPipeline:
         """
         import numpy as np
 
-        # If already scalar, return as-is
+        # If already scalar, return as-is. The type is preserved: casting to
+        # float here used to break integer parameters injected through kwargs
+        # (np.random.default_rng(0.0) raises where default_rng(0) works).
         if isinstance(param, (int, float)):
-            return float(param)
+            return param
 
         # If None, return None
         if param is None:
@@ -283,7 +307,12 @@ class AugmentationPipeline:
             **kwargs: Additional arguments passed to each step.
 
         Returns:
-            Tuple of (processed_data, processed_water)
+            Tuple of (processed_data, processed_water), or — when the pipeline
+            contains taps — (processed_data, processed_water, taps) with
+            "taps: {name: (data, water)}", each snapshot end-domain aligned.
+            The arity is structural, fixed at construction: a pipeline with a
+            tap in it was asked for its stages, so a stale two-tuple unpack
+            fails loudly instead of silently dropping them.
         """
         from fsl_mrs.core.nifti_mrs import NIFTI_MRS
 
@@ -295,6 +324,7 @@ class AugmentationPipeline:
 
         current_data = data
         current_water = water
+        taps = {}
 
         for i, step in self.domain_plan(data.state):
             # Inject batch parameters if provided (for on-the-fly mode)
@@ -366,7 +396,54 @@ class AugmentationPipeline:
                 # Apply the step
                 current_data, current_water = step(current_data, current_water, **kwargs)
 
-        return current_data, current_water
+            # Snapshot the stage as it passes a tap. The snapshot must own its
+            # values: later steps write into shared NIfTI objects, so a bare
+            # reference would silently read back the fully augmented data.
+            if isinstance(step, Tap):
+                taps[step.name] = (
+                    self._snapshot(current_data),
+                    self._snapshot(current_water) if current_water is not None else None,
+                )
+
+        if not self._tap_indices:
+            return current_data, current_water
+
+        # Bring every snapshot to the same end domain as the output, mirroring
+        # the end clause of domain_plan, so all yielded stages are aligned. A
+        # tap that fired mid-chain may sit in k-space; one before any domain
+        # move is already there and is left untouched.
+        from augmentrum.processing.domain import DomainTransform
+
+        end = self.end_domain or Domain(spectral='time', spatial='image')
+        for name, (tap_data, tap_water) in taps.items():
+            if not end.satisfied_by(tap_data.state):
+                tap_data, tap_water = DomainTransform(
+                    spectral=end.spectral, spatial=end.spatial)(tap_data, tap_water)
+                taps[name] = (tap_data, tap_water)
+
+        return current_data, current_water, taps
+
+    def _snapshot(self, data: NIfTI_MRS_Plus) -> NIfTI_MRS_Plus:
+        """
+        The batch as it stands, owned so later steps cannot touch it.
+
+        Two sharing mechanisms make a bare reference wrong: list-path modules
+        write "nifti[:] = ..." into the very objects they were handed, and
+        every step's output wraps the *same* nifti list — so a snapshot without
+        its own pending tensor re-materializes as whatever ran last. Owning the
+        data breaks both. On the volatile tensor path (the training hot path)
+        this is free when a pending tensor exists: "set_data" installs it and
+        marks the snapshot dirty, so it never restacks from the shared list.
+        Non-volatile data is copied outright, which also freezes the tap's
+        provenance at exactly the tap point.
+        """
+        if data.backend == Backend.NIFTI_LIST or not data.volatile:
+            return data.copy()
+
+        snap = NIfTI_MRS_Plus(nifti_list=data.nifti_list, backend=data.backend,
+                              volatile=data.volatile, state=data.state)
+        snap.set_data(data.get_data(data.backend), data.backend, dim_tags=data.dim_tags)
+        return snap
 
     def _convert_backend(self, nifti_plus: NIfTI_MRS_Plus, target_backend: Backend) -> NIfTI_MRS_Plus:
         """

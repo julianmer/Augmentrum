@@ -570,5 +570,38 @@ class BaseModule(ABC):
         return f"{self.__class__.__name__}(backends={backends})"
 
 
+#**************************************************************************************************#
+#                                            Class Tap                                             #
+#**************************************************************************************************#
+#                                                                                                  #
+# Identity marker naming a pipeline stage so dataloaders can yield it.                             #
+#                                                                                                  #
+#**************************************************************************************************#
+class Tap(BaseModule):
+    """
+    Identity marker naming a pipeline stage so dataloaders can yield it.
+
+    A tap changes nothing about the data. Its presence tells the pipeline to
+    snapshot the batch as it passes, so the stage can be referenced by name in
+    an "outputs" spec — e.g. "pipeline=['noise', 'tap:clean', 'undersampling']"
+    with "outputs=(('data', 'water'), ('clean', 'clean.water'))" yields
+    supervised (input, target) pairs, the input fully augmented and the target
+    frozen at the tap. In pipeline name lists the sugar "'tap:<name>'" sets the
+    name; a bare "'tap'" is simply named 'tap'.
+    """
+
+    SUPPORTED_BACKENDS = tuple(Backend)
+
+    def __init__(self, name: str = 'tap'):
+        super().__init__()
+        self.name = name
+
+    def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
+        return data_array, water_array
+
+    def process_nifti_list(self, data_list, water_list=None, **kwargs):
+        return data_list, water_list
+
+
 
 

@@ -16,9 +16,10 @@
 #   imports   #
 #*************#
 import warnings
-from typing import List, Optional, Sequence, Union, Dict, Any
+from typing import List, Optional, Sequence, Tuple, Union, Dict, Any
 from augmentrum import __version__
 from augmentrum.core import NIfTI_MRS_Plus, Backend
+from augmentrum.core.base_module import Tap
 from augmentrum.core.pipeline import AugmentationPipeline
 
 # Import helper functions from dataset_utils
@@ -27,6 +28,9 @@ from augmentrum.core.dataset_utils import (
     create_fixed_generator,
     create_deterministic_generator,  # Legacy support
     wrap_generator_for_framework,
+    output_tokens,
+    flatten_structure,
+    map_structure,
 )
 from augmentrum.sampling.subject_splitter import SubjectSplitter
 
@@ -42,6 +46,7 @@ from augmentrum.augmentation.noise import Noise
 from augmentrum.augmentation.line_broadening import LineBroadening
 from augmentrum.augmentation.baseline_augmentation import BaselineAugmentation
 from augmentrum.augmentation.residual_water import ResidualWater
+from augmentrum.augmentation.macromolecules import Macromolecules
 from augmentrum.augmentation.spurious_echoes import SpuriousEchoes
 from augmentrum.augmentation.artificial_peaks import ArtificialPeaks
 from augmentrum.augmentation.eddy_current import EddyCurrent
@@ -188,6 +193,7 @@ class Augmentrum:
 
         # Artifacts
         'residual_water': ResidualWater,
+        'macromolecules': Macromolecules,
         'water': ResidualWater,
         'spurious_echoes': SpuriousEchoes,
         'echoes': SpuriousEchoes,
@@ -209,6 +215,9 @@ class Augmentrum:
         # k-space
         'undersampling': KspaceUndersampling,
         'kspace_undersampling': KspaceUndersampling,
+
+        # Pipeline control
+        'tap': Tap,
     }
 
     def __init__(
@@ -231,6 +240,9 @@ class Augmentrum:
         # Augmentation mode
         mode: str = 'on-the-fly',  # 'on-the-fly' or 'fixed'
         modes: Optional[Dict[str, str]] = None,  # Per-split modes
+
+        # What the dataloaders yield
+        outputs: Optional[Union[Tuple, Dict[str, Tuple]]] = None,
 
         # General
         batch_size: int = 16,
@@ -353,6 +365,9 @@ class Augmentrum:
 
         # Handle modes
         self._create_modes(mode, modes)
+
+        # Handle outputs specs (what the dataloaders yield)
+        self._create_outputs(outputs)
 
         # Additional features for flexibility
         self.callbacks = []  # Custom augmentation callbacks
@@ -609,6 +624,11 @@ class Augmentrum:
         ]
 
         for name in module_names:
+            # 'tap:<name>' names the tap; a bare 'tap' keeps the default name.
+            if name == 'tap' or name.startswith('tap:'):
+                modules.append(Tap(name=name.partition(':')[2] or 'tap'))
+                continue
+
             if name not in self.AVAILABLE_MODULES:
                 raise ValueError(f"Unknown module '{name}'. Available: {list(self.AVAILABLE_MODULES.keys())}")
 
@@ -660,6 +680,36 @@ class Augmentrum:
             for split_name in self.splits.keys():
                 self.modes[split_name] = mode
 
+    def _create_outputs(self, outputs):
+        """
+        Validate and store per-split outputs specs.
+
+        An outputs spec is an arbitrarily nested tuple of stage tokens deciding
+        what the dataloaders yield and in which structure: "'data'" / "'water'"
+        are the pipeline end, "'<tap>'" / "'<tap>.water'" a tapped stage, e.g.
+        "outputs=(('data', 'water'), ('clean', 'clean.water'))" for supervised
+        (input, target) pairs. None keeps the classic "(data, water)" pair.
+        Tokens are checked here, at construction, not at iteration time.
+        """
+        per_split = outputs if isinstance(outputs, dict) else \
+            {split: outputs for split in self.splits}
+
+        self.outputs = {}
+        for split_name in self.splits:
+            spec = per_split.get(split_name)
+            if spec is not None:
+                valid = {'data', 'water'}
+                for tap in self.pipelines[split_name].tap_names:
+                    valid.update({tap, f"{tap}.water"})
+                unknown = [t for t in output_tokens(spec) if t not in valid]
+                if unknown:
+                    raise ValueError(
+                        f"outputs for split '{split_name}' reference unknown stage(s) "
+                        f"{unknown}. Available: {sorted(valid)}. Add a 'tap:<name>' "
+                        f"to the pipeline to expose a stage."
+                    )
+            self.outputs[split_name] = spec
+
     def _get_dataloader(self, split: str = 'train', framework: str = None, shuffle: bool = None):
         """
         Get dataloader for a specific split.
@@ -679,6 +729,7 @@ class Augmentrum:
         data, water = self.splits[split]
         pipeline = self.pipelines[split]
         mode = self.modes[split]
+        outputs = self.outputs[split]
 
         # Create generator based on mode
         if mode == 'on-the-fly' or mode == 'random':  # Support legacy 'random'
@@ -687,7 +738,8 @@ class Augmentrum:
                 data=data,
                 water=water,
                 pipeline=pipeline,
-                batch_size=self.batch_size
+                batch_size=self.batch_size,
+                outputs=outputs
             )
         elif mode == 'fixed' or mode == 'deterministic':  # Support legacy 'deterministic'
             # Fixed: use exact values (modules will use fixed params)
@@ -699,13 +751,15 @@ class Augmentrum:
                 water=water,
                 pipeline=pipeline,
                 batch_size=self.batch_size,
-                shuffle=shuffle_val
+                shuffle=shuffle_val,
+                outputs=outputs
             )
         else:
             raise ValueError(f"Unknown mode: {mode}. Use 'on-the-fly' or 'fixed'")
 
         # Wrap for framework
-        return wrap_generator_for_framework(generator, self.backend, framework)
+        return wrap_generator_for_framework(generator, self.backend, framework,
+                                            structured=outputs is not None)
 
     def dataloader(self, framework: str = None, split: str = 'train', shuffle: bool = None):
         """
@@ -757,15 +811,26 @@ class Augmentrum:
         _aug   = self
         _split = split
 
+        def _to_cfloat(tensor):
+            if tensor is None:
+                return None
+            if not tensor.is_complex():
+                tensor = tensor.to(torch.cfloat)
+            return tensor
+
         class _AugIterableDataset(IterableDataset):
             def __iter__(self_inner):
                 gen = _aug._get_dataloader(_split, framework='pytorch')
+                if _aug.outputs[_split] is not None:
+                    # Custom outputs: yield the spec's structure with complex
+                    # tensors at the leaves.
+                    for batch in gen:
+                        yield map_structure(_to_cfloat, batch)
+                    return
                 for batch_data, _ in gen:
                     if batch_data is None:
                         continue
-                    if not batch_data.is_complex():
-                        batch_data = batch_data.to(torch.cfloat)
-                    yield batch_data
+                    yield _to_cfloat(batch_data)
 
         return DataLoader(_AugIterableDataset(), batch_size=None, **dataloader_kwargs)
 
@@ -1010,7 +1075,7 @@ class Augmentrum:
         dataloader = self.dataloader(split=split, framework='numpy')
 
         times = []
-        for i, (data, water) in enumerate(dataloader):
+        for i, batch in enumerate(dataloader):
             if i >= n_batches:
                 break
 
@@ -1094,9 +1159,29 @@ class Augmentrum:
 
         print(f"Exporting {n_batches} batch(es) to {format.upper()} format...")
 
-        for batch_idx, (data_batch, water_batch) in enumerate(dataloader):
+        outputs_spec = self.outputs[split]
+
+        for batch_idx, batch in enumerate(dataloader):
             if batch_idx >= n_batches:
                 break
+
+            if outputs_spec is None:
+                data_batch, water_batch = batch
+                extra_stages = []
+            else:
+                # Custom outputs: match the yielded structure against the spec's
+                # tokens. 'data'/'water' keep their classic roles; every other
+                # stage is exported under its own token.
+                named = dict(zip(output_tokens(outputs_spec), flatten_structure(batch)))
+                data_batch = named.pop('data', None)
+                water_batch = named.pop('water', None)
+                if data_batch is None:
+                    raise ValueError(
+                        f"export_batch needs the 'data' token in the outputs spec for "
+                        f"split '{split}'; got {output_tokens(outputs_spec)}."
+                    )
+                extra_stages = [(token, arr) for token, arr in named.items()
+                                if arr is not None]
 
             batch_count += 1
 
@@ -1215,6 +1300,33 @@ class Augmentrum:
                         water_nifti.save(str(water_filepath))
                         saved_water_files.append(str(water_filepath))
 
+                # Save any tapped stages under their token names
+                for token, stage_batch in extra_stages:
+                    while stage_batch.ndim > 2:
+                        stage_batch = np.squeeze(stage_batch)
+                    if stage_batch.ndim == 1:
+                        stage_batch = stage_batch[np.newaxis, :]
+
+                    for spec_idx in range(stage_batch.shape[0]):
+                        stage_spectrum = stage_batch[spec_idx]
+                        if stage_spectrum.ndim == 1:
+                            stage_spectrum = stage_spectrum.reshape(1, 1, 1, -1)
+                        elif stage_spectrum.ndim == 2:
+                            stage_spectrum = stage_spectrum.T.reshape(
+                                1, 1, 1, stage_spectrum.shape[1], stage_spectrum.shape[0])
+
+                        dwelltime = ref_nifti.dwelltime if hasattr(ref_nifti, 'dwelltime') else 1/2000
+                        spec_freq = ref_nifti.spectrometer_frequency[0] if hasattr(ref_nifti, 'spectrometer_frequency') else 123.0
+
+                        stage_nifti = gen_nifti_mrs(stage_spectrum, dwelltime, spec_freq)
+
+                        global_idx = total_spectra + spec_idx
+                        stage_filename = (f"{prefix}_{token.replace('.', '_')}_"
+                                          f"{global_idx:06d}.nii.gz")
+                        stage_filepath = output_path / stage_filename
+                        stage_nifti.save(str(stage_filepath))
+                        saved_files.append(str(stage_filepath))
+
             elif format == 'hdf5':
                 # Save batch to HDF5
                 import h5py
@@ -1227,6 +1339,9 @@ class Augmentrum:
 
                     if water_batch is not None and save_water:
                         f.create_dataset('water', data=water_batch, compression='gzip')
+
+                    for token, stage_batch in extra_stages:
+                        f.create_dataset(token, data=stage_batch, compression='gzip')
 
                     # Store metadata
                     f.attrs['augmentrum_version'] = __version__

@@ -30,8 +30,82 @@ __all__ = [
     'create_deterministic_indices',
     'convert_batch_to_backend',
     'wrap_generator_for_framework',
+    'output_tokens',
+    'build_outputs',
+    'map_structure',
+    'flatten_structure',
     'SubjectSplitter',
 ]
+
+
+#**********************#
+#   outputs handling   #
+#**********************#
+def output_tokens(spec) -> List[str]:
+    """All string tokens in a nested outputs spec, left to right."""
+    if isinstance(spec, str):
+        return [spec]
+    tokens = []
+    for element in spec:
+        tokens.extend(output_tokens(element))
+    return tokens
+
+
+def build_outputs(spec, data, water, taps):
+    """
+    Fill a nested outputs spec with the pipeline stages it names.
+
+    Tokens: 'data' / 'water' are the pipeline end; '<tap>' / '<tap>.water' are
+    a tapped stage. The returned structure mirrors the spec, tuples throughout.
+    """
+    if isinstance(spec, str):
+        if spec == 'data':
+            return data
+        if spec == 'water':
+            return water
+        name, _, member = spec.partition('.')
+        if name in taps and member in ('', 'water'):
+            return taps[name][0] if member == '' else taps[name][1]
+        raise ValueError(
+            f"outputs token '{spec}' names no pipeline stage. Available: 'data', "
+            f"'water', and per tap '<name>' / '<name>.water' for taps {list(taps)}."
+        )
+    return tuple(build_outputs(element, data, water, taps) for element in spec)
+
+
+def map_structure(fn, structure):
+    """Apply *fn* to every leaf of a nested tuple/list structure."""
+    if isinstance(structure, (tuple, list)):
+        return tuple(map_structure(fn, element) for element in structure)
+    return fn(structure)
+
+
+def flatten_structure(structure) -> List:
+    """The leaves of a nested tuple/list structure, left to right."""
+    if not isinstance(structure, (tuple, list)):
+        return [structure]
+    flat = []
+    for element in structure:
+        flat.extend(flatten_structure(element))
+    return flat
+
+
+def _resolve_outputs(pipeline, result, outputs):
+    """
+    Shape one pipeline result for yielding.
+
+    A pipeline with taps returns "(data, water, taps)"; without, "(data, water)".
+    No spec keeps the classic "(data, water)" pair either way — taps only reach
+    the loader through an explicit outputs spec.
+    """
+    if pipeline.has_taps:
+        data, water, taps = result
+    else:
+        data, water = result
+        taps = {}
+    if outputs is None:
+        return data, water
+    return build_outputs(outputs, data, water, taps)
 
 
 #**********************#
@@ -119,7 +193,8 @@ def _make_batch(data, water, indices, copy=False):
 def create_random_generator(data: NIfTI_MRS_Plus,
                             water: Optional[NIfTI_MRS_Plus],
                             pipeline,
-                            batch_size: int):
+                            batch_size: int,
+                            outputs=None):
     """
     Infinite random-sampling generator (on-the-fly mode).
 
@@ -127,7 +202,9 @@ def create_random_generator(data: NIfTI_MRS_Plus,
     augmentation parameters, apply the pipeline, yield the batch.
 
     Yields:
-        (batch_data, batch_water) — NIfTI_MRS_Plus objects.
+        (batch_data, batch_water) — NIfTI_MRS_Plus objects — or, with an
+        *outputs* spec, the spec's nested structure filled with the stages it
+        names.
     """
     n_subjects = len(data)
 
@@ -135,14 +212,16 @@ def create_random_generator(data: NIfTI_MRS_Plus,
         indices = [random.randint(0, n_subjects - 1) for _ in range(batch_size)]
         batch_data, batch_water = _make_batch(data, water, indices)
         batch_params = pipeline.sample_batch_parameters(batch_size)
-        yield pipeline(batch_data, batch_water, batch_params=batch_params)
+        result = pipeline(batch_data, batch_water, batch_params=batch_params)
+        yield _resolve_outputs(pipeline, result, outputs)
 
 
 def create_fixed_generator(data: NIfTI_MRS_Plus,
                            water: Optional[NIfTI_MRS_Plus],
                            pipeline,
                            batch_size: int,
-                           shuffle: bool = False):
+                           shuffle: bool = False,
+                           outputs=None):
     """
     Single-pass generator with fixed augmentation parameters.
 
@@ -150,7 +229,9 @@ def create_fixed_generator(data: NIfTI_MRS_Plus,
     giving consistent results across epochs.
 
     Yields:
-        (batch_data, batch_water) — NIfTI_MRS_Plus objects.
+        (batch_data, batch_water) — NIfTI_MRS_Plus objects — or, with an
+        *outputs* spec, the spec's nested structure filled with the stages it
+        names.
     """
     fixed_params = pipeline.sample_batch_parameters(batch_size)
 
@@ -162,7 +243,8 @@ def create_fixed_generator(data: NIfTI_MRS_Plus,
     for start in range(0, n_subjects, batch_size):
         batch_idx = indices[start : start + batch_size]
         batch_data, batch_water = _make_batch(data, water, batch_idx, copy=True)
-        yield pipeline(batch_data, batch_water, batch_params=fixed_params)
+        result = pipeline(batch_data, batch_water, batch_params=fixed_params)
+        yield _resolve_outputs(pipeline, result, outputs)
 
 
 def create_deterministic_generator(data: NIfTI_MRS_Plus,
@@ -297,14 +379,19 @@ def convert_batch_to_backend(batch_data: List, batch_water: List, backend: Backe
 #***********************************#
 def wrap_generator_for_framework(generator: Callable,
                                  backend: Backend,
-                                 framework: str = None):
+                                 framework: str = None,
+                                 structured: bool = False):
     """
     Wrap a generator for a specific framework (PyTorch DataLoader, tf.data, etc.).
 
     Args:
-        generator: Generator (iterator) yielding (data, water) batches
+        generator: Generator (iterator) yielding (data, water) batches — or,
+                   with *structured*, arbitrary nested tuples of stages.
         backend: Target backend for data conversion
         framework: 'pytorch', 'tensorflow', 'keras', 'jax', 'numpy', None (raw)
+        structured: The generator yields an outputs-spec structure rather than
+                    the classic (data, water) pair; every leaf (NIfTI_MRS_Plus
+                    or None) is converted in place of the pairwise handling.
 
     Returns:
         Framework-specific dataloader/dataset/generator
@@ -318,6 +405,55 @@ def wrap_generator_for_framework(generator: Callable,
         else:
             framework = backend_name
 
+    if structured:
+        return _wrap_structured_generator(generator, framework)
+
+    return _wrap_pair_generator(generator, backend, framework)
+
+
+def _wrap_structured_generator(generator, framework: str):
+    """
+    Convert every leaf of an outputs-spec structure for the framework.
+
+    The structure mirrors the user's spec exactly; leaves are NIfTI_MRS_Plus
+    objects (or None for an absent water reference) and are converted with the
+    same per-backend logic as the classic pair path.
+    """
+    if framework in ['python', 'nifti_list']:
+        # Copy each leaf before unwrapping: output and taps share one nifti
+        # list on the volatile fast path, and materializing one stage would
+        # overwrite the objects just handed out for another. The copy captures
+        # each stage's values at its own materialization.
+        def structured_gen():
+            for batch in generator:
+                yield map_structure(
+                    lambda leaf: leaf.copy().list() if leaf is not None else None,
+                    batch)
+        return structured_gen()
+
+    targets = {'numpy': Backend.NUMPY, 'jax': Backend.JAX, 'pytorch': Backend.PYTORCH}
+    if framework in targets:
+        target = targets[framework]
+
+        def convert_leaf(leaf):
+            if leaf is None:
+                return None
+            converted, _ = convert_batch_to_backend(leaf, None, target)
+            return converted
+
+        def structured_gen():
+            for batch in generator:
+                yield map_structure(convert_leaf, batch)
+        return structured_gen()
+
+    raise NotImplementedError(
+        f"framework '{framework}' does not support custom outputs structures yet. "
+        f"Use framework='numpy' and convert, or the classic (data, water) outputs."
+    )
+
+
+def _wrap_pair_generator(generator, backend: Backend, framework: str):
+    """The classic path: batches are (data, water) pairs."""
     # For nifti_list or raw python: unwrap NIfTI_MRS_Plus to raw NIFTI_MRS lists
     if framework in ['python', 'nifti_list']:
         def unwrapped_gen():
