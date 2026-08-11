@@ -79,6 +79,26 @@ augmenter = Augmentrum(
 train_data = augmenter.dataloader()
 ```
 
+### Supervised Pairs: Taps and `outputs`
+
+Any pipeline stage can be named with a `'tap:<name>'` marker and yielded by the
+dataloaders through the `outputs` spec — an arbitrarily nested tuple of stage
+tokens (`'data'` / `'water'` for the pipeline end, `'<tap>'` / `'<tap>.water'`
+for a tapped stage). The classic `(data, water)` pair stays the default.
+
+```python
+augmenter = Augmentrum(
+    data=data,
+    pipeline=['coil_sampling', 'macromolecules', 'tap:clean', 'undersampling'],
+    outputs=(('data', 'water'), ('clean', 'clean.water')),
+    backend='pytorch',
+)
+
+# supervised reconstruction pairs: input fully augmented, target frozen at the tap
+for (x, x_water), (y, y_water) in augmenter.dataloader():
+    train_step(x, y)
+```
+
 ---
 
 ## Module Reference & Backend Support
@@ -102,11 +122,13 @@ no manual conversion needed.
 | `Noise` | sigma, sigma_frac, snr, snr_db                          |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `KspaceUndersampling` | cartesian, gridded, nufft                               |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `LineBroadening` | lorentzian, gaussian, voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `Macromolecules` | parametrized, semi_parametrized, measured, supplied     |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `NIfTI_RawProcessor` | coil combination, alignment, averaging, ECC, phase/freq |   ✓   | ~ | ~ | ~ | ~ | ~ |
 | `PhaseShift` | zero_order, first_order                                 |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `ResidualWater` | lorentzian                                              |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `SpatialAugmentations` | 2-D / 3-D affine, flip, zoom, shear                     |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `SpuriousEchoes` | replica, hybrid                                         |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `Tap` | identity marker: snapshot a stage for `outputs`         |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `ZeroFill` | pad FID to target length                                |   ✓   | ✓† | ✓† | ✓† | ✓† | ✓† |
 
 **✓** native — data tensor stays in the target framework throughout.  

@@ -644,6 +644,10 @@ class CoilSampler(DimensionSampler):
         maps = self.maps_for(shape[1:4])
         n_coils = maps.shape[-1]
 
+        # The maps this batch was synthesized with, for consumers that need the
+        # forward model — e.g. coil combination in a reconstruction adapter.
+        self.last_maps_ = maps
+
         # Broadcast the maps across batch and spectral points, and open a coil
         # axis on the data for them to multiply into.
         maps = ops.match_backend(maps.astype(np.complex64), data_array)

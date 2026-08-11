@@ -1159,8 +1159,9 @@ class ConcentricRings2D(Trajectory):
         rings are traversed in opposite directions (CW / CCW) to mimic an
         echo-planar acquisition pattern.
 
-        Equivalent to the ECCENTRIC / concentric-ring MRSI acquisition but
-        exposed directly for 2D use without a kz stack.
+        Note this is *not* the ECCENTRIC acquisition, whose circles sit
+        eccentrically (off-center) in k-space — that is "Eccentric2D". These
+        rings are all centered on the k-space origin.
 
         Parameters (params)
         -------------------
@@ -1181,6 +1182,115 @@ class ConcentricRings2D(Trajectory):
         meta_eccentric["n_shots"] = len(shots)
         meta_eccentric["density_estimate"]["trajectory"] = "concentric_rings_2d"
         return shots, meta_eccentric
+
+
+#**************************************************************************************************#
+#                                       Class Eccentric2D                                          #
+#**************************************************************************************************#
+#                                                                                                  #
+# ECCENTRIC: eccentric circles covering the k-space disk (Klauser et al.).                         #
+#                                                                                                  #
+#**************************************************************************************************#
+@TrajectoryRegistry.register
+class Eccentric2D(Trajectory):
+    """
+    ECCENTRIC: eccentric circles covering the k-space disk (Klauser et al.).
+
+    Unlike concentric rings, each shot is a circle of one fixed radius whose
+    *center* sits away from the k-space origin — randomly placed so the union
+    of circles covers the disk out to kmax. A fraction of the circles is
+    constrained to pass exactly through the k-space center; a prospective
+    acceleration acquires only that center-crossing subset plus a random
+    remainder, which is what the 'center_crossing' undersampling scheme
+    reproduces (as used by Deep-ER).
+    """
+
+    NAME = "eccentric_2d"
+    NDIM = 2
+
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like)
+
+    @staticmethod
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
+        """
+        2D ECCENTRIC trajectory.
+
+        Parameters (params)
+        -------------------
+        n_shots : int
+            Number of circles (default: 2 * ny — a dense covering; the random
+            placement overlaps, so full coverage needs more circles than the
+            non-overlapping count).
+        radius_frac : float
+            Circle radius as a fraction of kmax (default: 0.25).
+        center_frac : float
+            Fraction of circles constrained to pass through the k-space center
+            (default: 0.15).
+        samples_per_shot : int
+            Samples per circle (default: proportional to circumference).
+        seed : int
+            Seed for the circle placement. None draws fresh positions.
+        """
+        nx, ny, _ = geom["matrix"]
+        fov_x_m = geom["fov_mm"][0] / 1000.0
+        fov_y_m = geom["fov_mm"][1] / 1000.0
+        kmax_x = (nx / 2.0) / fov_x_m
+        kmax_y = (ny / 2.0) / fov_y_m
+
+        n_shots = int(params.get("n_shots", 2 * ny))
+        radius_frac = float(params.get("radius_frac", 0.25))
+        center_frac = float(params.get("center_frac", 0.15))
+        rng = np.random.default_rng(params.get("seed"))
+
+        if not 0.0 < radius_frac < 1.0:
+            raise ValueError(f"radius_frac must be in (0, 1), got {radius_frac}.")
+
+        # Circle centers in normalized units (unit disk). Center-crossing
+        # circles sit at exactly one radius from the origin; the rest are
+        # uniform in area over the disk that keeps them inside kmax.
+        n_center = max(1, int(round(center_frac * n_shots)))
+        n_free = n_shots - n_center
+
+        angle_c = rng.uniform(0.0, 2.0 * math.pi, n_center)
+        centers_c = radius_frac * np.stack([np.cos(angle_c), np.sin(angle_c)], axis=1)
+
+        r_free = (1.0 - radius_frac) * np.sqrt(rng.uniform(0.0, 1.0, n_free))
+        angle_f = rng.uniform(0.0, 2.0 * math.pi, n_free)
+        centers_f = np.stack([r_free * np.cos(angle_f), r_free * np.sin(angle_f)], axis=1)
+
+        centers = np.concatenate([centers_c, centers_f], axis=0)
+        order = rng.permutation(n_shots)          # unbiased under prefix-style cuts
+        centers = centers[order]
+        crossing = np.concatenate([np.ones(n_center, bool), np.zeros(n_free, bool)])[order]
+
+        n_samp = int(params.get("samples_per_shot",
+                                max(8, int(2 * math.pi * radius_frac * max(nx, ny) / 2))))
+
+        shots = []
+        for center in centers:
+            theta = rng.uniform(0.0, 2.0 * math.pi) \
+                + np.linspace(0.0, 2.0 * math.pi, n_samp, endpoint=True)
+            theta_b = ops.asarray_like(like, theta)
+            kx = (float(center[0]) + radius_frac * ops.cos(theta_b)) * kmax_x
+            ky = (float(center[1]) + radius_frac * ops.sin(theta_b)) * kmax_y
+            shots.append(ops.stack([kx, ky], axis=1))
+
+        meta = {
+            "trajectory_type":    "eccentric_2d",
+            "n_shots":            n_shots,
+            "samples_per_shot":   n_samp,
+            "radius_frac":        radius_frac,
+            "centers":            centers,           # normalized units
+            "center_crossing":    crossing,
+            "kmax":               (kmax_x, kmax_y),
+            "fov_mm":             geom["fov_mm"][:2],
+            "matrix":             (nx, ny),
+            "density_estimate":   Trajectory._density_estimate("eccentric_2d", n_shots,
+                                                               n_samp, geom),
+            "params_used":        params,
+        }
+        return shots, meta
 
 
 #**************************************************************************************************#
@@ -2014,7 +2124,7 @@ class StackOf(Trajectory):
         """
         Generic stack-of-2D hybrid: generate in-plane trajectory per kz slice.
 
-        In-plane options: 'radial', 'golden_radial', 'spiral', 'cones', 'ECCENTRIC'.
+        In-plane options: 'radial', 'golden_radial', 'spiral', 'eccentric', 'rings'.
         Shots are grouped: [kz0_shot0, kz0_shot1, ..., kz1_shot0, ...].
 
         Parameters (params)
@@ -2062,7 +2172,7 @@ class StackOf(Trajectory):
             "radial":        lambda: Radial2D._build(geom2d, params, like, use_golden=False),
             "golden_radial": lambda: Radial2D._build(geom2d, params, like, use_golden=True),
             "spiral":        lambda: Spiral2D._build(geom2d, params, like),
-            "ECCENTRIC":     lambda: _Eccentric2D._build(geom2d, params, like),
+            "eccentric":     lambda: Eccentric2D._build(geom2d, params, like),
             "rings":         lambda: ConcentricRings2D._build(geom2d, params, like),
             "rosette":       lambda: Rosette2D._build(geom2d, params, like),
             "rosette_petals": lambda: RosettePetals2D._build(geom2d, params, like),
@@ -2164,6 +2274,84 @@ class StackOfRings(StackOf):
 
 
 #**************************************************************************************************#
+#                                      Class StackOfEccentric                                      #
+#**************************************************************************************************#
+#                                                                                                  #
+# ECCENTRIC circles along kz, redrawn per partition as the acquisition does.                       #
+#                                                                                                  #
+#**************************************************************************************************#
+@TrajectoryRegistry.register
+class StackOfEccentric(StackOf):
+    """
+    ECCENTRIC circles along kz, redrawn per partition as the acquisition does.
+
+    Unlike the generic "StackOf", which replicates one in-plane pattern on
+    every kz slice, ECCENTRIC randomizes the circle positions per partition —
+    so this class draws a fresh "Eccentric2D" layout for each kz. With a
+    "seed", per-partition seeds are derived from it and the whole stack is
+    reproducible; without one, every partition is fresh.
+
+    Shots are grouped kz-major, "[kz0_shot0, ..., kz0_shotN, kz1_shot0, ...]",
+    and the meta carries the concatenated "center_crossing" flags, so the
+    'center_crossing' undersampling scheme accelerates each partition exactly
+    as the prospective ECCENTRIC acquisition does.
+    """
+
+    NAME = "stack_of_eccentric"
+    INPLANE = "eccentric"
+
+    def generate(self, geometry, like=None):
+        params = self.params
+        if geometry["ndim"] < 3:
+            raise ValueError("stack_of_eccentric requires a 3D geometry (nz > 1).")
+
+        nx, ny, nz = geometry["matrix"]
+        fov_z_m = geometry["fov_mm"][2] / 1000.0
+        kz_min, kz_max = (int(v) for v in params.get("kz_range", (0, nz)))
+        kz_positions = (np.arange(kz_min, kz_max) - nz / 2.0) / fov_z_m
+
+        geom2d = {**geometry, "ndim": 2, "matrix": (nx, ny, 1),
+                  "fov_mm": (geometry["fov_mm"][0], geometry["fov_mm"][1], 1.0)}
+
+        seed = params.get("seed")
+        kz_seeds = (np.random.default_rng(seed).integers(0, 2 ** 31 - 1, kz_positions.size)
+                    if seed is not None else [None] * kz_positions.size)
+
+        all_shots, crossing = [], []
+        inplane_meta = None
+        for kz_val, kz_seed in zip(kz_positions, kz_seeds):
+            kz_params = {**params, "seed": None if kz_seed is None else int(kz_seed)}
+            shots2d, inplane_meta = Eccentric2D._build(geom2d, kz_params, like)
+            crossing.append(inplane_meta["center_crossing"])
+            for shot2d in shots2d:
+                nrows = ops.shape(shot2d)[0]
+                kz_col = ops.full_like_shape(like, (nrows,), float(kz_val))
+                all_shots.append(ops.concatenate(
+                    [shot2d, ops.stack([kz_col], axis=1)], axis=1))
+
+        kmax_x, kmax_y, kmax_z = KspaceGeometry._kmax_from_geometry(geometry)
+        n_total = len(all_shots)
+        sps = inplane_meta["samples_per_shot"]
+        meta = {
+            "trajectory_type":    "stack_of_eccentric",
+            "inplane_trajectory": "eccentric",
+            "inplane_meta":       inplane_meta,
+            "n_kz_slices":        int(kz_positions.size),
+            "n_inplane_shots":    inplane_meta["n_shots"],
+            "center_crossing":    np.concatenate(crossing),
+            "kmax":               (kmax_x, kmax_y, kmax_z),
+            "fov_mm":             geometry["fov_mm"],
+            "matrix":             geometry["matrix"],
+            "n_shots":            n_total,
+            "samples_per_shot":   sps,
+            "density_estimate":   Trajectory._density_estimate("stack_of_eccentric",
+                                                               n_total, sps, geometry),
+            "params_used":        params,
+        }
+        return all_shots, meta
+
+
+#**************************************************************************************************#
 #                                      Class ShotUndersampler                                      #
 #**************************************************************************************************#
 #                                                                                                  #
@@ -2195,12 +2383,18 @@ class ShotUndersampler:
         "rosette_2d":           ["prefix", "drop_every", "combined"],
         "rosette_2d_petals":    ["prefix", "drop_every", "combined"],
         "concentric_rings_2d":  ["prefix", "drop_every", "combined"],
+        "eccentric_2d":         ["center_crossing", "prefix", "stride", "drop_every",
+                                 "random_vd", "combined"],
+        "stack_of_eccentric":   ["center_crossing", "prefix", "stride", "drop_every",
+                                 "random_vd", "combined"],
         "stack_of_stars":    ["prefix", "drop_every", "random_vd", "keep_acs",
                               "combined"],
         "stack_of_spirals":  ["prefix", "drop_every", "combined"],
-        "stack_of_rosettes":  ["prefix", "drop_every", "combined"],
+        # 'prefix' on a kz-major stack keeps only the first kz partitions and
+        # zeroes the rest of the slab — 'stride' decimates every partition.
+        "stack_of_rosettes":  ["stride", "prefix", "drop_every", "combined"],
         "stack_of_rings":    ["prefix", "drop_every", "combined"],
-        "concentric_shells_3d": ["prefix", "drop_every", "combined"],
+        "concentric_shells_3d": ["stride", "prefix", "drop_every", "combined"],
         "3d_phyllotaxis":    ["prefix", "golden_prefix", "drop_every",
                               "random_vd", "shell_based", "combined"],
         "cones_3d":          ["prefix", "drop_every", "shell_based", "combined"],
@@ -2300,6 +2494,52 @@ class ShotUndersampler:
         mask = np.zeros(n_shots, dtype=bool)
         mask[acs_idx] = True
         mask[chosen] = True
+        return mask
+
+    @staticmethod
+    def _us_center_crossing(n_shots: int, af: float, params: dict,
+                            coords_per_shot: List[Any], like=None) -> np.ndarray:
+        """
+        ECCENTRIC's prospective acceleration, as Deep-ER trains against it:
+        shots passing through the k-space center are always acquired; the
+        remainder is dropped at random until the acceleration factor is met.
+
+        The crossing predicate is measured off the coordinates themselves — a
+        shot crosses when its closest sample lies within a sample step of the
+        center, which is as close as a discretized circle through the origin
+        gets. Only the first two coordinate columns enter the norm, so on a
+        kz stack the predicate is per-partition, matching the acquisition.
+
+        When the crossing shots alone exceed the shot budget they are all kept
+        anyway — the acquisition never drops them — and the achieved
+        acceleration lands below the requested one (the caller warns).
+
+        params
+        ------
+        center_tol : float
+            Absolute distance (cycles/m) under which a shot counts as
+            crossing. Default: 0.75 x that shot's median sample step.
+        seed : int
+            Seed for the random remainder. None draws fresh.
+        """
+        n_keep = math.ceil(n_shots / af)
+        rng = np.random.default_rng(params.get("seed"))
+        tol = params.get("center_tol")
+
+        crossing = np.zeros(n_shots, dtype=bool)
+        for i, shot in enumerate(coords_per_shot):
+            inplane = ops.to_numpy(shot)[:, :2]
+            min_norm = float(np.linalg.norm(inplane, axis=1).min())
+            step = float(np.median(np.linalg.norm(np.diff(inplane, axis=0), axis=1)))
+            limit = float(tol) if tol is not None else 0.75 * step
+            crossing[i] = min_norm <= limit
+
+        mask = crossing.copy()
+        n_fill = n_keep - int(mask.sum())
+        if n_fill > 0:
+            rest = np.flatnonzero(~crossing)
+            chosen = rng.choice(rest, size=min(n_fill, rest.size), replace=False)
+            mask[chosen] = True
         return mask
 
     @staticmethod
@@ -2564,6 +2804,7 @@ class ShotUndersampler:
         valid_methods = [
             "prefix", "golden_prefix", "stride", "drop_every", "poisson_disc_cartesian",
             "random_vd", "keep_acs", "variable_density_spiral", "shell_based", "combined",
+            "center_crossing",
         ]
         if method not in valid_methods:
             raise ValueError(
@@ -2584,6 +2825,8 @@ class ShotUndersampler:
             mask_np = ShotUndersampler._us_poisson_disc_cartesian(n_shots, acceleration_factor, params, coords_per_shot, like)
         elif method == "random_vd":
             mask_np = ShotUndersampler._us_random_vd(n_shots, acceleration_factor, params, coords_per_shot, like)
+        elif method == "center_crossing":
+            mask_np = ShotUndersampler._us_center_crossing(n_shots, acceleration_factor, params, coords_per_shot, like)
         elif method == "keep_acs":
             mask_np = ShotUndersampler._us_keep_acs(n_shots, acceleration_factor, params, coords_per_shot, like, traj_name)
         elif method == "variable_density_spiral":
