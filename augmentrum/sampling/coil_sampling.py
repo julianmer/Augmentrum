@@ -584,8 +584,9 @@ class CoilSampler(DimensionSampler):
     OPERATION = 'Coil Sampling'
     MODES = ('synthesize', 'reweight', 'random', 'deterministic')
 
-    # Drawing runs natively anywhere; synthesis narrows this per instance,
-    # because a NIfTI list holds no coil axis to write into.
+    # Every mode runs natively on every backend: the tensor paths multiply
+    # maps into a batch, the NIfTI-list paths do the same per subject — which
+    # also lets subjects differ in matrix size.
     SUPPORTED_BACKENDS = tuple(Backend)
 
     def __init__(self, mode: str = 'random', n_coils=None, source=None, seed=None):
@@ -600,8 +601,6 @@ class CoilSampler(DimensionSampler):
                 # the module that added it knows what it is. Reweighting keeps
                 # the coil axis it found, so its tags pass through unchanged.
                 self.ADDS_DIM_TAGS = (self.DIM_TAG,)
-            self.SUPPORTED_BACKENDS = tuple(b for b in Backend
-                                            if b is not Backend.NIFTI_LIST)
             # Multiplying sensitivity maps voxel by voxel is the coil forward
             # model in image space only — in k-space it would be a convolution.
             self.DOMAIN = Domain(spatial='image')
@@ -712,26 +711,14 @@ class CoilSampler(DimensionSampler):
         n_have = shape[coil_axis]
 
         # ── estimate the array the data carries (detached) ──
-        # Principal eigenvector of the per-voxel coil covariance, by two power
-        # iterations (exact for rank-1 data), phase pinned to the first coil.
         x = ops.to_numpy(data_array).astype(np.complex128)
         per_voxel = np.moveaxis(np.moveaxis(x, coil_axis, -1), 4, -2)   # (..., T, C)
         lead = per_voxel.shape[:-2]
         flat = per_voxel.reshape((-1,) + per_voxel.shape[-2:])
-
-        cov = np.einsum('ntc,ntd->ncd', flat, np.conj(flat))
-        csm = np.ones((flat.shape[0], n_have), dtype=np.complex128)
-        for _ in range(2):
-            csm = np.einsum('ncd,nd->nc', cov, csm)
-            norm = np.linalg.norm(csm, axis=-1, keepdims=True)
-            csm = csm / np.where(norm > 0, norm, 1.0)
-        phase = csm[:, :1] / np.where(np.abs(csm[:, :1]) > 0, np.abs(csm[:, :1]), 1.0)
-        csm = csm * np.conj(phase)
+        csm, weights = self._array_weights(flat)
         self.last_csm_ = csm.reshape(lead + (n_have,))
 
         # ── combine with them, on the data's own backend ──
-        weights = np.conj(csm) / ((np.abs(csm) ** 2).sum(-1, keepdims=True)
-                                  + np.finfo(float).eps)
         weights = weights.reshape(lead + (1, n_have))                   # T slot
         weights = np.moveaxis(np.moveaxis(weights, -2, 4), -1, coil_axis)
         combined = ops.sum(data_array * ops.match_backend(weights, data_array),
@@ -749,3 +736,121 @@ class CoilSampler(DimensionSampler):
         maps = ops.match_backend(
             maps.astype(np.complex64).reshape(tuple(new_shape)), data_array)
         return ops.reshape(combined, tuple(combined_shape)) * maps, water_array
+
+    @staticmethod
+    def _array_weights(flat):
+        """
+        The array the data carries, and the weights that combine with it.
+
+        Per voxel, the principal eigenvector of the coil covariance by two
+        power iterations (exact for rank-1 data), phase pinned to the first
+        coil — amplitudes included, so combining and reapplying an
+        RSS-normalized source reproduces magnitudes.
+
+        Args:
+            flat: FIDs stacked as "(N, T, C)".
+
+        Returns:
+            "(csm, weights)", each "(N, C)".
+        """
+        n_have = flat.shape[-1]
+        cov = np.einsum('ntc,ntd->ncd', flat, np.conj(flat))
+        csm = np.ones((flat.shape[0], n_have), dtype=np.complex128)
+        for _ in range(2):
+            csm = np.einsum('ncd,nd->nc', cov, csm)
+            norm = np.linalg.norm(csm, axis=-1, keepdims=True)
+            csm = csm / np.where(norm > 0, norm, 1.0)
+        phase = csm[:, :1] / np.where(np.abs(csm[:, :1]) > 0, np.abs(csm[:, :1]), 1.0)
+        csm = csm * np.conj(phase)
+        weights = np.conj(csm) / ((np.abs(csm) ** 2).sum(-1, keepdims=True)
+                                  + np.finfo(float).eps)
+        return csm, weights
+
+    #**********************#
+    #   nifti-list paths   #
+    #**********************#
+    def process_nifti_list(self, data_list, water_list=None, indices=None, **kwargs):
+        """
+        Shape the array of each NIfTI-MRS object in place of a batch.
+
+        Drawing defers to the dimension sampler; synthesis and reweighting run
+        per subject, so subjects may differ in matrix size — the one thing the
+        list backend can do that a stacked tensor cannot. Maps are drawn per
+        subject, so an :class:"Augmented" source places the array anew for
+        each one.
+
+        Args:
+            data_list: List of NIFTI_MRS objects.
+            water_list: Passed through unchanged.
+            indices: For the drawing modes — exactly what to keep.
+            **kwargs: Additional arguments.
+
+        Returns:
+            Tuple of (processed_data_list, water_list).
+        """
+        if self.mode not in ('synthesize', 'reweight'):
+            return super().process_nifti_list(data_list, water_list,
+                                              indices=indices, **kwargs)
+        handler = (self._synthesize_nifti if self.mode == 'synthesize'
+                   else self._reweight_nifti)
+        return [handler(nifti) for nifti in data_list], water_list
+
+    def _synthesize_nifti(self, nifti):
+        """
+        Grow a DIM_COIL axis on one NIfTI-MRS object.
+
+        The coil axis goes first among the higher dimensions, as
+        ADDS_DIM_TAGS declares, and any existing tags shift up one dim.
+        """
+        import nifti_mrs.utils as nutils
+        from fsl_mrs.core.nifti_mrs import NIFTI_MRS
+
+        data = nifti[:]
+        maps = self.maps_for(data.shape[:3])
+        self.last_maps_ = maps
+        shaped = maps.reshape(maps.shape[:3] + (1, maps.shape[-1])
+                              + (1,) * (data.ndim - 4))
+        grown = np.expand_dims(data, 4) * shaped
+
+        hdr_ext = nifti.hdr_ext.copy()
+        for dim, tag in enumerate(['DIM_COIL'] + [t for t in (nifti.dim_tags or []) if t]):
+            hdr_ext.set_dim_info(dim, tag)
+        return NIFTI_MRS(grown.astype(data.dtype),
+                         header=nutils.modify_hdr_ext(hdr_ext, nifti.header))
+
+    def _reweight_nifti(self, nifti):
+        """
+        Swap the receive array under one NIfTI-MRS object.
+
+        The same estimate-combine-reapply as the tensor path, with the
+        spectral axis at 3 as the NIfTI layout keeps it.
+        """
+        from fsl_mrs.core.nifti_mrs import NIFTI_MRS
+
+        tags = [t for t in (nifti.dim_tags or []) if t]
+        if 'DIM_COIL' not in tags:
+            raise ValueError(
+                f"CoilSampler[reweight] needs a coil axis, got shape "
+                f"{tuple(nifti.shape)}. Use mode='synthesize' to give "
+                f"coil-combined data an array.")
+        coil_axis = 4 + tags.index('DIM_COIL')
+
+        data = nifti[:]
+        x = np.asarray(data, dtype=np.complex128)
+        per_voxel = np.moveaxis(np.moveaxis(x, coil_axis, -1), 3, -2)   # (..., T, C)
+        lead = per_voxel.shape[:-2]
+        flat = per_voxel.reshape((-1,) + per_voxel.shape[-2:])
+        csm, weights = self._array_weights(flat)
+        self.last_csm_ = csm.reshape(lead + (x.shape[coil_axis],))
+
+        weights = weights.reshape(lead + (1, x.shape[coil_axis]))       # T slot
+        weights = np.moveaxis(np.moveaxis(weights, -2, 3), -1, coil_axis)
+        combined = (x * weights).sum(axis=coil_axis)
+
+        maps = self.maps_for(x.shape[:3])
+        self.last_maps_ = maps
+        new_shape = [1] * x.ndim
+        new_shape[0:3] = x.shape[0:3]
+        new_shape[coil_axis] = maps.shape[-1]
+        swapped = np.expand_dims(combined, coil_axis) * maps.reshape(new_shape)
+        return NIFTI_MRS(swapped.astype(data.dtype), header=nifti.header)

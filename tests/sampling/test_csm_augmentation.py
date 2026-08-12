@@ -199,3 +199,60 @@ def test_reweighting_moves_a_real_array_in_one_step():
     assert not np.allclose(np.abs(out), np.abs(coiled), atol=1e-3), \
         "the moved array must weight the volume differently"
     np.testing.assert_allclose(_rss(out), _rss(coiled), rtol=1e-3, atol=1e-4)
+
+
+#**********************#
+#   nifti-list paths   #
+#**********************#
+def _nifti(shape, tags=()):
+    from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+    rng = np.random.default_rng(3)
+    n = gen_nifti_mrs((rng.standard_normal(shape)
+                       + 1j * rng.standard_normal(shape)).astype(np.complex64),
+                      1 / 2000.0, 123.0)
+    for axis, tag in enumerate(tags, start=4):
+        n.set_dim_tag(axis, tag)
+    return n
+
+
+def test_synthesize_grows_an_array_on_a_nifti_list():
+    """The list path multiplies maps per subject and tags the new dim."""
+    nifti = _nifti((4, 4, 2, 32))
+    sampler = CoilSampler(mode='synthesize', source=Birdcage(n_coils=4))
+    out, _ = sampler.process_nifti_list([nifti])
+
+    grown = out[0]
+    assert grown.shape == (4, 4, 2, 32, 4)
+    assert grown.dim_tags[0] == 'DIM_COIL'
+    # exactly the maps this call drew (Birdcage turns the array per call) ...
+    np.testing.assert_allclose(
+        np.asarray(grown[:]),
+        np.asarray(nifti[:])[..., None] * sampler.last_maps_[:, :, :, None, :],
+        rtol=1e-4, atol=1e-5)
+    # ... and, maps aside, unit total sensitivity preserves the signal's size
+    np.testing.assert_allclose(np.sqrt((np.abs(np.asarray(grown[:])) ** 2).sum(-1)),
+                               np.abs(np.asarray(nifti[:])), rtol=1e-4, atol=1e-5)
+
+
+def test_synthesize_shifts_existing_tags_up():
+    """The coil axis goes first among the higher dims; others move up one."""
+    nifti = _nifti((4, 4, 2, 32, 3), tags=('DIM_DYN',))
+    out, _ = CoilSampler(mode='synthesize',
+                         source=Birdcage(n_coils=4)).process_nifti_list([nifti])
+
+    grown = out[0]
+    assert grown.shape == (4, 4, 2, 32, 4, 3)
+    assert grown.dim_tags[:2] == ['DIM_COIL', 'DIM_DYN']
+
+
+def test_reweighting_a_nifti_list_round_trips():
+    """Same array in, same magnitudes out — natively on the list backend."""
+    coiled, _ = CoilSampler(mode='synthesize',
+                            source=Birdcage(n_coils=6)).process_nifti_list(
+        [_nifti((4, 4, 2, 32))])
+    out, _ = CoilSampler(mode='reweight',
+                         source=Birdcage(n_coils=6)).process_nifti_list(coiled)
+
+    np.testing.assert_allclose(np.abs(np.asarray(out[0][:])),
+                               np.abs(np.asarray(coiled[0][:])),
+                               rtol=1e-3, atol=1e-4)

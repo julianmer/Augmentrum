@@ -115,9 +115,7 @@ no manual conversion needed.
 | `ArtificialPeaks` | Lorentzian, Gaussian, Voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `AverageSampler` | random, deterministic                                   |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `BaselineAugmentation` | random_walk, bspline, polynomial                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `CoilSampler[random, deterministic]` | draw from the coils present            |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `CoilSampler[synthesize]` | grow a `DIM_COIL` axis from sensitivity maps            |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `CoilSampler[reweight]` | swap the array under multi-coil data via estimated CSMs  |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `CoilSampler` | draw from the coils present, grow an array from sensitivity maps, or swap it under existing coils |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `EddyCurrent` | synthetic, water                                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `FrequencyShift` | shift_hz                                                |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `Noise` | sigma, sigma_frac, snr, snr_db                          |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |

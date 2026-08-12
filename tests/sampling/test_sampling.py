@@ -587,11 +587,11 @@ class TestCoilSamplerBackends:
         for backend in Backend:
             assert sampler.supports_backend(backend), backend
 
-    def test_synthesis_does_not_claim_the_nifti_list(self):
-        """A NIfTI list has no coil axis to write into, so synthesis routes."""
+    def test_synthesis_runs_natively_on_the_nifti_list(self):
+        """The list path grows a tagged coil axis per subject, no routing."""
         sampler = CoilSampler(mode='synthesize', n_coils=4)
 
-        assert not sampler.supports_backend(Backend.NIFTI_LIST)
+        assert sampler.supports_backend(Backend.NIFTI_LIST)
         assert sampler.supports_backend(Backend.PYTORCH)
 
     def test_process_with_nifti_list_backend(self, dummy_nifti_list):
