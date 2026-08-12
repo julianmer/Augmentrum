@@ -115,7 +115,7 @@ no manual conversion needed.
 | `ArtificialPeaks` | Lorentzian, Gaussian, Voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `AverageSampler` | random, deterministic                                   |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `BaselineAugmentation` | random_walk, bspline, polynomial                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `CoilSampler` | draw from the coils present, grow an array from sensitivity maps, or swap it under existing coils |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `CoilSampler` | draw random, reweight, grow from sensitivity maps |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `EddyCurrent` | synthetic, water                                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `FrequencyShift` | shift_hz                                                |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `Noise` | sigma, sigma_frac, snr, snr_db                          |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -123,7 +123,7 @@ no manual conversion needed.
 | `LineBroadening` | lorentzian, gaussian, voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `Macromolecules` | parametrized, semi_parametrized, measured, supplied     |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `NIfTI_RawProcessor` | coil combination, alignment, averaging, ECC, phase/freq |   ✓   | ~ | ~ | ~ | ~ | ~ |
-| `RawProcessor` | tensor twin of `NIfTI_RawProcessor`: same steps + HLSVD water removal |   ~   | ✓‡ | ✓‡ | ✓‡ | ✓‡ | ✓‡ |
+| `RawProcessor` | tensor twin of `NIfTI_RawProcessor` |   ~   | ✓‡ | ✓‡ | ✓‡ | ✓‡ | ✓‡ |
 | `PhaseShift` | zero_order, first_order                                 |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `ResidualWater` | lorentzian                                              |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `SpatialAugmentations` | 2-D / 3-D affine, flip, zoom, shear                     |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
