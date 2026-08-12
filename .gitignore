@@ -151,3 +151,6 @@ data/*
 
 legacy/
 results/
+# FSL-MRS example data — fetched at test time from the official repository
+# (FSL non-commercial license: must not be redistributed here)
+tests/testdata/fsl_mrs/

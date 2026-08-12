@@ -11,8 +11,30 @@ import shutil
 import augmentrum
 from augmentrum import Augmentrum
 
-#: The FSL-MRS example pair (uncombined multi-coil STEAM); tiny, kept in-repo.
+#: The FSL-MRS example pair (uncombined multi-coil STEAM). FSL's non-commercial
+#: license does not allow redistributing it here, so it is fetched from the
+#: official repository on first use and never committed (see .gitignore).
 FSL_TESTDATA = Path(__file__).parent.parent / 'testdata' / 'fsl_mrs'
+FSL_EXAMPLE_URL = ('https://media.githubusercontent.com/media/wtclarke/fsl_mrs/'
+                   '2.4.2/example_usage/example_data/')
+FSL_EXAMPLES = {'metab.nii.gz': '62c7778d17dac3610187d977a54033da',
+                'wref.nii.gz': 'f03fbd339338a256c1593f236570a94d'}
+
+
+@pytest.fixture(scope='module')
+def fsl_example_data():
+    """The FSL-MRS example pair, fetched from the official source on first use."""
+    from augmentrum.utils.download import fetch
+
+    FSL_TESTDATA.mkdir(parents=True, exist_ok=True)
+    for name, md5 in FSL_EXAMPLES.items():
+        if not (FSL_TESTDATA / name).exists():
+            try:
+                fetch(FSL_EXAMPLE_URL + name, FSL_TESTDATA / name, md5=md5,
+                      progress=False)
+            except Exception as err:
+                pytest.skip(f'FSL-MRS example data unavailable: {err}')
+    return FSL_TESTDATA
 
 from nifti_mrs_plus import NIfTI_MRS_Plus
 
@@ -73,15 +95,12 @@ class TestNIfTIMRSExport:
             assert Path(filepath).exists()
             assert filepath.endswith('.nii.gz')
 
-    @pytest.mark.skipif(not (FSL_TESTDATA / 'metab.nii.gz').exists(),
-                        reason='FSL-MRS example data missing from tests/testdata/fsl_mrs/')
-    def test_export_nifti_with_water(self, tmp_path):
+    def test_export_nifti_with_water(self, tmp_path, fsl_example_data):
         """Test NIFTI-MRS export with water reference."""
         from fsl_mrs.utils.mrs_io import read_FID
 
-        test_data_dir = Path(__file__).parent.parent / 'testdata' / 'fsl_mrs'
-        metab = read_FID(str(test_data_dir / 'metab.nii.gz'))
-        water = read_FID(str(test_data_dir / 'wref.nii.gz'))
+        metab = read_FID(str(fsl_example_data / 'metab.nii.gz'))
+        water = read_FID(str(fsl_example_data / 'wref.nii.gz'))
 
         augmenter = Augmentrum(
             data=[metab],
@@ -236,16 +255,13 @@ class TestHDF5Export:
             assert f.attrs['split'] == 'train'
             assert f.attrs['n_spectra'] == 4
 
-    @pytest.mark.skipif(not (FSL_TESTDATA / 'metab.nii.gz').exists(),
-                        reason='FSL-MRS example data missing from tests/testdata/fsl_mrs/')
-    def test_export_hdf5_with_water(self, tmp_path):
+    def test_export_hdf5_with_water(self, tmp_path, fsl_example_data):
         """Test HDF5 export with water reference."""
         import h5py
         from fsl_mrs.utils.mrs_io import read_FID
 
-        test_data_dir = Path(__file__).parent.parent / 'testdata' / 'fsl_mrs'
-        metab = read_FID(str(test_data_dir / 'metab.nii.gz'))
-        water = read_FID(str(test_data_dir / 'wref.nii.gz'))
+        metab = read_FID(str(fsl_example_data / 'metab.nii.gz'))
+        water = read_FID(str(fsl_example_data / 'wref.nii.gz'))
 
         augmenter = Augmentrum(
             data=[metab],
