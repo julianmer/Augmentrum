@@ -145,7 +145,7 @@ def _run_module(module, nifti_list, backend_enum) -> tuple:
     return result, elapsed
 
 
-# ── Main parametrised test ────────────────────────────────────────────────────
+# ── Main parametrized test ────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("module_name,module_cls,module_kwargs", MRS_MODULES)
 @pytest.mark.parametrize("backend_enum,backend_name", ALL_BACKENDS)

@@ -245,9 +245,10 @@ class BaselineAugmentation(BaseModule):
             sf_mhz = nifti.spectrometer_frequency[0]
 
             # Add baseline based on mode
-            # The helpers work in the spectrum, which is where a baseline is a
-            # baseline. On this path the data is still a FID, so the transform
-            # happens here rather than inside each of them.
+            # The NIfTI-MRS format stores FIDs, so on the list path the module
+            # converts at this boundary and back. The declared frequency DOMAIN
+            # governs the tensor path; a pipeline never reaches this method in
+            # the wrong domain (the planned transform forces a tensor backend).
             spectrum = np.fft.fftshift(np.fft.ifft(fid, axis=-1), axes=-1)
             if self.mode == 'random_walk':
                 augmented = self._add_random_walk_baseline(spectrum, sw_hz, sf_mhz)

@@ -40,7 +40,7 @@ The framework has 4 main components working together:
 ┌─────────────────────────────────────────────────────────────────┐
 │ 2. Modules: Individual processing/augmentation operations       │
 │    • PhaseShift: Rotate spectrum phase                          │
-│    • Noise: Add realistic noise                         │
+│    • Noise: Add realistic noise                                 │
 │    • LineBroadening: Broaden spectral lines                     │
 │    • And 10+ more built-in modules                              │
 │    • You can create your own custom modules!                    │
@@ -85,7 +85,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from augmentrum import Augmentrum, AugmentationPipeline, BaseModule, Backend, NIfTI_MRS_Plus
 from augmentrum.dataset.cows import COWSDataModule
-from augmentrum.processing.nifti_raw_processor import NIfTI_RawProcessor
+from augmentrum.processing.raw_processing import NIfTI_RawProcessor
 from augmentrum.augmentation.phase_frequency import PhaseShift, FrequencyShift
 from augmentrum.augmentation.line_broadening import LineBroadening
 from augmentrum.augmentation.noise import Noise
@@ -954,6 +954,67 @@ aug = Augmentrum(
 )
 
 Result: Fast training with infinite variety! 🎉
+""")
+
+
+#*****************************************#
+#   part 8: domains - where modules run   #
+#*****************************************#
+print("\n" + "="*80)
+print(" PART 8: DOMAINS - WHERE EACH MODULE RUNS")
+print("="*80)
+print("""
+MRS data lives in one of two domains per axis: spectral (time FID vs.
+frequency spectrum) and spatial (image vs. k-space). A module's math is only
+correct in one of them — line broadening decays the FID, a baseline is added
+onto the spectrum, an undersampling mask zeros k-space bins. In the wrong
+domain a module still returns a number, just silently the wrong one.
+
+Every module DECLARES where it works (its DOMAIN); none transforms secretly.
+The pipeline plans the whole chain once: it inserts a DomainTransform only
+where the data is not already in the declared domain, and a run of modules
+wanting the same domain shares a single move.
+""")
+
+from augmentrum.core.pipeline import AugmentationPipeline
+from augmentrum.processing import Domain, DomainError, DomainTransform
+from augmentrum.augmentation import (LineBroadening, BaselineAugmentation,
+                                     ResidualWater, Noise)
+
+pipeline = AugmentationPipeline([
+    LineBroadening(lb_hz=2.0),              # needs the FID  (spectral='time')
+    BaselineAugmentation(mode='polynomial'),  # needs the spectrum
+    ResidualWater(),                          # needs the spectrum too
+    Noise(sigma_frac=0.02),                   # domain-agnostic
+])
+
+print("The plan (inserted transforms are marked):")
+for index, step in pipeline.domain_plan():
+    marker = "  -> inserted" if index < 0 else ""
+    print(f"  {type(step).__name__}{marker}")
+print("""
+Note: ONE move into the frequency domain serves both BaselineAugmentation and
+ResidualWater, and one move at the end returns the data to time/image so it
+can be written out (pass end_domain to stay elsewhere, e.g. in k-space).
+""")
+
+print("Placing transforms yourself? The planner respects them — and with")
+print("domain_planning='strict' it verifies instead of fixing:\n")
+
+hand_placed = AugmentationPipeline(
+    [DomainTransform(spectral='frequency'), ResidualWater(),
+     DomainTransform(spectral='time')],
+    domain_planning='strict')
+print("  correctly hand-placed chain -> plan accepted, nothing inserted")
+hand_placed.domain_plan()
+
+try:
+    AugmentationPipeline([ResidualWater()], domain_planning='strict').domain_plan()
+except DomainError as err:
+    print(f"  missing transform in strict mode -> DomainError:\n    {err}")
+
+print("""
+The same switch is available on Augmentrum(..., domain_planning='strict').
 """)
 
 

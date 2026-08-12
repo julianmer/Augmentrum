@@ -810,9 +810,9 @@ GENERAL TIPS:
 """)
 
 
-#************************************#
-#   part 7: supervised pairs        #
-#************************************#
+#******************************#
+#   part 7: supervised pairs   #
+#******************************#
 print("\n" + "="*80)
 print(" PART 7: SUPERVISED PAIRS — TAPS AND OUTPUTS")
 print("="*80)

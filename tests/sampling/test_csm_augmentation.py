@@ -66,9 +66,9 @@ def test_every_call_places_it_anew():
     assert not np.allclose(mover.maps((8, 8, 2)), mover.maps((8, 8, 2)))
 
 
-#***********************#
-#   still an array      #
-#***********************#
+#********************#
+#   still an array   #
+#********************#
 def test_the_moved_maps_keep_unit_sensitivity():
     """
     The convention every source shares, so the two stay interchangeable.
@@ -104,8 +104,8 @@ def test_the_maps_stay_smooth():
     """
     A sensitivity map is low-frequency, and a placement does not change that.
 
-    Interpolation artefacts from the turn would show up here as energy spread
-    away from the centre of k-space.
+    Interpolation artifacts from the turn would show up here as energy spread
+    away from the center of k-space.
     """
     moved = Augmented(Birdcage(n_coils=8), rotation_deg=25.0).maps((32, 32, 8))
 

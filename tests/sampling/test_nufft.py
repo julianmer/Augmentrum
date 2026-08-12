@@ -61,9 +61,13 @@ def _samples(n, seed=0):
     return (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(np.complex64)[None]
 
 
-#*******************#
-#   Class TestGeometry   #
-#*******************#
+#**************************************************************************************************#
+#                                        Class TestGeometry                                        #
+#**************************************************************************************************#
+#                                                                                                  #
+# Grid sizing and shapes.                                                                          #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestGeometry:
     """Grid sizing and shapes."""
 
@@ -81,9 +85,13 @@ class TestGeometry:
         assert ops.shape(out) == (1, N, N)
 
 
-#***********************************#
-#   Class TestAgainstTorchKbNufft   #
-#***********************************#
+#**************************************************************************************************#
+#                                  Class TestAgainstTorchKbNufft                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# The reference this implementation replaces.                                                      #
+#                                                                                                  #
+#**************************************************************************************************#
 @pytest.mark.skipif(not (TORCH_AVAILABLE and TKBN_AVAILABLE),
                     reason="torchkbnufft not installed")
 class TestAgainstTorchKbNufft:
@@ -113,9 +121,13 @@ class TestAgainstTorchKbNufft:
         assert np.linalg.norm(a - b) / np.linalg.norm(b) < 0.01
 
 
-#*******************************#
-#   Class TestBackendAgnostic   #
-#*******************************#
+#**************************************************************************************************#
+#                                    Class TestBackendAgnostic                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# Why this exists: it must run on every backend and stay differentiable.                           #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestBackendAgnostic:
     """Why this exists: it must run on every backend and stay differentiable."""
 
@@ -162,9 +174,13 @@ class TestBackendAgnostic:
         assert float(kdata.grad.abs().sum()) > 0
 
 
-#***************************#
-#   Class TestForwardPair   #
-#***************************#
+#**************************************************************************************************#
+#                                      Class TestForwardPair                                       #
+#**************************************************************************************************#
+#                                                                                                  #
+# The forward operator, and its consistency with the adjoint.                                      #
+#                                                                                                  #
+#**************************************************************************************************#
 class TestForwardPair:
     """The forward operator, and its consistency with the adjoint."""
 

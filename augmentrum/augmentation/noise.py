@@ -75,6 +75,7 @@ class NoiseCovariance(ABC):
 #**************************************************************************************************#
 #                                                                                                  #
 # Channels that share nothing, which is the usual first-order model.                               #
+#                                                                                                  #
 #**************************************************************************************************#
 class Independent(NoiseCovariance):
     """Channels that share nothing, which is the usual first-order model."""
@@ -131,6 +132,7 @@ class FromSensitivity(NoiseCovariance):
 #**************************************************************************************************#
 #                                                                                                  #
 # A covariance the caller measured.                                                                #
+#                                                                                                  #
 #**************************************************************************************************#
 class SuppliedCovariance(NoiseCovariance):
     """A covariance the caller measured."""
@@ -191,6 +193,7 @@ class NoiseProfile(ABC):
 #**************************************************************************************************#
 #                                                                                                  #
 # The same everywhere, which is the usual assumption.                                              #
+#                                                                                                  #
 #**************************************************************************************************#
 class Flat(NoiseProfile):
     """The same everywhere, which is the usual assumption."""
@@ -205,6 +208,7 @@ class Flat(NoiseProfile):
 #**************************************************************************************************#
 #                                                                                                  #
 # A profile the caller already has.                                                                #
+#                                                                                                  #
 #**************************************************************************************************#
 class SuppliedProfile(NoiseProfile):
     """A profile the caller already has."""
@@ -317,7 +321,7 @@ class FromNoiseScan(NoiseProfile):
                         continue
                     spread = seen.std()
 
-                    # The scan is coarsely quantised, so a block can hold enough
+                    # The scan is coarsely quantized, so a block can hold enough
                     # voxels and still have them all equal. That is a quirk of
                     # the storage, not a silent region.
                     if spread > 0:
@@ -348,7 +352,11 @@ class Noise(BaseModule):
     sigma : float, optional
         Standard deviation per dimension (real and imaginary)
     sigma_frac : float, optional
-        Sigma as fraction of max|FID| (alternative to sigma)
+        Sigma as fraction of max|FID| (alternative to sigma).
+        Note that "sigma" and "sigma_frac" are referenced to the data as it
+        reaches this module: the spectral transform is non-unitary, so the
+        same value means a different absolute noise level in time and
+        frequency domain.
     seed : int, optional
         Random seed for reproducibility
     global_scale : bool, default False
@@ -458,7 +466,11 @@ class Noise(BaseModule):
             scale = ops.cast_like(magnitude * 0.0 + float(self.sigma), magnitude)
         else:
             # global_scale: one statistic per batch element; otherwise per trace.
-            red_axes = tuple(range(1, ndim)) if self.global_scale else (ndim - 1,)
+            # Per trace means along the spectral axis — axis 4 in the NIfTI
+            # layout, the last axis only when no higher dims trail it — never
+            # across a coil/average dimension sitting at the end.
+            spectral_axis = 4 if ndim > 4 else ndim - 1
+            red_axes = tuple(range(1, ndim)) if self.global_scale else (spectral_axis,)
 
             if self.sigma_frac is not None:
                 peak = ops.amax(magnitude, axis=red_axes, keepdims=True)
@@ -494,9 +506,9 @@ class Noise(BaseModule):
 
         return data_array + ops.cast_like(noise, data_array), water_array
 
-    #*******************#
-    #   how loud where  #
-    #*******************#
+    #********************#
+    #   how loud where   #
+    #********************#
     def _shaped(self, scale, shape):
         """
         Modulate the level by where in the volume it is.

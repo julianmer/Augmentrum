@@ -159,6 +159,9 @@ SPECS: List[ModuleSpec] = [
     ModuleSpec("NIfTI_RawProcessor", None, {}, needs_multicoil=True,
                own_provenance=True),
 
+    # Tensor twin of NIfTI_RawProcessor; collapses DIM_COIL / DIM_DYN by design.
+    ModuleSpec("RawProcessor", None, {}, needs_multicoil=True),
+
     ModuleSpec("PhaseShift[zero_order]", None, {"zero_order_deg": 30.0}),
     ModuleSpec("PhaseShift[first_order]", None, {"first_order_deg": 45.0}),
 

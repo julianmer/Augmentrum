@@ -26,7 +26,7 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
-from nifti_mrs_plus import ops
+from nifti_mrs_plus import ops, resample
 
 
 __all__ = ['Interpolator', 'LinearInterpolator', 'GriddingKernel', 'KaiserBesselInterpolator',
@@ -92,10 +92,10 @@ class LinearInterpolator(Interpolator):
 
         if ops.is_complex(grid):
             out = ops.complex_from(
-                ops.grid_sample(ops.real(stack), sample_grid, padding_mode="border"),
-                ops.grid_sample(ops.imag(stack), sample_grid, padding_mode="border"))
+                resample.grid_sample(ops.real(stack), sample_grid, padding_mode="border"),
+                resample.grid_sample(ops.imag(stack), sample_grid, padding_mode="border"))
         else:
-            out = ops.grid_sample(stack, sample_grid, padding_mode="border")
+            out = resample.grid_sample(stack, sample_grid, padding_mode="border")
 
         return ops.reshape(out, (n_chan, len(coords)))
 
@@ -305,7 +305,7 @@ class KaiserBesselInterpolator(GriddingKernel):
             # One sample feeds every tap it touches, so repeat it across them
             samples = ops.reshape(ops.take(values, np.array([c]), axis=0), (-1,))
             spread = ops.reshape(ops.stack([samples] * n_taps, axis=-1), (-1,))
-            planes.append(ops.scatter_add((n_cells,), idx_flat, spread * weight_b))
+            planes.append(resample.scatter_add((n_cells,), idx_flat, spread * weight_b))
 
         return ops.reshape(ops.stack(planes, axis=0), (n_chan,) + self.grid_size)
 

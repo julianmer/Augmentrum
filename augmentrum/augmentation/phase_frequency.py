@@ -68,11 +68,21 @@ class PhaseShift(BaseModule):
         self.zero_order_deg = zero_order_deg
         self.first_order_deg = first_order_deg
 
-        # A first-order shift is a ramp across the spectrum, so it needs one.
-        # A zero-order shift is a constant factor and works anywhere, so asking
-        # for a domain it does not need would force a transform for nothing.
-        if first_order_deg != 0.0:
-            self.DOMAIN = Domain(spectral='frequency')
+    @property
+    def DOMAIN(self):
+        """
+        A first-order shift is a ramp across the spectrum, so it needs one; a
+        zero-order shift is a constant factor and works anywhere, so asking for
+        a domain it does not need would force a transform for nothing.
+
+        A property rather than a value set at construction, because the pipeline
+        samples "first_order_deg" ranges per batch and injects them onto the
+        instance — the domain has to follow the value that will actually run,
+        not the constructor default.
+        """
+        if np.any(np.asarray(self.first_order_deg) != 0.0):
+            return Domain(spectral='frequency')
+        return None
 
     def process_nifti_list(self, data_list: List, water_list: Optional[List] = None, **kwargs):
         """
@@ -128,10 +138,10 @@ class PhaseShift(BaseModule):
         """
         Apply phase shifts to FID data (any backend tensor).
 
-        Zero-order phase is a scalar complex multiplication (fully vectorised).
+        Zero-order phase is a scalar complex multiplication (fully vectorized).
         First-order phase requires FFT → ramp → IFFT (uses tensor_ops).
         """
-        # Zero-order: fully vectorised scalar multiply
+        # Zero-order: fully vectorized scalar multiply
         if self.zero_order_deg != 0.0:
             phi = math.radians(self.zero_order_deg)
             # complex scalar * any-backend tensor — works everywhere

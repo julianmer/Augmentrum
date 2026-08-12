@@ -122,9 +122,9 @@ def build_pipeline(args) -> AugmentationPipeline:
     return AugmentationPipeline(steps, user_kwargs=ranges)
 
 
-#**************************#
-#   domain transfer ops    #
-#**************************#
+#*************************#
+#   domain transfer ops   #
+#*************************#
 def img_to_k(img, sense):
     """
     Coil-combined image channels to multi-coil k-space channels, batched.

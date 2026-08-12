@@ -136,9 +136,9 @@ def test_additions_have_the_same_shape_on_every_channel(with_coils, module):
     )
 
 
-#**************#
-#   the sweep  #
-#**************#
+#***************#
+#   the sweep   #
+#***************#
 @pytest.mark.parametrize(
     "spec", [s for s in SPECS if not s.spatial and not s.volume
              and not s.needs_multicoil and not s.changes_length],

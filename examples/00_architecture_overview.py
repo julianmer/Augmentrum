@@ -111,7 +111,7 @@ PIPELINE ARCHITECTURE:
 │  │              │   • Samples random broadening (if range)          │   │
 │  │              │   • Output: pytorch tensor                        │   │
 │  │              │                                                   │   │
-│  │              └─> Module 4 (e.g., Noise)                  │   │
+│  │              └─> Module 4 (e.g., Noise)                          │   │
 │  │                  • Supports backend='pytorch'                    │   │
 │  │                  • Runs directly on pytorch tensors              │   │
 │  │                  • Samples random noise level (if range)         │   │
@@ -216,4 +216,76 @@ This backend becomes the PREFERRED format for ALL operations. Here's what happen
 │    • Ready for your training code!                                      │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
+
+
+DOMAIN SYSTEM EXPLAINED:
+=========================
+
+MRS data lives in one of two domains per axis: spectral (time FID vs.
+frequency spectrum) and spatial (image vs. k-space). A module's math is only
+correct in one of them — line broadening multiplies a decay onto the FID, a
+baseline is added onto the spectrum, an undersampling mask zeros k-space
+bins. Handed the wrong domain, a module still returns a number; just the
+wrong one, silently.
+
+HOW MODULES HANDLE THIS:
+------------------------
+
+Every module DECLARES where its math works — it never transforms internally:
+
+    LineBroadening.DOMAIN        -> Domain(spectral='time')
+    BaselineAugmentation.DOMAIN  -> Domain(spectral='frequency')
+    KspaceUndersampling.DOMAIN   -> Domain(spatial='kspace')   # mask modes
+    Noise.DOMAIN                 -> None (white noise works anywhere)
+
+A DOMAIN can even depend on the sampled parameters: PhaseShift needs a
+spectrum only when a first-order ramp is in play, so its DOMAIN follows the
+value that actually runs — including per-batch range sampling.
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│ DOMAIN FLOW IN PIPELINE (domain_planning='auto', the default)           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  pipeline = ['line_broadening', 'baseline', 'residual_water', 'noise']  │
+│                                                                         │
+│  The planner walks the chain ONCE, tracking where the data is:          │
+│                                                                         │
+│      data (time) ──> LineBroadening          needs time      ✓ no move  │
+│                 ┌──> [DomainTransform to frequency]          INSERTED   │
+│                 ├──> BaselineAugmentation    needs frequency ✓          │
+│                 ├──> ResidualWater           needs frequency ✓ SHARED!  │
+│                 ├──> Noise                   needs nothing   ✓          │
+│                 └──> [DomainTransform to time]               INSERTED   │
+│                                                                         │
+│  • Transforms are inserted ONLY where the declared domain is not        │
+│    already satisfied — a run of same-domain modules shares one move.    │
+│  • DomainTransforms YOU place in the pipeline count: a correctly        │
+│    hand-placed chain gets nothing added; a misplaced one is fixed.      │
+│  • The data is left in time/image at the end so it can be written out   │
+│    (override with end_domain to stay in k-space, for instance).         │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+TURNING THE AUTOMATION OFF:
+---------------------------
+
+If you place every transform yourself and want mistakes SURFACED instead of
+silently fixed:
+
+    Augmentrum(..., domain_planning='strict')
+    # or AugmentationPipeline([...], domain_planning='strict')
+
+Strict planning inserts nothing; any module reached in the wrong domain
+raises a DomainError telling you exactly where to add a DomainTransform.
+A module can also declare STRICT = True to refuse being moved individually.
+
+WHY MODULES NEVER TRANSFORM INTERNALLY:
+---------------------------------------
+
+A hidden fft -> op -> ifft inside a module would cost a redundant round-trip
+every time neighboring modules want the same domain, and would double-
+transform data that is already there. Declaring the domain instead makes
+transforms explicit, shared, and — through the planner — provably minimal.
+(The one exception: process_nifti_list paths convert at the format boundary,
+because the NIfTI-MRS format itself stores FIDs.)
 """

@@ -32,9 +32,9 @@ from augmentrum import Augmentrum
 DATA_DIR = Path(__file__).resolve().parents[1] / 'data' / 'MRSI_Challenge'
 
 
-#*******************#
-#   data loading    #
-#*******************#
+#******************#
+#   data loading   #
+#******************#
 # The MRSI Challenge's own training recipe — spatial warp, undersampling,
 # noise — with a supervised tap inserted: the warp sits BEFORE the tap (a
 # property of the object, in both input and target), undersampling and noise

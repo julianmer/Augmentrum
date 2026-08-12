@@ -280,9 +280,9 @@ class TestKspaceUndersamplingNufft:
             KspaceUndersampling(ksp_mode='nonsense')
 
 
-#*****************************#
-#   trajectory as geometry    #
-#*****************************#
+#****************************#
+#   trajectory as geometry   #
+#****************************#
 # Moving the sample locations is the cheap, exact half of spatial augmentation:
 # no interpolation anywhere. Scaling and rotating do different things, and the
 # difference is easy to state wrongly, so both are pinned here.
@@ -299,7 +299,7 @@ def _reconstructed(accel=1.0, **kwargs):
 
 
 def test_scaling_the_trajectory_lowers_the_resolution():
-    """Keeping only the centre of k-space is what a coarser acquisition measures."""
+    """Keeping only the center of k-space is what a coarser acquisition measures."""
     sharpness = []
     for scale in (1.0, 0.5, 0.25):
         image = _reconstructed(traj_scale=scale)
@@ -328,7 +328,7 @@ def test_rotating_the_trajectory_changes_the_aliasing_when_accelerated():
     And this is what it is for.
 
     Under acceleration a turned trajectory visits different spokes, so the
-    artefact is a different realization from the same acquisition scheme.
+    artifact is a different realization from the same acquisition scheme.
     """
     plain = _reconstructed(accel=4.0)
     turned = _reconstructed(accel=4.0, traj_rotation_deg=30.0)

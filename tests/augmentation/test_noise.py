@@ -20,7 +20,7 @@ from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 #                                 Class TestGaussianNoiseCreation                                  #
 #**************************************************************************************************#
 #                                                                                                  #
-# Test Noise initialization.                                                               #
+# Test Noise initialization.                                                                       #
 #                                                                                                  #
 #**************************************************************************************************#
 class TestGaussianNoiseCreation:

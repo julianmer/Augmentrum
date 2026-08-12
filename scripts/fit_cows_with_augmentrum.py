@@ -45,7 +45,7 @@ sys.path.insert(0, PROJECT_ROOT)
 os.chdir(PROJECT_ROOT)  # Ensure relative paths like 'data/...' resolve correctly
 
 from augmentrum.dataset.cows import COWSDataModule
-from augmentrum.processing.nifti_raw_processor import NIfTI_RawProcessor
+from augmentrum.processing.raw_processing import NIfTI_RawProcessor
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 
 from scripts.fsl_fitting_framework import FSLFittingFramework

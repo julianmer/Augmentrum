@@ -93,9 +93,9 @@ def test_a_transform_needs_a_target():
         DomainTransform()
 
 
-#*******************#
-#   declarations    #
-#*******************#
+#******************#
+#   declarations   #
+#******************#
 def test_a_module_runs_in_the_domain_it_declared(batch):
     """
     The guarantee everything else rests on.
@@ -211,3 +211,111 @@ def test_a_strict_module_refuses_rather_than_guessing():
 
     with pytest.raises(DomainError, match="Add a DomainTransform"):
         pipeline.domain_plan()
+
+
+#*********************#
+#   strict planning   #
+#*********************#
+def test_strict_planning_raises_instead_of_inserting():
+    """A user who places every transform themselves wants mistakes surfaced."""
+    pipeline = AugmentationPipeline([ResidualWater()], domain_planning='strict')
+
+    with pytest.raises(DomainError, match="Add a DomainTransform"):
+        pipeline.domain_plan()
+
+
+def test_strict_planning_accepts_a_correctly_placed_chain():
+    """Hand-placed transforms count; a correct chain gets nothing added."""
+    pipeline = AugmentationPipeline(
+        [DomainTransform(spectral='frequency'), ResidualWater(),
+         DomainTransform(spectral='time')],
+        domain_planning='strict')
+
+    planned = pipeline.domain_plan()
+    assert all(index >= 0 for index, _ in planned), "strict must insert nothing"
+
+
+#**********************************#
+#   parameters decide the domain   #
+#**********************************#
+def test_an_injected_first_order_phase_gets_its_spectrum(batch):
+    """
+    Range-sampled parameters must reach the plan.
+
+    The pipeline builds PhaseShift with defaults and injects the sampled
+    first-order value per batch — the domain has to follow the value that
+    actually runs, or the ramp lands on the FID and shifts it instead.
+    """
+    shift = PhaseShift()
+    assert shift.DOMAIN is None
+
+    out_injected, _ = AugmentationPipeline([PhaseShift()])(
+        batch, batch_params={0: {'first_order_deg': 45.0}})
+
+    reference = PhaseShift(first_order_deg=45.0)
+    assert reference.DOMAIN == Domain(spectral='frequency')
+    out_direct, _ = AugmentationPipeline([reference])(batch)
+
+    np.testing.assert_allclose(_values(out_injected), _values(out_direct),
+                               rtol=1e-5, atol=1e-6)
+
+
+#****************************#
+#   k-space native modules   #
+#****************************#
+def test_undersampling_declares_the_domain_it_masks_in():
+    """The mask modes consume k-space; only the NUFFT measures off the image."""
+    from augmentrum.sampling import KspaceUndersampling
+    from augmentrum.sampling.coil_sampling import CoilSampler
+
+    assert KspaceUndersampling(ksp_mode='cartesian').DOMAIN == Domain(spatial='kspace')
+    assert KspaceUndersampling(ksp_mode='gridded').DOMAIN == Domain(spatial='kspace')
+    assert KspaceUndersampling(ksp_mode='nufft').DOMAIN == Domain(spatial='image')
+    assert KspaceUndersampling(ksp_mode='off').DOMAIN is None
+    assert CoilSampler(mode='synthesize', n_coils=2).DOMAIN == Domain(spatial='image')
+
+
+def test_undersampling_masks_without_transforming(batch):
+    """
+    Zeroing bins is a multiply on data already in k-space.
+
+    Called on k-space directly, the module must touch nothing but the masked
+    bins — no FFT round-trip of its own; and through the module call, the
+    result must equal masking the centered k-space the DomainTransform
+    convention produces.
+    """
+    from augmentrum.sampling import KspaceUndersampling
+
+    us = KspaceUndersampling(ksp_mode='cartesian', acceleration_factor=2.0,
+                             us_seed=0)
+    out, _ = us(batch)
+
+    k = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(
+        _values(batch), axes=(1, 2, 3)), axes=(1, 2, 3), norm='ortho'), axes=(1, 2, 3))
+    expected = k * us.last_masks_[..., None]
+    expected = np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(
+        expected, axes=(1, 2, 3)), axes=(1, 2, 3), norm='ortho'), axes=(1, 2, 3))
+
+    np.testing.assert_allclose(_values(out), expected, rtol=1e-4, atol=1e-5)
+
+
+#*******************************#
+#   per-trace noise statistic   #
+#*******************************#
+def test_noise_statistic_runs_along_the_spectrum_not_across_coils():
+    """
+    With a trailing coil axis, per-trace SNR must still be measured along T.
+
+    Two coils with wildly different amplitudes: each coil's noise must track
+    its own peak, which only happens if the statistic reduces the spectral
+    axis (axis 4), not whatever axis happens to be last.
+    """
+    rng = np.random.default_rng(1)
+    weak = rng.standard_normal((1, 1, 1, 1, 256)) + 1j * rng.standard_normal((1, 1, 1, 1, 256))
+    data = np.stack([weak, 1000.0 * weak], axis=-1)             # (1, 1, 1, 1, T, C)
+
+    out, _ = Noise(sigma_frac=0.01, seed=0).process_tensor(data)
+    added = np.asarray(out) - data
+
+    ratio = added[..., 1].std() / added[..., 0].std()
+    assert 100 < ratio < 10000, f"noise must scale per coil trace, got ratio {ratio:.1f}"

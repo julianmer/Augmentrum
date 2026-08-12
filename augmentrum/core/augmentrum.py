@@ -35,7 +35,7 @@ from augmentrum.core.dataset_utils import (
 from augmentrum.sampling.subject_splitter import SubjectSplitter
 
 # Processing modules
-from augmentrum.processing.nifti_raw_processor import NIfTI_RawProcessor
+from augmentrum.processing.raw_processing import NIfTI_RawProcessor, RawProcessor
 from augmentrum.sampling.coil_sampling import CoilSampler
 from augmentrum.sampling.dimension_sampling import AverageSampler
 from augmentrum.sampling.kspace_sampling import KspaceUndersampling
@@ -167,6 +167,7 @@ class Augmentrum:
         'coil_sampling': CoilSampler,
         'average_sampling': AverageSampler,
         'processing': NIfTI_RawProcessor,
+        'raw_processing': RawProcessor,
 
         # Noise
         'noise': Noise,
@@ -249,6 +250,7 @@ class Augmentrum:
         backend: Union[str, Backend] = 'pytorch',
         device: Optional[str] = None,  # 'cuda', 'cpu', or None (auto-detect)
         volatile: bool = False,
+        domain_planning: str = 'auto',  # 'auto' inserts DomainTransforms; 'strict' raises instead
 
         **kwargs  # Module-specific parameters
     ):
@@ -328,6 +330,7 @@ class Augmentrum:
         self.batch_size = batch_size
         self.device = device  # Store device ('cuda', 'cpu', or None)
         self.volatile = volatile
+        self.domain_planning = domain_planning
         self.kwargs = kwargs
 
         # Convert data to NIfTI_MRS_Plus
@@ -664,7 +667,8 @@ class Augmentrum:
         return AugmentationPipeline(
             modules,
             module_names=module_names,
-            user_kwargs=self.kwargs
+            user_kwargs=self.kwargs,
+            domain_planning=self.domain_planning,
         )
 
     def _create_modes(self, mode, modes):
@@ -913,6 +917,7 @@ class Augmentrum:
             'CoilSampler': '📡',
             'AverageSampler': '🔁',
             'NIfTI_RawProcessor': '⚙️',
+            'RawProcessor': '⚙️',
             'Noise': '🔊',
             'LineBroadening': '〰️',
             'BaselineAugmentation': '📈',

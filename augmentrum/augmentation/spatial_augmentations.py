@@ -25,7 +25,7 @@ from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from augmentrum.utils.geometry import Affine
-from nifti_mrs_plus import ops
+from nifti_mrs_plus import ops, resample
 
 
 __all__ = ['SpatialAugmentations']
@@ -524,7 +524,7 @@ class SpatialAugmentations(BaseModule):
         # The sampling grid depends only on (theta, spatial) — never on C — so it
         # is built once and reused for every chunk and for both the real and the
         # imaginary pass.
-        grid = ops.affine_grid(theta_b, (n_batch, 1) + spatial)
+        grid = resample.affine_grid(theta_b, (n_batch, 1) + spatial)
 
         chunk = int(self.chunk_channels) if self.chunk_channels else n_chan
         chunk = max(1, min(chunk, n_chan))
@@ -542,9 +542,9 @@ class SpatialAugmentations(BaseModule):
 
         return ops.transpose(ops.concatenate(outs, axis=1), perm)
 
-    #********************#
-    #   the k-space form #
-    #********************#
+    #**********************#
+    #   the k-space form   #
+    #**********************#
     @staticmethod
     def _kspace_theta(theta, spatial):
         """
@@ -559,9 +559,9 @@ class SpatialAugmentations(BaseModule):
         multiplies its transform by a linear phase, so it is taken out here and
         applied by :meth:"_phase_ramp".
 
-        The last wrinkle is where the turn happens. A sampling grid is centred
+        The last wrinkle is where the turn happens. A sampling grid is centered
         between the middle two samples of an even axis, while DC lands on one of
-        them, so on such an axis the two centres sit half a voxel apart.
+        them, so on such an axis the two centers sit half a voxel apart.
 
         Args:
             theta: "(N, 2, 3)" or "(N, 3, 4)" image-space affines.
@@ -584,12 +584,12 @@ class SpatialAugmentations(BaseModule):
                   * aspect[None]).astype(theta.dtype)
 
         # A voxel spans 2/n of the normalized extent, so half of one is 1/n.
-        centre = np.array([1.0 / n if n % 2 == 0 else 0.0 for n in spatial],
+        center = np.array([1.0 / n if n % 2 == 0 else 0.0 for n in spatial],
                           dtype=theta.dtype)
 
         kspace = np.zeros_like(theta)
         kspace[:, :, :ndim] = matrix
-        kspace[:, :, ndim] = centre - matrix @ centre
+        kspace[:, :, ndim] = center - matrix @ center
         return kspace, shifts
 
     def _phase_ramp(self, x, shifts):
@@ -624,7 +624,7 @@ class SpatialAugmentations(BaseModule):
         return x * ops.cast_like(ops.match_backend(ramp, x), x)
 
     def _grid_sample(self, x, grid):
-        return ops.grid_sample(x, grid, padding_mode=self.padding_mode)
+        return resample.grid_sample(x, grid, padding_mode=self.padding_mode)
 
     #******************#
     #   coil sampler   #

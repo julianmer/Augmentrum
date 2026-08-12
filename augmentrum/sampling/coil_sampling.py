@@ -26,6 +26,7 @@ from abc import ABC, abstractmethod
 
 from augmentrum.core import Backend
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.domain import Domain
 from augmentrum.utils import download
 from augmentrum.sampling.dimension_sampling import DimensionSampler
 
@@ -592,6 +593,9 @@ class CoilSampler(DimensionSampler):
             self.ADDS_DIM_TAGS = (self.DIM_TAG,)
             self.SUPPORTED_BACKENDS = tuple(b for b in Backend
                                             if b is not Backend.NIFTI_LIST)
+            # Multiplying sensitivity maps voxel by voxel is the coil forward
+            # model in image space only — in k-space it would be a convolution.
+            self.DOMAIN = Domain(spatial='image')
             # The source knows how many elements it has, so None leaves it to it.
             self.n_coils = None if n_coils is None else int(n_coils)
         else:

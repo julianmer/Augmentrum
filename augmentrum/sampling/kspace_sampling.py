@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend
 from nifti_mrs_plus import ops
 from nifti_mrs_plus.ops import is_torch
@@ -344,7 +345,7 @@ class Trajectory(ABC):
         readout produces a perfectly valid array that simply does not describe
         the curve it claims to. The symptom downstream is a rasterised mask with
         moire structure, or apparent counter-rotating arms, and it is easy to
-        mistake for an undersampling artefact rather than a trajectory bug.
+        mistake for an undersampling artifact rather than a trajectory bug.
         """
         if not shots:
             return
@@ -443,7 +444,7 @@ class Trajectory(ABC):
 #                                     Class TrajectoryRegistry                                     #
 #**************************************************************************************************#
 #                                                                                                  #
-# Name -> "Trajectory" subclass lookup.                                                     #
+# Name -> "Trajectory" subclass lookup.                                                            #
 #                                                                                                  #
 #**************************************************************************************************#
 class TrajectoryRegistry:
@@ -554,7 +555,7 @@ class TrajectoryRegistry:
 #                                        Class Cartesian2D                                         #
 #**************************************************************************************************#
 #                                                                                                  #
-# See "_build" for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                                    #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
@@ -635,7 +636,7 @@ class Cartesian2D(Trajectory):
 #                                        Class Cartesian3D                                         #
 #**************************************************************************************************#
 #                                                                                                  #
-# See "_build" for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                                    #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
@@ -846,7 +847,7 @@ class GoldenRadial2D(Radial2D):
 #                                          Class Spiral2D                                          #
 #**************************************************************************************************#
 #                                                                                                  #
-# See "_build" for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                                    #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
@@ -912,7 +913,7 @@ class Spiral2D(Trajectory):
         n_shots = int(params.get("n_shots", 1))
         turns = float(params.get("spiral_turns",
                                  max(nx, ny) / (2.0 * max(n_shots, 1))))
-        # Along-arm Nyquist. The parametrisation is uniform in t while the
+        # Along-arm Nyquist. The parametrization is uniform in t while the
         # path speed grows as (N/2)*sqrt(1 + (2*pi*turns*t)^2) bins per unit t,
         # so the binding constraint is the PEAK speed at t=1, not the mean arc
         # length: with only mean-rate sampling the outer turns still take
@@ -971,7 +972,7 @@ class Spiral2D(Trajectory):
 #                                         Class Rosette2D                                          #
 #**************************************************************************************************#
 #                                                                                                  #
-# See "_build" for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                                    #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
@@ -1049,7 +1050,7 @@ class Rosette2D(Trajectory):
 #                                      Class RosettePetals2D                                       #
 #**************************************************************************************************#
 #                                                                                                  #
-# See "_build" for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                                    #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
@@ -1136,7 +1137,7 @@ class RosettePetals2D(Trajectory):
 #                                     Class ConcentricRings2D                                      #
 #**************************************************************************************************#
 #                                                                                                  #
-# See "_build" for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                                    #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
@@ -1297,7 +1298,7 @@ class Eccentric2D(Trajectory):
 #                                     Class ConcentricShells3D                                     #
 #**************************************************************************************************#
 #                                                                                                  #
-# See "_build" for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                                    #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
@@ -1403,7 +1404,7 @@ class ConcentricShells3D(Trajectory):
 #                                       Class Phyllotaxis3D                                        #
 #**************************************************************************************************#
 #                                                                                                  #
-# See "_build" for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                                    #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
@@ -1508,7 +1509,7 @@ class Phyllotaxis3D(Trajectory):
 #                                          Class Cones3D                                           #
 #**************************************************************************************************#
 #                                                                                                  #
-# See "_build" for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                                    #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
@@ -1621,7 +1622,7 @@ class Cones3D(Trajectory):
 #                                       Class ConesRosette3D                                       #
 #**************************************************************************************************#
 #                                                                                                  #
-# See "_build" for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                                    #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
@@ -1747,7 +1748,7 @@ class ConesRosette3D(Trajectory):
 #                                          Class Floret3D                                          #
 #**************************************************************************************************#
 #                                                                                                  #
-# See "_build" for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                                    #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
@@ -1902,7 +1903,7 @@ class Floret3D(Trajectory):
 #                                        Class EggRosette3D                                        #
 #**************************************************************************************************#
 #                                                                                                  #
-# See "_build" for the geometry and parameters.                                              #
+# See "_build" for the geometry and parameters.                                                    #
 #                                                                                                  #
 #**************************************************************************************************#
 @TrajectoryRegistry.register
@@ -3398,6 +3399,13 @@ class KspaceUndersampling(BaseModule):
     the spectral axis last, matching "SpatialAugmentations" and everything
     "NIfTI_MRS_Plus.get_data()" produces.
 
+    The mask modes declare "Domain(spatial='kspace')" and operate on k-space
+    directly — zeroing bins is a multiply. The pipeline (or an explicit
+    "DomainTransform") moves the data there and back, once, shared with any
+    neighboring k-space step; this module never transforms on its own. The
+    'nufft' mode declares "Domain(spatial='image')" instead, because its
+    measurement operator samples off the image grid.
+
     Why this is a mask and not a NUFFT
     ----------------------------------
     In phase-encoded CSI one shot acquires the *whole* FID at one k-space
@@ -3440,7 +3448,7 @@ class KspaceUndersampling(BaseModule):
     Examples
     --------
     >>> us = KspaceUndersampling(acceleration_factor=4.0)
-    >>> out, _ = us.process_tensor(volume)             # (B, X, Y, Z, T)
+    >>> out, _ = us(volume_plus)          # module call plans the k-space move
 
     >>> # spiral coverage instead of a Cartesian mask
     >>> us = KspaceUndersampling(ksp_mode='gridded', trajectory='spiral_2d',
@@ -3452,10 +3460,10 @@ class KspaceUndersampling(BaseModule):
     ...            acceleration_factor=(2.0, 6.0))
     """
 
-    # FFT masking runs natively on every tensor backend. NIFTI_LIST is absent
-    # because this module only implements process_tensor, so the pipeline routes
-    # a NIfTI-list batch to a tensor backend instead. The nufft mode narrows
-    # this further in __init__.
+    # The mask multiply runs natively on every tensor backend. NIFTI_LIST is
+    # absent because this module only implements process_tensor, so the pipeline
+    # routes a NIfTI-list batch to a tensor backend instead. The nufft mode
+    # narrows this further in __init__.
     SUPPORTED_BACKENDS = tuple(b for b in Backend if b is not Backend.NIFTI_LIST)
 
     MODES = ('cartesian', 'gridded', 'nufft', 'off')
@@ -3476,7 +3484,6 @@ class KspaceUndersampling(BaseModule):
                  undersample_axes: Optional[Sequence[int]] = (0, 1),
                  per_sample_masks: bool = True,
                  noise_sigma_k: Optional[float] = None,
-                 chunk_t: Optional[int] = 128,
                  us_seed: Optional[int] = None,
                  pixdim: Optional[Tuple[float, ...]] = None,
                  # geometry applied to where the samples are taken
@@ -3512,8 +3519,6 @@ class KspaceUndersampling(BaseModule):
                 applies one mask to the whole batch.
         noise_sigma_k: standard deviation per channel of complex Gaussian noise
                 added in k-space before masking. None disables it.
-        chunk_t: transform this many spectral points at a time to bound peak
-                memory. None does all at once. Affects memory only, not results.
         us_seed: RNG seed. None (default) draws a fresh mask every call, which is
                 what you want from an augmentation; set it to reproduce a mask.
         pixdim: voxel size in mm per spatial axis. Only used by 'gridded' mode to
@@ -3531,6 +3536,15 @@ class KspaceUndersampling(BaseModule):
             # run anywhere else. The gridding implementation has no such limit.
             self.SUPPORTED_BACKENDS = (Backend.PYTORCH,)
 
+        # The mask modes consume k-space directly: zeroing bins is a multiply,
+        # and the pipeline moves the data (once, shared with neighboring
+        # k-space steps) instead of this module hiding an FFT round-trip. The
+        # NUFFT measures off the image grid, so it needs the image itself.
+        if ksp_mode in ('cartesian', 'gridded'):
+            self.DOMAIN = Domain(spatial='kspace')
+        elif ksp_mode == 'nufft':
+            self.DOMAIN = Domain(spatial='image')
+
         self.nufft_osf = float(nufft_osf)
         if nufft_impl not in ('gridding', 'interp', 'torchkbnufft'):
             raise ValueError(
@@ -3547,7 +3561,6 @@ class KspaceUndersampling(BaseModule):
         self.undersample_axes = tuple(undersample_axes) if undersample_axes is not None else None
         self.per_sample_masks = bool(per_sample_masks)
         self.noise_sigma_k = noise_sigma_k
-        self.chunk_t = chunk_t
         self.us_seed = us_seed
         self.pixdim = tuple(pixdim) if pixdim is not None else None
         self.traj_rotation_deg = float(traj_rotation_deg)
@@ -3615,7 +3628,7 @@ class KspaceUndersampling(BaseModule):
         costs an interpolation. They do quite different things, though:
 
         **Scaling** lowers the resolution. Keeping only the samples nearer the
-        centre of k-space is what a shorter, coarser acquisition measures, and
+        center of k-space is what a shorter, coarser acquisition measures, and
         the point spread widens as 1/kmax. It is not the same as zero-padding at
         regridding, which raises the grid without adding any information.
 
@@ -3624,7 +3637,7 @@ class KspaceUndersampling(BaseModule):
         unchanged - at full sampling the image is identical. What it changes is
         *which* parts of k-space are visited, so under acceleration a different
         set of spokes is acquired and the aliasing takes a different form. That
-        is its use: a fresh undersampling artefact from the same trajectory. To
+        is its use: a fresh undersampling artifact from the same trajectory. To
         turn the object itself, use SpatialAugmentations, which does that in
         either domain.
 
@@ -3845,6 +3858,10 @@ class KspaceUndersampling(BaseModule):
         """
         Undersample a batch of MRSI volumes.
 
+        The data arrives in the domain this mode declared: centered k-space
+        for 'cartesian' and 'gridded' (mask multiply), the image itself for
+        'nufft'. Calling through the module or a pipeline handles the moves.
+
         Args:
             data_array: (batch, X, Y, Z, T) complex, or (batch, X, Y, Z, T, C)
                 to undersample a receive array coil by coil.
@@ -3921,38 +3938,24 @@ class KspaceUndersampling(BaseModule):
     def _spatial_axes(self, ndim: int = 5) -> Tuple[int, ...]:
         return (1, 2, 3)
 
-    def _apply_masks(self, x, masks: np.ndarray):
+    def _apply_masks(self, k, masks: np.ndarray):
         """
-        FFT over the spatial axes, add k-space noise, zero the unacquired bins,
-        transform back.
+        Add k-space noise and zero the unacquired bins.
 
-        The mask is in fftshift order, with the k-space center in the middle, so
-        the spectrum is shifted to match rather than the mask being rolled.
-
-        Runs on whatever backend *x* belongs to. Chunks are collected and joined
-        rather than written into a preallocated output, because jax and
-        tensorflow tensors are immutable.
+        The data arrives *in k-space* — the mask modes declare
+        "Domain(spatial='kspace')", so the pipeline provides centered k-space
+        (fftshift order, center in the middle) matching the mask, and moving
+        there and back is the pipeline's business, shared with any neighboring
+        k-space step instead of hidden here as an FFT round-trip.
         """
-        axes = self._spatial_axes()
+        if masks.shape[0] == 1 and k.shape[0] > 1:
+            masks = np.broadcast_to(masks, (k.shape[0],) + masks.shape[1:])
+        mask = ops.match_backend(masks[..., None], k)   # broadcast over T
 
-        if masks.shape[0] == 1 and x.shape[0] > 1:
-            masks = np.broadcast_to(masks, (x.shape[0],) + masks.shape[1:])
-        mask = ops.match_backend(masks[..., None], x)   # broadcast over T
+        if self.noise_sigma_k:
+            real = self.rng.normal(tuple(ops.shape(k)), like=ops.real(k))
+            imag = self.rng.normal(tuple(ops.shape(k)), like=ops.real(k))
+            k = k + float(self.noise_sigma_k) * ops.cast_like(
+                ops.complex_from(real, imag), k)
 
-        n_t = int(x.shape[-1])
-        chunk = int(self.chunk_t) if self.chunk_t else n_t
-        chunk = max(1, min(chunk, n_t))
-
-        pieces = []
-        for t0 in range(0, n_t, chunk):
-            block = x[..., t0:t0 + chunk]
-            k = ops.fftshift(ops.fftn(block, axes, norm='ortho'), axis=axes)
-            if self.noise_sigma_k:
-                real = self.rng.normal(tuple(k.shape), like=ops.real(k))
-                imag = self.rng.normal(tuple(k.shape), like=ops.real(k))
-                k = k + float(self.noise_sigma_k) * ops.cast_like(
-                    ops.complex_from(real, imag), k)
-            k = k * ops.cast_like(mask, k)
-            pieces.append(ops.ifftn(ops.ifftshift(k, axis=axes), axes, norm='ortho'))
-
-        return pieces[0] if len(pieces) == 1 else ops.concatenate(pieces, axis=-1)
+        return k * ops.cast_like(mask, k)

@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 from nifti_mrs_plus.core import DataState
 from nifti_mrs_plus import ops
-from nifti_mrs_plus.ops import SeedGenerator
+from nifti_mrs_plus.random import SeedGenerator
 
 
 #**************************************************************************************************#
@@ -274,13 +274,13 @@ class BaseModule(ABC):
         Performance tiers
         -----------------
         1. **Fast** — shape unchanged (all augmentations except truncate/zerofill):
-           one vectorised tensor op, then the result is handed to
+           one vectorized tensor op, then the result is handed to
            "NIfTI_MRS_Plus.set_data", which keeps it on its own backend. Nothing
            is converted, so an autograd graph survives the whole pipeline and is
            only resolved when something asks for NIfTI objects.
 
         2. **Medium** — shape changes (e.g. truncation, zero-fill): the tensor op is
-           still vectorised, but write-back must rebuild each NIfTI_MRS object
+           still vectorized, but write-back must rebuild each NIfTI_MRS object
            through NumPy (O(B) constructor calls), which ends the graph. A
            "RuntimeWarning" is emitted.
 
@@ -393,9 +393,9 @@ class BaseModule(ABC):
 
         return out
 
-    #**********************#
-    #   the spectral axis  #
-    #**********************#
+    #***********************#
+    #   the spectral axis   #
+    #***********************#
     #: Where NIfTI-MRS keeps the spectral points once a batch axis is in front.
     SPECTRAL_AXIS = 4
 

@@ -24,6 +24,8 @@ from fsl_mrs.utils.preproc.nifti_mrs_proc import DimensionsDoNotMatch
 
 from scipy import integrate
 
+from nifti_mrs_plus import ops
+
 # from suspect.processing.denoising import sliding_gaussian
 
 # own
@@ -411,3 +413,42 @@ def resample_signal_lp(data, npoints, bandwidth, axis=1):
         return resampled_signal
 
     return np.apply_along_axis(process_signal, axis=axis, arr=data.squeeze())
+
+
+#******************************#
+#   fsl-mrs axis conventions   #
+#******************************#
+def fid_to_spec(fids):
+    """FSL-MRS FIDToSpec along the last axis: ortho fft, first point halved."""
+    fids = np.array(fids, dtype=np.complex128)
+    fids[..., 0] *= 0.5
+    return np.fft.fftshift(np.fft.fft(fids, axis=-1, norm='ortho'), axes=-1)
+
+
+def ppm_shift_axis(n, sw_hz, sf_mhz, shift=4.65):
+    """The shifted ppm axis FSL-MRS builds for an n-point spectrum.
+
+    The default *shift* is FSL-MRS's proton referencing constant
+    (PPM_SHIFT['1H']), so the tensor path assumes 1H data.
+    """
+    return np.linspace(-sw_hz / 2, sw_hz / 2, n) / sf_mhz + shift
+
+
+def ppm_window(n, sw_hz, sf_mhz, lim, shift=4.65):
+    """First and last index of the ppm window *lim* (FSL-MRS limit_to_range)."""
+    axis = ppm_shift_axis(n, sw_hz, sf_mhz, shift)
+    first = int(np.argmin(np.abs(axis - lim[0])))
+    last = int(np.argmin(np.abs(axis - lim[1])))
+    return (first, last) if first <= last else (last, first)
+
+
+#********************#
+#   axis shuffling   #
+#********************#
+def move_axis(x, src, dst):
+    """Move one axis of *x* from *src* to *dst*, like numpy.moveaxis."""
+    rank = len(ops.shape(x))
+    src, dst = src % rank, dst % rank
+    order = [d for d in range(rank) if d != src]
+    order.insert(dst, src)
+    return ops.transpose(x, order)

@@ -43,9 +43,9 @@ COILS = ['DIM_COIL', None, None]
 COILS_AND_AVERAGES = ['DIM_COIL', 'DIM_DYN', None]
 
 
-#*******************#
-#   averaging       #
-#*******************#
+#***************#
+#   averaging   #
+#***************#
 @pytest.mark.parametrize("n_averages", [1, 4, 16, 64])
 def test_averaging_pays_off_as_the_root_of_the_count(n_averages):
     """
@@ -128,9 +128,9 @@ def test_data_without_coils_is_left_alone():
     assert np.asarray(noisy).shape == signal.shape
 
 
-#*******************#
-#   magnitude data  #
-#*******************#
+#********************#
+#   magnitude data   #
+#********************#
 def test_magnitude_data_never_goes_negative():
     """
     Rician, not Gaussian.
@@ -167,9 +167,9 @@ def test_complex_data_is_not_biased():
     assert abs(np.asarray(noisy).mean() - 1.0) < 0.05
 
 
-#***********************#
-#   where noise enters  #
-#***********************#
+#************************#
+#   where noise enters   #
+#************************#
 def test_undersampled_image_data_is_noised_in_kspace():
     """
     The reason the module reads the state at all.
@@ -200,9 +200,9 @@ def test_it_is_droppable_anywhere():
     assert Noise(snr=30).DOMAIN is None
 
 
-#***********************#
-#   how loud where      #
-#***********************#
+#********************#
+#   how loud where   #
+#********************#
 # Noise is not flat across a volume: sensitivity falls off and parallel imaging
 # amplifies unevenly. A profile says where it is louder and averages to one, so
 # the level stays whatever was asked for.

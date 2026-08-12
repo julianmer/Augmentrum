@@ -242,7 +242,9 @@ class ArtificialPeaks(BaseModule):
         Returns:
             FID with peaks
         """
-        # IFFT to frequency domain (correct MRS convention)
+        # The NIfTI-MRS format stores FIDs, so the list path converts at this
+        # boundary and back; the declared frequency DOMAIN governs the tensor
+        # path, and a pipeline never reaches this method in the wrong domain.
         spec = np.fft.fftshift(np.fft.ifft(fid))
 
         # Create ppm axis

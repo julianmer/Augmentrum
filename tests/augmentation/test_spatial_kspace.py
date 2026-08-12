@@ -38,11 +38,11 @@ import pytest
 from augmentrum.augmentation import SpatialAugmentations
 
 
-#**************#
-#   helpers    #
-#**************#
+#*************#
+#   helpers   #
+#*************#
 def _to_kspace(x):
-    """Image to k-space over the two spatial axes, DC at the centre."""
+    """Image to k-space over the two spatial axes, DC at the center."""
     return np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(x, axes=(1, 2)),
                                        axes=(1, 2), norm='ortho'), axes=(1, 2))
 
@@ -104,9 +104,9 @@ COMBINED = 0.94
 SHIFTED = 0.998
 
 
-#***************#
-#   the affine  #
-#***************#
+#****************#
+#   the affine   #
+#****************#
 @pytest.mark.parametrize("shape", SHAPES)
 def test_a_rotation_matches(shape):
     """The simplest case, and the one that cannot discriminate the matrix."""
@@ -144,9 +144,9 @@ def test_everything_at_once(shape):
     assert _agreement(shape, linear, (0.2, 0.1)) > COMBINED
 
 
-#***********************#
-#   what would hide it  #
-#***********************#
+#************************#
+#   what would hide it   #
+#************************#
 def test_the_wrong_matrix_would_be_caught():
     """
     The anisotropic case has to actually discriminate.

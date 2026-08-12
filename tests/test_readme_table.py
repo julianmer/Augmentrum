@@ -43,7 +43,7 @@ from augmentrum.augmentation import (
     EddyCurrent, FrequencyShift, Noise, LineBroadening, PhaseShift,
     ResidualWater, SpuriousEchoes, SpatialAugmentations, ZeroFill,
 )
-from augmentrum.processing.nifti_raw_processor import NIfTI_RawProcessor
+from augmentrum.processing.raw_processing import NIfTI_RawProcessor
 from augmentrum.sampling.coil_sampling import CoilSampler
 
 # ── optional frameworks ───────────────────────────────────────────────────────
@@ -242,7 +242,7 @@ def _run_spatial_module(module, backend_enum) -> float:
 
 
 #****************************#
-#   main parametrised test   #
+#   main parametrized test   #
 #****************************#
 @pytest.mark.parametrize("backend_enum", _ALL_BACKENDS,
                          ids=[b.value for b in _ALL_BACKENDS])

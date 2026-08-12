@@ -70,6 +70,7 @@ class Domain:
 #**************************************************************************************************#
 #                                                                                                  #
 # Raised when a module is handed data in a domain it refuses to move itself.                       #
+#                                                                                                  #
 #**************************************************************************************************#
 class DomainError(ValueError):
     """Raised when a module is handed data in a domain it refuses to move itself."""

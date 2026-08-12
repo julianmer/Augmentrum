@@ -269,7 +269,10 @@ class ResidualWater(BaseModule):
         for i in range(fid_2d.shape[0]):
             fid_1d = fid_2d[i]
 
-            # 1) IFFT to frequency domain (FID -> spectrum) - MRS convention
+            # 1) FID -> spectrum: the NIfTI-MRS format stores FIDs, so the
+            #    list path converts at this boundary and back (the declared
+            #    frequency DOMAIN governs the tensor path; a pipeline never
+            #    reaches this method in the wrong domain)
             spec = np.fft.fftshift(np.fft.ifft(fid_1d))
 
             # 2) Create ppm axis

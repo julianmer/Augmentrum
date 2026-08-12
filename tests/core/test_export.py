@@ -10,6 +10,10 @@ import shutil
 
 import augmentrum
 from augmentrum import Augmentrum
+
+#: The FSL-MRS example pair (uncombined multi-coil STEAM); tiny, kept in-repo.
+FSL_TESTDATA = Path(__file__).parent.parent / 'testdata' / 'fsl_mrs'
+
 from nifti_mrs_plus import NIfTI_MRS_Plus
 
 try:
@@ -69,7 +73,8 @@ class TestNIfTIMRSExport:
             assert Path(filepath).exists()
             assert filepath.endswith('.nii.gz')
 
-    @pytest.mark.skip(reason="Requires actual test data files from tests/testdata/fsl_mrs/")
+    @pytest.mark.skipif(not (FSL_TESTDATA / 'metab.nii.gz').exists(),
+                        reason='FSL-MRS example data missing from tests/testdata/fsl_mrs/')
     def test_export_nifti_with_water(self, tmp_path):
         """Test NIFTI-MRS export with water reference."""
         from fsl_mrs.utils.mrs_io import read_FID
@@ -231,7 +236,8 @@ class TestHDF5Export:
             assert f.attrs['split'] == 'train'
             assert f.attrs['n_spectra'] == 4
 
-    @pytest.mark.skip(reason="Requires actual test data files from tests/testdata/fsl_mrs/")
+    @pytest.mark.skipif(not (FSL_TESTDATA / 'metab.nii.gz').exists(),
+                        reason='FSL-MRS example data missing from tests/testdata/fsl_mrs/')
     def test_export_hdf5_with_water(self, tmp_path):
         """Test HDF5 export with water reference."""
         import h5py

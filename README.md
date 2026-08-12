@@ -124,6 +124,7 @@ no manual conversion needed.
 | `LineBroadening` | lorentzian, gaussian, voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `Macromolecules` | parametrized, semi_parametrized, measured, supplied     |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `NIfTI_RawProcessor` | coil combination, alignment, averaging, ECC, phase/freq |   ✓   | ~ | ~ | ~ | ~ | ~ |
+| `RawProcessor` | tensor twin of `NIfTI_RawProcessor`: same steps + HLSVD water removal |   ~   | ✓‡ | ✓‡ | ✓‡ | ✓‡ | ✓‡ |
 | `PhaseShift` | zero_order, first_order                                 |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `ResidualWater` | lorentzian                                              |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `SpatialAugmentations` | 2-D / 3-D affine, flip, zoom, shear                     |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -138,6 +139,8 @@ no manual conversion needed.
 Modes that differ in backend support get a row each, named `Module[mode]`.
 
 > **†** `Apodization[truncate]` and `ZeroFill` both change `N_PTS`. Because `target_pts` / `n_pts` is a module-level scalar, the **same length is applied uniformly to every batch member** — the output is still a uniform tensor.
+
+> **‡** `RawProcessor` matches `NIfTI_RawProcessor` to floating-point tolerance, with three deviations: outlier removal **masks** dynamics instead of dropping them (so it requires `average=True`), `registration_method='own'` trades exact FSL-MRS alignment for a much faster vectorized search, and water removal uses a truncated SVD. Gradients flow through the signal path only.
 
 ---
 

@@ -380,10 +380,10 @@ class TestSubjectSplitterBackends:
 
 
 #**************************************************************************************************#
-#                               Class TestCoilSamplerCreation                               #
+#                               Class TestCoilSamplerCreation                                      #
 #**************************************************************************************************#
 #                                                                                                  #
-# Test CoilSampler initialization.                                                          #
+# Test CoilSampler initialization.                                                                 #
 #                                                                                                  #
 #**************************************************************************************************#
 class TestCoilSamplerCreation:
@@ -411,10 +411,10 @@ class TestCoilSamplerCreation:
 
 
 #**************************************************************************************************#
-#                              Class TestCoilSamplerProcessing                              #
+#                              Class TestCoilSamplerProcessing                                     #
 #**************************************************************************************************#
 #                                                                                                  #
-# Test CoilSampler processing.                                                              #
+# Test CoilSampler processing.                                                                     #
 #                                                                                                  #
 #**************************************************************************************************#
 class TestCoilSamplerProcessing:
@@ -481,7 +481,7 @@ class TestCoilSamplerProcessing:
 
 
 #**************************************************************************************************#
-#                                Class TestCoilSamplerModes                                 #
+#                                Class TestCoilSamplerModes                                        #
 #**************************************************************************************************#
 #                                                                                                  #
 # Test different modes.                                                                            #
@@ -527,10 +527,10 @@ class TestCoilSamplerModes:
 
 
 #**************************************************************************************************#
-#                             Class TestCoilSamplerIntegration                              #
+#                             Class TestCoilSamplerIntegration                                     #
 #**************************************************************************************************#
 #                                                                                                  #
-# Integration tests for CoilSampler.                                                        #
+# Integration tests for CoilSampler.                                                               #
 #                                                                                                  #
 #**************************************************************************************************#
 class TestCoilSamplerIntegration:
@@ -564,10 +564,10 @@ class TestCoilSamplerIntegration:
 
 
 #**************************************************************************************************#
-#                               Class TestCoilSamplerBackends                               #
+#                               Class TestCoilSamplerBackends                                      #
 #**************************************************************************************************#
 #                                                                                                  #
-# Test CoilSampler with different backends.                                                 #
+# Test CoilSampler with different backends.                                                        #
 #                                                                                                  #
 #**************************************************************************************************#
 class TestCoilSamplerBackends:

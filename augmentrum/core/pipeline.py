@@ -45,7 +45,7 @@ class AugmentationPipeline:
     """
 
     def __init__(self, steps: List[BaseModule], module_names=None, user_kwargs=None,
-                 end_domain=None):
+                 end_domain=None, domain_planning='auto'):
         """
         Initializes the pipeline with a list of augmentation steps.
 
@@ -57,9 +57,19 @@ class AugmentationPipeline:
                 canonical form, time domain and image space, so the result can
                 be written out. Pass a "Domain" to stay somewhere else - staying
                 in k-space, for instance, so spatial augmentation acts there.
+            domain_planning: 'auto' (default) inserts DomainTransforms wherever
+                a module's declared domain is not already satisfied; transforms
+                the user placed themselves count, so a correctly hand-placed
+                chain gets nothing added. 'strict' inserts nothing and raises
+                DomainError instead, for users who place every transform
+                themselves and want mistakes surfaced rather than fixed.
         """
+        if domain_planning not in ('auto', 'strict'):
+            raise ValueError(f"domain_planning must be 'auto' or 'strict', "
+                             f"got {domain_planning!r}")
         self.steps = steps
         self.end_domain = end_domain
+        self.domain_planning = domain_planning
         self.module_names = module_names or []
         self.user_kwargs = user_kwargs or {}
         self._validate_steps()
@@ -274,7 +284,7 @@ class AugmentationPipeline:
         for index, step in enumerate(self.steps):
             wanted = getattr(step, 'DOMAIN', None)
             if wanted is not None and not wanted.satisfied_by(state):
-                if getattr(step, 'STRICT', False):
+                if getattr(step, 'STRICT', False) or self.domain_planning == 'strict':
                     raise DomainError(
                         f"{type(step).__name__} at step {index} works in {wanted}, but "
                         f"the data reaches it as spectral={state.spectral}, "
@@ -288,7 +298,17 @@ class AugmentationPipeline:
             if hasattr(step, 'output_state'):
                 state = step.output_state(state)
 
-        # Leave the data somewhere it can be written out, unless told otherwise
+        # Leave the data somewhere it can be written out, unless told otherwise.
+        # A strict plan inserts nothing: the data ends wherever the user's own
+        # transforms left it, unless an end_domain states a requirement.
+        if self.domain_planning == 'strict':
+            if self.end_domain is not None and not self.end_domain.satisfied_by(state):
+                raise DomainError(
+                    f"The pipeline ends with spectral={state.spectral}, "
+                    f"spatial={state.spatial}, but end_domain asks for "
+                    f"{self.end_domain}. Add a closing DomainTransform."
+                )
+            return planned
         end = self.end_domain or Domain(spectral='time', spatial='image')
         if not end.satisfied_by(state):
             planned.append((-1, DomainTransform(spectral=end.spectral,
@@ -326,50 +346,22 @@ class AugmentationPipeline:
         current_water = water
         taps = {}
 
-        for i, step in self.domain_plan(data.state):
-            # Inject batch parameters if provided (for on-the-fly mode)
-            if batch_params and i in batch_params:
-                # Temporarily set sampled parameters on the step
-                original_attrs = {}
-                for param_name, param_value in batch_params[i].items():
-                    if hasattr(step, param_name):
-                        original_attrs[param_name] = getattr(step, param_name)
-                    setattr(step, param_name, param_value)
+        # Inject sampled parameters BEFORE planning the domains: a module's
+        # declared domain may depend on the value that will actually run
+        # (PhaseShift's first-order ramp needs a spectrum only when nonzero),
+        # so the plan has to see this batch's values, not constructor defaults.
+        original_attrs = {}
+        for index, params in (batch_params or {}).items():
+            step = self.steps[index]
+            original_attrs[index] = {}
+            for param_name, param_value in params.items():
+                if hasattr(step, param_name):
+                    original_attrs[index][param_name] = getattr(step, param_name)
+                setattr(step, param_name, param_value)
 
-                try:
-                    # Check backend compatibility (only for BaseModule instances)
-                    if isinstance(step, BaseModule):
-                        current_backend = current_data.backend
-
-                        # Ensure backend is a Backend enum
-                        if isinstance(current_backend, str):
-                            from nifti_mrs_plus import Backend
-                            current_backend = Backend[current_backend.upper()]
-
-                        if not step.supports_backend(current_backend):
-                            # Need to convert to compatible backend
-                            preferred_backend = step.get_preferred_backend()
-
-                            warnings.warn(
-                                f"Step {i} ({step.__class__.__name__}) does not support "
-                                f"backend {current_backend.value}. Converting to {preferred_backend.value}. "
-                                f"Supported backends: {[b.value for b in step.SUPPORTED_BACKENDS]}"
-                            )
-
-                            # Convert data
-                            current_data = self._convert_backend(current_data, preferred_backend)
-                            if current_water is not None:
-                                current_water = self._convert_backend(current_water, preferred_backend)
-
-                    # Apply the step with batch parameters
-                    current_data, current_water = step(current_data, current_water, **kwargs)
-                finally:
-                    # Restore original attributes
-                    for param_name, orig_value in original_attrs.items():
-                        setattr(step, param_name, orig_value)
-            else:
-                # No batch params, use module's initialized values (fixed mode)
-                # Check backend compatibility
+        try:
+            for i, step in self.domain_plan(data.state):
+                # Check backend compatibility (only for BaseModule instances)
                 if isinstance(step, BaseModule):
                     current_backend = current_data.backend
 
@@ -396,14 +388,20 @@ class AugmentationPipeline:
                 # Apply the step
                 current_data, current_water = step(current_data, current_water, **kwargs)
 
-            # Snapshot the stage as it passes a tap. The snapshot must own its
-            # values: later steps write into shared NIfTI objects, so a bare
-            # reference would silently read back the fully augmented data.
-            if isinstance(step, Tap):
-                taps[step.name] = (
-                    self._snapshot(current_data),
-                    self._snapshot(current_water) if current_water is not None else None,
-                )
+                # Snapshot the stage as it passes a tap. The snapshot must own
+                # its values: later steps write into shared NIfTI objects, so a
+                # bare reference would silently read back the fully augmented
+                # data.
+                if isinstance(step, Tap):
+                    taps[step.name] = (
+                        self._snapshot(current_data),
+                        self._snapshot(current_water) if current_water is not None else None,
+                    )
+        finally:
+            # Restore original attributes
+            for index, attrs in original_attrs.items():
+                for param_name, orig_value in attrs.items():
+                    setattr(self.steps[index], param_name, orig_value)
 
         if not self._tap_indices:
             return current_data, current_water
