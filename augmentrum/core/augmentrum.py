@@ -35,7 +35,7 @@ from augmentrum.core.dataset_utils import (
 from augmentrum.sampling.subject_splitter import SubjectSplitter
 
 # Processing modules
-from augmentrum.processing.raw_processing import NIfTI_RawProcessor, RawProcessor
+from augmentrum.processing.raw_processing import RawProcessor
 from augmentrum.sampling.coil_sampling import CoilSampler
 from augmentrum.sampling.dimension_sampling import AverageSampler
 from augmentrum.sampling.kspace_sampling import KspaceUndersampling
@@ -166,8 +166,7 @@ class Augmentrum:
         # Processing
         'coil_sampling': CoilSampler,
         'average_sampling': AverageSampler,
-        'processing': NIfTI_RawProcessor,
-        'raw_processing': RawProcessor,
+        'processing': RawProcessor,
 
         # Noise
         'noise': Noise,
@@ -600,7 +599,7 @@ class Augmentrum:
         else:
             # Default: processing for all splits
             default_pipeline = AugmentationPipeline([
-                NIfTI_RawProcessor(**self.kwargs)
+                RawProcessor(**self.kwargs)
             ])
             for split_name in self.splits.keys():
                 self.pipelines[split_name] = default_pipeline
@@ -916,7 +915,6 @@ class Augmentrum:
         emoji_map = {
             'CoilSampler': '📡',
             'AverageSampler': '🔁',
-            'NIfTI_RawProcessor': '⚙️',
             'RawProcessor': '⚙️',
             'Noise': '🔊',
             'LineBroadening': '〰️',

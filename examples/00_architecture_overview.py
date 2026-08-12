@@ -98,7 +98,7 @@ PIPELINE ARCHITECTURE:
 │  │              │   • Samples random phase (if range specified)     │   │
 │  │              │   • Output: pytorch tensor                        │   │
 │  │              │                                                   │   │
-│  │              ├─> Module 2 (e.g., NIfTI_RawProcessor)             │   │
+│  │              ├─> Module 2 (e.g., RawProcessor)             │   │
 │  │              │   • Only supports backend='nifti_list'            │   │
 │  │              │   • CONVERTS: pytorch → nifti_list                │   │
 │  │              │   • Processes raw FID data                        │   │

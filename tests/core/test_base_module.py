@@ -434,7 +434,7 @@ class TestBaseModuleIntegration:
     """Integration tests with real modules."""
 
     def test_with_nifti_rawprocessor_style(self, dummy_nifti_list):
-        """Test BaseModule works like NIfTI_RawProcessor."""
+        """Test BaseModule works like RawProcessor."""
         class ProcessorModule(BaseModule):
             SUPPORTED_BACKENDS = [Backend.NIFTI_LIST]
 

@@ -28,7 +28,7 @@ from tqdm import tqdm
 # own
 from augmentrum import Augmentrum
 from augmentrum.processing.utils import (own_nifti_coil_combination,
-                                         own_nifti_coil_combination_adaptive,
+                                         nifti_coil_combination_adaptive,
                                          resample_signal_fir, resample_signal_lp)
 
 
@@ -414,7 +414,7 @@ class BrainBeatsDataModule():
         avg_ref = proc.average(data_wat, 'DIM_DYN')
 
         if coil_combination.lower() == 'adaptive':
-            data_met, data_wat = own_nifti_coil_combination_adaptive(data_met, data_wat, report=report)
+            data_met, data_wat = nifti_coil_combination_adaptive(data_met, data_wat, report=report)
         elif coil_combination.lower() == 'simple':
             data_met = own_nifti_coil_combination(data_met, avg_ref)
             data_wat = own_nifti_coil_combination(data_wat, avg_ref)

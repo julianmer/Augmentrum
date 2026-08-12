@@ -43,7 +43,7 @@ torch = pytest.importorskip("torch")
 # Spatial / volume modules and the NIfTI-list-only samplers are out of scope
 # here: they are covered by their own suites and are the subject of the separate
 # torch-port work.
-_EXCLUDED = {"NIfTI_RawProcessor", "CoilSampler[draw]", "AverageSampler"}
+_EXCLUDED = {"RawProcessor", "CoilSampler[draw]", "AverageSampler"}
 
 SPECTRAL_SPECS = [s for s in SPECS
                   if not (s.spatial or s.volume)

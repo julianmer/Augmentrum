@@ -156,15 +156,15 @@ SPECS: List[ModuleSpec] = [
     ModuleSpec("LineBroadening[gaussian]", None, {"gb_hz": 5.0, "mode": "gaussian"}),
     ModuleSpec("LineBroadening[voigt]", None, {"lb_hz": 3.0, "gb_hz": 2.0, "mode": "voigt"}),
 
-    # Every operation it switches on writes its own FSL-MRS provenance entry, so
-    # 'Coil combination' being present IS coil=True and its absence is coil=False.
-    # Recording the constructor arguments as well would duplicate that, and would
-    # state the intent rather than what ran.
-    ModuleSpec("NIfTI_RawProcessor", None, {}, needs_multicoil=True,
+    # On the list backend every executed step writes its own FSL-MRS provenance
+    # entry — 'Coil combination' being present IS coil=True — hence
+    # own_provenance. Collapses DIM_COIL / DIM_DYN by design on every engine.
+    ModuleSpec("RawProcessor", None, {}, needs_multicoil=True,
                own_provenance=True),
-
-    # Tensor twin of NIfTI_RawProcessor; collapses DIM_COIL / DIM_DYN by design.
-    ModuleSpec("RawProcessor", None, {}, needs_multicoil=True),
+    # The pattern registration exists only batched, so this variant routes a
+    # NIfTI-list batch to the tensor engine — and records params provenance.
+    ModuleSpec("RawProcessor[pattern]", None, {"registration_method": "pattern"},
+               needs_multicoil=True),
 
     ModuleSpec("PhaseShift[zero_order]", None, {"zero_order_deg": 30.0}),
     ModuleSpec("PhaseShift[first_order]", None, {"first_order_deg": 45.0}),

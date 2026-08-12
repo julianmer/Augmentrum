@@ -15,13 +15,12 @@
 #   imports   #
 #*************#
 from augmentrum.processing.domain import Domain, DomainError, DomainTransform
-from augmentrum.processing.raw_processing import NIfTI_RawProcessor, RawProcessor
+from augmentrum.processing.raw_processing import RawProcessor
 
 __all__ = [
     'Domain',
     'DomainError',
     'DomainTransform',
-    'NIfTI_RawProcessor',
     'RawProcessor',
     'HermiteMAkimaInterpolator',
     'BicubicHermiteMAkima2D',

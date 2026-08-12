@@ -286,7 +286,7 @@ class BaseModule(ABC):
 
         3. **Slow (~ routing)** — module only implements "process_nifti_list":
            falls back to the NIfTI-list path, processes each subject individually.
-           This is what sampling modules (CoilSampler, NIfTI_RawProcessor)
+           This is what sampling modules (CoilSampler in its list-only modes)
            always use because they change DIM_COIL / DIM_DYN, not just values.
 
         Rule of thumb: keep **N_PTS and all extra dimensions uniform** across the

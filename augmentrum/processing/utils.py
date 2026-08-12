@@ -145,9 +145,9 @@ def safe_squeeze(mrs_obj, dims=None):
 
 
 #***************************************#
-#   own nifti eddy current correction   #
+#   nifti eddy current correction       #
 #***************************************#
-def own_nifti_ecc(data, reference, report=None):
+def nifti_ecc_smoothed(data, reference, report=None):
     """
     Eddy current correction for MRS data in the NIfTI format. Using the code from suspect.
 
@@ -179,10 +179,10 @@ def own_nifti_ecc(data, reference, report=None):
         corrected_obj[idx] = dd * ecc
 
     if report is not None:
-        raise NotImplementedError("Report generation not implemented yet for own_nifti_ecc")
+        raise NotImplementedError("Report generation not implemented yet for nifti_ecc_smoothed")
 
     # update processing prov
-    processing_info = f'{__name__}.own_nifti_ecc, '
+    processing_info = f'{__name__}.nifti_ecc_smoothed, '
     processing_info += f'reference={reference.filename}.'
     update_processing_prov(corrected_obj, 'Eddy current correction', processing_info)
 
@@ -303,7 +303,7 @@ def coil_combination_adaptive(data, water=None):
 #****************************************#
 #   nifit wrapper for coil combination   #
 #****************************************#
-def own_nifti_coil_combination_adaptive(data, reference=None, report=None):
+def nifti_coil_combination_adaptive(data, reference=None, report=None):
     """
     Nifit wrapper for the adaptive coil combination.
 

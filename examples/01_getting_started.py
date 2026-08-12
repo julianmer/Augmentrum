@@ -85,7 +85,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from augmentrum import Augmentrum, AugmentationPipeline, BaseModule, Backend, NIfTI_MRS_Plus
 from augmentrum.dataset.cows import COWSDataModule
-from augmentrum.processing.raw_processing import NIfTI_RawProcessor
+from augmentrum.processing.raw_processing import RawProcessor
 from augmentrum.augmentation.phase_frequency import PhaseShift, FrequencyShift
 from augmentrum.augmentation.line_broadening import LineBroadening
 from augmentrum.augmentation.noise import Noise
@@ -353,7 +353,7 @@ Let's see this in action with phase shifts:
 """)
 
 # Create a clean processed spectrum for comparison
-clean_pipeline = AugmentationPipeline([NIfTI_RawProcessor(conj=False, coil_method='fsl-mrs')])
+clean_pipeline = AugmentationPipeline([RawProcessor(conj=False, coil_method='fsl-mrs')])
 clean_data = NIfTI_MRS_Plus([data_list[0]], backend=Backend.NIFTI_LIST, volatile=True)
 clean_water = NIfTI_MRS_Plus([water_list[0]], backend=Backend.NIFTI_LIST, volatile=True) if water_list else None
 clean_data, _ = clean_pipeline(clean_data, clean_water)
@@ -638,7 +638,7 @@ print("\nNow let's use it in a pipeline:")
 
 # Use custom module with built-in modules
 custom_pipeline = AugmentationPipeline([
-    NIfTI_RawProcessor(coil_method='fsl-mrs', conj=False),  # Built-in with COWS params
+    RawProcessor(coil_method='fsl-mrs', conj=False),  # Built-in with COWS params
     AmplitudeScaling(scale_factor=(0.8, 1.2)),  # YOUR custom module!
     PhaseShift(zero_order_deg=15.0),  # Built-in (using fixed value for demo)
     Noise(sigma_frac=0.02),   # Built-in

@@ -43,7 +43,7 @@ from augmentrum.augmentation import (
     EddyCurrent, FrequencyShift, Noise, LineBroadening, PhaseShift,
     ResidualWater, SpuriousEchoes, SpatialAugmentations, ZeroFill,
 )
-from augmentrum.processing.raw_processing import NIfTI_RawProcessor
+from augmentrum.processing.raw_processing import RawProcessor
 from augmentrum.sampling.coil_sampling import CoilSampler
 
 # ── optional frameworks ───────────────────────────────────────────────────────

@@ -12,7 +12,7 @@
 #                                                                                                  #
 # Pipeline:                                                                                        #
 #   1. Load COWS data using Augmentrum's COWSDataModule                                            #
-#   2. Process data with Augmentrum's NIfTI_RawProcessor (coil combine, align, average, etc.)      #
+#   2. Process data with Augmentrum's RawProcessor (coil combine, align, average, etc.)      #
 #   3. Fit processed spectra using FSLFittingFramework                                             #
 #   4. Save concentrations, signal parameters, and computed ranges                                 #
 #   5. Demonstrate loading back and conversion to simulation defs                                  #
@@ -45,7 +45,7 @@ sys.path.insert(0, PROJECT_ROOT)
 os.chdir(PROJECT_ROOT)  # Ensure relative paths like 'data/...' resolve correctly
 
 from augmentrum.dataset.cows import COWSDataModule
-from augmentrum.processing.raw_processing import NIfTI_RawProcessor
+from augmentrum.processing.raw_processing import RawProcessor
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 
 from scripts.fsl_fitting_framework import FSLFittingFramework
@@ -248,7 +248,7 @@ def run_fitting_pipeline(config):
         # ─── TWIX data: NIfTI-MRS objects → full Augmentrum processing pipeline ───
         print("  Data type: NIfTI-MRS objects → full processing pipeline")
 
-        processor = NIfTI_RawProcessor(
+        processor = RawProcessor(
             conj=config['conj'],
             coil=True,
             align=True,

@@ -115,15 +115,14 @@ no manual conversion needed.
 | `ArtificialPeaks` | Lorentzian, Gaussian, Voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `AverageSampler` | random, deterministic                                   |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `BaselineAugmentation` | random_walk, bspline, polynomial                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `CoilSampler` | draw random, reweight, grow from sensitivity maps |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `CoilSampler` | draw random, reweight, grow from CSMs |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `EddyCurrent` | synthetic, water                                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `FrequencyShift` | shift_hz                                                |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `Noise` | sigma, sigma_frac, snr, snr_db                          |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `KspaceUndersampling` | cartesian, gridded, nufft                               |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `LineBroadening` | lorentzian, gaussian, voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `Macromolecules` | parametrized, semi_parametrized, measured, supplied     |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `NIfTI_RawProcessor` | coil combination, alignment, averaging, ECC, phase/freq |   ✓   | ~ | ~ | ~ | ~ | ~ |
-| `RawProcessor` | tensor twin of `NIfTI_RawProcessor` |   ~   | ✓‡ | ✓‡ | ✓‡ | ✓‡ | ✓‡ |
+| `Macromolecules` | parametrized, measured, supplied     |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `RawProcessor` | coil combination, registration, ECC, ... |   ✓   | ✓‡ | ✓‡ | ✓‡ | ✓‡ | ✓‡ |
 | `PhaseShift` | zero_order, first_order                                 |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `ResidualWater` | lorentzian                                              |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `SpatialAugmentations` | 2-D / 3-D affine, flip, zoom, shear                     |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -139,7 +138,7 @@ Modes that differ in backend support get a row each, named `Module[mode]`.
 
 > **†** `Apodization[truncate]` and `ZeroFill` both change `N_PTS`. Because `target_pts` / `n_pts` is a module-level scalar, the **same length is applied uniformly to every batch member** — the output is still a uniform tensor.
 
-> **‡** `RawProcessor` matches `NIfTI_RawProcessor` to floating-point tolerance, with three deviations: outlier removal **masks** dynamics instead of dropping them (consumed exactly by averaging; zeroed and exposed as `last_keep_mask_` when not averaging), `registration_method='own'` trades exact FSL-MRS alignment for a much faster vectorized search, and water removal uses a truncated SVD. Gradients flow through the signal path only.
+> **‡** `RawProcessor[remove_outliers]` on tensor backends **zeroes outlier transients instead of dropping them** — a batched tensor cannot go ragged. 
 
 ---
 

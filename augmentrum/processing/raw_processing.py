@@ -6,9 +6,9 @@
 #                                                                                                  #
 # Created: 2025-10-07                                                                              #
 #                                                                                                  #
-# Purpose: Processing of raw (uncombined, unaveraged) MRS data. NIfTI_RawProcessor wraps FSL-MRS   #
-#          functions on NIfTI-MRS objects; RawProcessor is its tensor twin, running the same       #
-#          pipeline batched on any array backend with gradients through the signal path.           #
+# Purpose: Processing of raw (uncombined, unaveraged) MRS data. One RawProcessor, two engines:     #
+#          the FSL-MRS reference per NIfTI object on the list backend, and the same pipeline       #
+#          batched and differentiable on every tensor backend.                                     #
 #                                                                                                  #
 ####################################################################################################
 
@@ -31,41 +31,64 @@ from augmentrum.core import Backend
 
 
 #**************************************************************************************************#
-#                                     Class NIfTI_RawProcessor                                     #
+#                                        Class RawProcessor                                        #
 #**************************************************************************************************#
 #                                                                                                  #
-# Processes raw MRS data using FSL-MRS functions on NIfTI-MRS objects.                             #
+# Raw-data processing on any backend: the FSL-MRS reference per NIfTI object, or its batched       #
+# differentiable twin on tensors — one module, the backend picks the engine.                       #
 #                                                                                                  #
 #**************************************************************************************************#
-class NIfTI_RawProcessor(BaseModule):
+class RawProcessor(BaseModule):
     """
-    Processes raw MRS data using FSL-MRS functions on NIfTI-MRS objects.
+    Raw-data processing on any backend — one module, the backend picks the engine.
 
-    This module operates on the NIFTI_LIST backend, processing each NIFTI_MRS
-    object individually using FSL-MRS processing functions.
+    On the NIFTI_LIST backend each subject runs through the FSL-MRS reference
+    functions (bit-exact, shapes may differ per subject). On tensor backends
+    the same pipeline runs batched: every step splits into a detached estimate
+    (mirroring the FSL-MRS formulas) and a differentiable application
+    (backend-native multiply and sum), so results track the reference to
+    floating-point tolerance while gradients flow through the signal path on
+    torch / jax / tensorflow. Parameters and defaults are one set; the few
+    per-engine methods are named below.
 
-    Logging is automatic via BaseModule (only if not volatile).
+    Deliberate differences of the tensor engine:
+      * outlier removal keeps the dynamic axis and masks outliers instead of
+        dropping them: consumed by the weighted average when averaging (then
+        results equal the reference exactly), zeroed in place otherwise, with
+        the mask exposed as ``last_keep_mask_``;
+      * alignment with registration_method='pattern' swaps the per-transient
+        Powell search for a closed-form phase and a vectorized pattern descent
+        over the frequency shift — equal objective values, but on noisy data
+        the solvers settle in micro-minima a fraction of a Hz apart (the
+        default 'fsl-mrs' method runs the same Powell search as FSL-MRS and
+        matches it);
+      * water removal takes the top Hankel components from a truncated
+        Lanczos SVD (hlsvdpropy's sparse path) instead of a dense
+        decomposition, so it matches to floating-point tolerance rather than
+        bit-exactly.
+
+    On tensors, the water reference is assumed to share the metabolite data's
+    dimension layout, and ppm referencing assumes 1H data.
     """
 
-    SUPPORTED_BACKENDS = [Backend.NIFTI_LIST]
+    SUPPORTED_BACKENDS = tuple(Backend)
     DOMAIN = Domain(spectral='time')
+
+    _dropped_tags = frozenset()
 
     def __init__(self, conj=True, coil=True, align=True, remove_outliers=True, average=True,
                  ecc=True, truncate=False, remove_water=False, shift_ref=True, phase_correct=True,
                  coil_method='fsl-mrs', registration_method='fsl-mrs', remove_method='fsl-mrs',
-                 average_method='fsl-mrs', ecc_method='own', water_removal_method='fsl-mrs',
+                 average_method='fsl-mrs', ecc_method='smoothed', water_removal_method='fsl-mrs',
                  shift_ref_method='fsl-mrs', phase_correct_method='fsl-mrs', **kwargs):
         """
-        Initializes the processor with specified steps. Make sure custom/added steps use some
-        form of update processing provenance, for clarification see:
-        augmentrum.processing.utils.update_processing_prov,
-        fsl_mrs.utils.preproc.nifti_mrs_proc.update_processing_prov
+        Initializes the processor; one set of flags and defaults for both engines.
 
         Args:
             conj (bool): Whether to conjugate the data.
             coil (bool): Whether to perform coil combination.
             align (bool): Whether to align dynamics.
-            remove_outliers (bool): Whether to remove outlier averages.
+            remove_outliers (bool): Whether to remove/mask outlier averages.
             average (bool): Whether to average dynamics.
             ecc (bool): Whether to perform eddy current correction.
             truncate (bool): Whether to truncate the FID.
@@ -74,24 +97,34 @@ class NIfTI_RawProcessor(BaseModule):
             phase_correct (bool): Whether to perform phase correction.
 
             coil_method (str): Coil combination method ('fsl-mrs' or 'adaptive').
-            registration_method (str): Registration method.
-            remove_method (str): Outlier removal method.
-            average_method (str): Averaging method.
-            ecc_method (str): Eddy current correction method ('fsl-mrs' or 'own').
-            water_removal_method (str): Water removal method.
-            shift_ref_method (str): Frequency shifting method.
-            phase_correct_method (str): Phase correction method.
+            registration_method (str): Registration method ('fsl-mrs' for the
+                FSL-MRS Powell search; 'pattern' for the fast vectorized
+                search, tensor engine only).
+            remove_method (str): Outlier removal method ('fsl-mrs').
+            average_method (str): Averaging method ('fsl-mrs').
+            ecc_method (str): Eddy current correction method ('fsl-mrs' for the raw
+                reference phase, 'smoothed' for its Gaussian-smoothed form).
+            water_removal_method (str): Water removal method ('fsl-mrs').
+            shift_ref_method (str): Frequency shifting method ('fsl-mrs').
+            phase_correct_method (str): Phase correction method ('fsl-mrs').
         """
         super().__init__()
 
+        # The pattern registration exists only batched, so that configuration
+        # narrows support and lets a NIfTI-list batch route to the tensor
+        # engine instead of failing on the list engine.
+        if registration_method == 'pattern':
+            self.SUPPORTED_BACKENDS = tuple(b for b in Backend
+                                            if b is not Backend.NIFTI_LIST)
+
         self.conj = conj
         self.coil = coil
-        self.align = align  # after water removal the slowest step
+        self.align = align
         self.remove_outliers = remove_outliers
         self.average = average
         self.ecc = ecc
         self.truncate = truncate
-        self.remove_water = remove_water   # very slow at the moment
+        self.remove_water = remove_water
         self.shift_ref = shift_ref
         self.phase_correct = phase_correct
 
@@ -104,6 +137,9 @@ class NIfTI_RawProcessor(BaseModule):
         self.shift_ref_method = shift_ref_method
         self.phase_correct_method = phase_correct_method
 
+    #**********************#
+    #   nifti-list path    #
+    #**********************#
     def process_nifti_list(self, data_list, water_list=None, report=None, **kwargs):
         """
         Processes lists of NIfTI-MRS data with the specified steps.
@@ -153,19 +189,19 @@ class NIfTI_RawProcessor(BaseModule):
             data_wat = proc.conjugate(data_wat) if data_wat is not None else None
 
         if self.coil: # coil combination
-            data_met, data_wat = self.coil_combine(data_met, data_wat,
+            data_met, data_wat = self._coil_combine_nifti(data_met, data_wat,
                                                    method=self.coil_method, report=report)
 
         if self.align:  # registration
-            data_met, data_wat = self.registration(data_met, data_wat,
+            data_met, data_wat = self._registration_nifti(data_met, data_wat,
                                                    method=self.registration_method, report=report)
 
         if self.remove_outliers:  # remove outlier averages
-            data_met, data_wat = self.remove_unlike(data_met, data_wat,
+            data_met, data_wat = self._remove_unlike_nifti(data_met, data_wat,
                                                       method=self.remove_method, report=report)
 
         if self.average:  # averaging
-            data_met, data_wat = self.combine_averages(data_met, data_wat,
+            data_met, data_wat = self._combine_averages_nifti(data_met, data_wat,
                                                        method=self.average_method, report=report)
 
         if 'DIM_DYN' in data_met.dim_tags or 'DIM_COIL' in data_met.dim_tags:
@@ -174,7 +210,7 @@ class NIfTI_RawProcessor(BaseModule):
             data_wat = safe_squeeze(data_wat)
 
         if self.ecc:  # eddy current correction
-            data_met, data_wat = self.eddy_current_correction(data_met, data_wat,
+            data_met, data_wat = self._ecc_nifti(data_met, data_wat,
                                                               method=self.ecc_method, report=report)
 
         if self.truncate:  # truncation or zero-filling
@@ -182,20 +218,20 @@ class NIfTI_RawProcessor(BaseModule):
             data_wat = proc.truncate_or_pad(data_wat, -1, 'first') if data_wat is not None else None
 
         if self.remove_water:   # unsuppressed water removal
-            data_met, data_wat = self.water_removal(data_met, data_wat,
+            data_met, data_wat = self._water_removal_nifti(data_met, data_wat,
                                                     method=self.water_removal_method, report=report)
 
         if self.shift_ref:  # frequency shift to reference
-            data_met, data_wat = self.shift_to_reference(data_met, data_wat,
+            data_met, data_wat = self._shift_to_reference_nifti(data_met, data_wat,
                                                          method=self.shift_ref_method, report=report)
 
         if self.phase_correct:   # phase correction
-            data_met, data_wat = self.phase_correction(data_met, data_wat,
+            data_met, data_wat = self._phase_correction_nifti(data_met, data_wat,
                                                        method=self.phase_correct_method, report=report)
 
         return data_met, data_wat
 
-    def coil_combine(self, data_met, data_wat=None, method='fsl-mrs', report=None):
+    def _coil_combine_nifti(self, data_met, data_wat=None, method='fsl-mrs', report=None):
         """
         Performs coil combination on the MRS data.
 
@@ -220,13 +256,57 @@ class NIfTI_RawProcessor(BaseModule):
                 data_wat = proc.coilcombine(data_wat, reference=avg_ref, noise=noise,
                                             covariance=covariance, no_prewhiten=no_prewhiten) if data_wat is not None else None
             elif method == 'adaptive':
-                from augmentrum.processing.utils import own_nifti_coil_combination_adaptive
-                data_met, data_wat = own_nifti_coil_combination_adaptive(data_met, data_wat, report=report)
+                from augmentrum.processing.utils import nifti_coil_combination_adaptive
+                data_met, data_wat = nifti_coil_combination_adaptive(data_met, data_wat, report=report)
             else:
                 raise ValueError(f"Unknown coil combination method: {method}")
         return data_met, data_wat
 
-    def registration(self, data_met, data_wat=None, method='fsl-mrs', report=None):
+    def _coil_combine_adaptive(self, met, wat, tags, coil_axis):
+        """
+        The adaptive combination, batched: dephase with the reference,
+        combine with its phase-only eigenvector.
+
+        Mirrors nifti_coil_combination_adaptive: the reference (water, or the
+        data itself) is averaged over dynamics, its phase removed point by
+        point, and the FID-A eigenvector estimate combines the dephased
+        channels. Estimate detached, combination differentiable.
+
+        Args:
+            met: Metabolite tensor, spectral axis last.
+            wat: Water tensor in the same layout, or None.
+            tags: Higher-dimension tags (still carrying DIM_COIL).
+            coil_axis: Where the coil dimension sits.
+
+        Returns:
+            Combined (met, wat), the coil axis summed away.
+        """
+        from augmentrum.processing.utils import estimate_csm
+
+        met_tc = move_axis(met, coil_axis, -1)                      # (..., T, C)
+        wat_tc = move_axis(wat, coil_axis, -1) if wat is not None else None
+        others = [t for t in tags if t != 'DIM_COIL']
+
+        ref_tc = wat_tc if wat_tc is not None else met_tc
+        if 'DIM_DYN' in others:
+            ref_tc = ops.mean(ref_tc, axis=4 + others.index('DIM_DYN'), keepdims=True)
+
+        ref = ops.to_numpy(ref_tc).astype(np.complex128)
+        phase = np.exp(-1j * np.angle(ref))
+        lead = ref.shape[:-2]
+        flat = (ref * phase).reshape((-1,) + ref.shape[-2:])
+        csm = np.stack([estimate_csm(voxel)[:, 0] for voxel in flat])
+        csm = csm.reshape(lead + (ref.shape[-1],))
+        csmsq = np.real((csm * np.conj(csm)).sum(-1, keepdims=True))
+
+        weights = (np.conj(csm)[..., None, :] * phase
+                   / (csmsq[..., None] + np.finfo(float).eps))
+        met_c = ops.sum(met_tc * ops.match_backend(weights, met_tc), axis=-1)
+        wat_c = (ops.sum(wat_tc * ops.match_backend(weights, wat_tc), axis=-1)
+                 if wat_tc is not None else None)
+        return met_c, wat_c
+
+    def _registration_nifti(self, data_met, data_wat=None, method='fsl-mrs', report=None):
         """
         Performs registration on the MRS data.
 
@@ -253,7 +333,7 @@ class NIfTI_RawProcessor(BaseModule):
             raise ValueError(f"Unknown registration method: {method}")
         return data_met, data_wat
 
-    def remove_unlike(self, data_met, data_wat=None, method='fsl-mrs', report=None):
+    def _remove_unlike_nifti(self, data_met, data_wat=None, method='fsl-mrs', report=None):
         """
         Removes outlier averages from the MRS data.
 
@@ -273,7 +353,7 @@ class NIfTI_RawProcessor(BaseModule):
                 raise ValueError(f"Unknown outlier removal method: {method}")
         return data_met, data_wat
 
-    def combine_averages(self, data_met, data_wat=None, method='fsl-mrs', report=None):
+    def _combine_averages_nifti(self, data_met, data_wat=None, method='fsl-mrs', report=None):
         """
         Combines averages in the MRS data.
 
@@ -294,14 +374,14 @@ class NIfTI_RawProcessor(BaseModule):
                 data_wat = proc.average(data_wat, 'DIM_DYN')
         return data_met, data_wat
 
-    def eddy_current_correction(self, data_met, data_wat=None, method='own', report=None):
+    def _ecc_nifti(self, data_met, data_wat=None, method='smoothed', report=None):
         """
         Performs eddy current correction on the MRS data.
 
         Args:
             data_met: Metabolite MRS data (NiftiMRS object).
             data_wat: Water reference MRS data (NiftiMRS object), optional
-            method (str): Eddy current correction method ('fsl-mrs' or 'own').
+            method (str): Eddy current correction method ('fsl-mrs' or 'smoothed').
             report: Optional report object for logging processing steps.
 
         Returns:
@@ -311,15 +391,15 @@ class NIfTI_RawProcessor(BaseModule):
             data_met = proc.ecc(data_met, data_wat if data_wat is not None else data_met,
                                 report=report)  # eddy current correction
             data_wat = proc.ecc(data_wat, data_wat) if data_wat is not None else None
-        elif self.ecc_method == 'own':
-            from augmentrum.processing.utils import own_nifti_ecc
-            data_met = own_nifti_ecc(data_met, data_wat if data_wat is not None else data_met, report=report)
-            data_wat = own_nifti_ecc(data_wat, data_wat) if data_wat is not None else None
+        elif self.ecc_method == 'smoothed':
+            from augmentrum.processing.utils import nifti_ecc_smoothed
+            data_met = nifti_ecc_smoothed(data_met, data_wat if data_wat is not None else data_met, report=report)
+            data_wat = nifti_ecc_smoothed(data_wat, data_wat) if data_wat is not None else None
         else:
             raise ValueError(f"Unknown ECC method: {self.ecc_method}")
         return data_met, data_wat
 
-    def water_removal(self, data_met, data_wat=None, method='fsl-mrs', report=None):
+    def _water_removal_nifti(self, data_met, data_wat=None, method='fsl-mrs', report=None):
         """
         Removes residual water peak from the MRS data.
 
@@ -339,7 +419,7 @@ class NIfTI_RawProcessor(BaseModule):
             raise ValueError(f"Unknown water removal method: {method}")
         return data_met, data_wat
 
-    def shift_to_reference(self, data_met, data_wat=None, method='fsl-mrs', report=None):
+    def _shift_to_reference_nifti(self, data_met, data_wat=None, method='fsl-mrs', report=None):
         """
         Shifts the MRS data to a reference peak.
 
@@ -358,7 +438,7 @@ class NIfTI_RawProcessor(BaseModule):
             raise ValueError(f"Unknown frequency shifting method: {method}")
         return data_met, data_wat
 
-    def phase_correction(self, data_met, data_wat=None, method='fsl-mrs', report=None):
+    def _phase_correction_nifti(self, data_met, data_wat=None, method='fsl-mrs', report=None):
         """
         Performs phase correction on the MRS data.
 
@@ -392,102 +472,6 @@ class NIfTI_RawProcessor(BaseModule):
             no_prewhiten = True
             covariance = None
         return noise, covariance, no_prewhiten
-
-
-#**************************************************************************************************#
-#                                        Class RawProcessor                                        #
-#**************************************************************************************************#
-#                                                                                                  #
-# Tensor twin of NIfTI_RawProcessor: the same raw-data pipeline, batched on any array backend.     #
-#                                                                                                  #
-#**************************************************************************************************#
-class RawProcessor(BaseModule):
-    """
-    Tensor twin of NIfTI_RawProcessor: the same raw-data pipeline, batched on any array backend.
-
-    Every step splits into a detached estimate (mirroring the FSL-MRS formulas)
-    and a differentiable application (backend-native multiply and sum), so
-    results track the NIfTI path closely while gradients flow through the
-    signal path on torch / jax / tensorflow, and the whole batch is processed
-    in vectorized sweeps instead of per-FID Python loops.
-
-    Deliberate differences from the NIfTI path:
-      * outlier removal keeps the dynamic axis and masks outliers instead of
-        dropping them: consumed by the weighted average when averaging (then
-        results equal the NIfTI path's exactly), zeroed in place otherwise,
-        with the mask exposed as ``last_keep_mask_``;
-      * alignment with registration_method='own' swaps the per-transient
-        Powell search for a closed-form phase and a vectorized pattern descent
-        over the frequency shift — equal objective values, but on noisy data
-        the solvers settle in micro-minima a fraction of a Hz apart (the
-        default 'fsl-mrs' method runs the same Powell search as FSL-MRS and
-        matches it);
-      * water removal takes the top Hankel components from a truncated
-        Lanczos SVD (hlsvdpropy's sparse path) instead of a dense
-        decomposition, so it matches to floating-point tolerance rather than
-        bit-exactly.
-
-    The water reference is assumed to share the metabolite data's dimension
-    layout, and ppm referencing assumes 1H data.
-    """
-
-    SUPPORTED_BACKENDS = tuple(b for b in Backend if b is not Backend.NIFTI_LIST)
-    DOMAIN = Domain(spectral='time')
-
-    _dropped_tags = frozenset()
-
-    def __init__(self, conj=True, coil=True, align=True, remove_outliers=True, average=True,
-                 ecc=True, truncate=False, remove_water=False, shift_ref=True, phase_correct=True,
-                 coil_method='fsl-mrs', registration_method='fsl-mrs', remove_method='fsl-mrs',
-                 average_method='fsl-mrs', ecc_method='own', water_removal_method='fsl-mrs',
-                 shift_ref_method='fsl-mrs', phase_correct_method='fsl-mrs', **kwargs):
-        """
-        Initializes the processor; flags and defaults match NIfTI_RawProcessor,
-        so the two are drop-in interchangeable in a pipeline.
-
-        Args:
-            conj (bool): Whether to conjugate the data.
-            coil (bool): Whether to perform coil combination.
-            align (bool): Whether to align dynamics.
-            remove_outliers (bool): Whether to mask outlier averages.
-            average (bool): Whether to average dynamics.
-            ecc (bool): Whether to perform eddy current correction.
-            truncate (bool): Whether to truncate the FID.
-            remove_water (bool): Whether to remove residual water peak.
-            shift_ref (bool): Whether to shift spectrum to reference peak.
-            phase_correct (bool): Whether to perform phase correction.
-
-            coil_method (str): Coil combination method ('fsl-mrs').
-            registration_method (str): Registration method ('fsl-mrs' for the
-                FSL-MRS Powell search, 'own' for the fast vectorized search).
-            remove_method (str): Outlier removal method ('fsl-mrs').
-            average_method (str): Averaging method ('fsl-mrs').
-            ecc_method (str): Eddy current correction method ('fsl-mrs' or 'own').
-            water_removal_method (str): Water removal method ('fsl-mrs').
-            shift_ref_method (str): Frequency shifting method ('fsl-mrs').
-            phase_correct_method (str): Phase correction method ('fsl-mrs').
-        """
-        super().__init__()
-
-        self.conj = conj
-        self.coil = coil
-        self.align = align
-        self.remove_outliers = remove_outliers
-        self.average = average
-        self.ecc = ecc
-        self.truncate = truncate
-        self.remove_water = remove_water
-        self.shift_ref = shift_ref
-        self.phase_correct = phase_correct
-
-        self.coil_method = coil_method
-        self.registration_method = registration_method
-        self.remove_method = remove_method
-        self.average_method = average_method
-        self.ecc_method = ecc_method
-        self.water_removal_method = water_removal_method
-        self.shift_ref_method = shift_ref_method
-        self.phase_correct_method = phase_correct_method
 
     def process_tensor(self, data_array, water_array=None, backend=Backend.NUMPY, **kwargs):
         """
@@ -564,12 +548,14 @@ class RawProcessor(BaseModule):
 
     def coil_combine(self, met, wat, tags):
         """
-        wSVD coil combination; weights from the water reference when present.
+        Coil combination on the tensor engine; weights from the water when present.
 
-        Estimates per-subject noise covariance from the last tenth of every
-        FID (prewhitening is silently disabled per subject when there are too
-        few samples, as in FSL-MRS), derives the wSVD weights, and combines both
-        metabolite and water data as a weighted sum over the coil axis.
+        'fsl-mrs' estimates per-subject noise covariance from the last tenth
+        of every FID (prewhitening is silently disabled per subject when there
+        are too few samples, as in FSL-MRS) and derives wSVD weights;
+        'adaptive' mirrors nifti_coil_combination_adaptive, dephasing with the
+        reference and combining with its phase-only eigenvector. Either way
+        the combination is a differentiable weighted sum over the coil axis.
 
         Args:
             met: Metabolite tensor, spectral axis last.
@@ -585,8 +571,13 @@ class RawProcessor(BaseModule):
         n_coil = ops.shape(met)[coil_axis]
         if n_coil <= 1:
             return met, wat, tags
-        if self.coil_method != 'fsl-mrs':
+        if self.coil_method not in ('fsl-mrs', 'adaptive'):
             raise ValueError(f"Unknown tensor coil combination method: {self.coil_method}")
+        if self.coil_method == 'adaptive':
+            met, wat = self._coil_combine_adaptive(met, wat, tags, coil_axis)
+            tags.remove('DIM_COIL')
+            self._dropped_tags.add('DIM_COIL')
+            return met, wat, tags
 
         n_time = ops.shape(met)[-1]
         n_batch = ops.shape(met)[0]
@@ -642,7 +633,7 @@ class RawProcessor(BaseModule):
         A leftover coil dimension is reduced to its first element the way the
         FSL-MRS path's copy(remove_dim='DIM_COIL') does. The metabolite data
         aligns within (0.2, 4.2) ppm, the water within (0, 8) ppm. Method
-        'fsl-mrs' reproduces the FSL-MRS Powell search per transient; 'own'
+        'fsl-mrs' reproduces the FSL-MRS Powell search per transient; 'pattern'
         is the vectorized pattern search (much faster, results equal in
         objective value but not identical on noisy data).
 
@@ -656,7 +647,7 @@ class RawProcessor(BaseModule):
         Returns:
             Tuple of (met, wat, tags).
         """
-        if self.registration_method not in ('fsl-mrs', 'own'):
+        if self.registration_method not in ('fsl-mrs', 'pattern'):
             raise ValueError(f"Unknown tensor registration method: {self.registration_method}")
         if 'DIM_DYN' not in tags:
             return met, wat, tags
@@ -773,7 +764,7 @@ class RawProcessor(BaseModule):
         """
         Eddy current correction against the water reference (or the data itself).
 
-        'own' mirrors own_nifti_ecc: the Gaussian-smoothed unwrapped reference
+        'smoothed' mirrors nifti_ecc_smoothed: the Gaussian-smoothed unwrapped reference
         phase is removed. 'fsl-mrs' mirrors preproc.eddy_correct: the raw
         reference phase is removed. The water corrects against itself.
 
@@ -785,7 +776,7 @@ class RawProcessor(BaseModule):
             Tuple of corrected (met, wat).
         """
         ref = ops.to_numpy(wat if wat is not None else met)
-        if self.ecc_method == 'own':
+        if self.ecc_method == 'smoothed':
             phasor = np.exp(-1j * self._ecc_phase(ref))
         elif self.ecc_method == 'fsl-mrs':
             phasor = np.exp(-1j * np.angle(ref))
@@ -943,7 +934,7 @@ class RawProcessor(BaseModule):
         unaligned data (as phase_freq_align does across its iterations).
 
         Two estimators solve it. 'fsl-mrs' runs the same per-transient Powell
-        search FSL-MRS runs, for full parity. 'own' folds the closed-form optimal
+        search FSL-MRS runs, for full parity. 'pattern' folds the closed-form optimal
         phase into the objective and descends the frequency shift with a
         vectorized pattern search — much faster for many transients, but on noisy
         data the objective is locally rugged and the two solvers settle in
@@ -957,7 +948,7 @@ class RawProcessor(BaseModule):
             sf_mhz: Spectrometer frequency in MHz.
             ppmlim: ppm window of the comparison.
             niter: Refinement iterations against the fixed target.
-            method: 'fsl-mrs' (Powell, parity) or 'own' (pattern search, speed).
+            method: 'fsl-mrs' (Powell, parity) or 'pattern' (vectorized search, speed).
 
         Returns:
             Accumulated (phi, eps) per transient, each (..., D).
@@ -1083,7 +1074,7 @@ class RawProcessor(BaseModule):
         """
         Smoothed unwrapped phase of the reference FIDs, (..., T).
 
-        Mirrors suspect's sliding_gaussian as used by own_nifti_ecc: edge-padded
+        Mirrors suspect's sliding_gaussian as used by nifti_ecc_smoothed: edge-padded
         with 10-point edge means, correlated with a normalized Gaussian window.
         """
         phase = np.unwrap(np.angle(np.asarray(refs)), axis=-1)
