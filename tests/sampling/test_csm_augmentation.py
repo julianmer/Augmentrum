@@ -146,3 +146,56 @@ def test_the_coil_count_is_preserved(n_coils):
     moved = Augmented(Birdcage(n_coils=n_coils), rotation_deg=15.0).maps((8, 8, 2))
 
     assert moved.shape[-1] == n_coils
+
+
+#*****************#
+#   reweighting   #
+#*****************#
+def _with_array(n_coils=6, seed=0):
+    """Rank-1 multi-coil data built by synthesis, plus its combined source."""
+    rng = np.random.default_rng(seed)
+    combined = (rng.standard_normal((2, 4, 4, 2, 16))
+                + 1j * rng.standard_normal((2, 4, 4, 2, 16))).astype(np.complex64)
+    coiled, _ = CoilSampler(mode='synthesize',
+                            source=Birdcage(n_coils=n_coils)).process_tensor(combined)
+    return combined, np.asarray(coiled)
+
+
+def _rss(x, axis=-1):
+    return np.sqrt((np.abs(x) ** 2).sum(axis=axis))
+
+
+def test_reweighting_with_the_same_array_returns_the_data():
+    """Estimate, combine, reapply the same maps: rank-1 data comes back."""
+    _, coiled = _with_array(n_coils=6)
+    out, _ = CoilSampler(mode='reweight',
+                         source=Birdcage(n_coils=6)).process_tensor(coiled)
+
+    np.testing.assert_allclose(np.abs(np.asarray(out)), np.abs(coiled),
+                               rtol=1e-3, atol=1e-4)
+
+
+def test_reweighting_can_resize_the_array():
+    """8 elements in, 3 out — with the total sensitivity preserved."""
+    _, coiled = _with_array(n_coils=8)
+    out, _ = CoilSampler(mode='reweight', n_coils=3,
+                         source=Birdcage(n_coils=8)).process_tensor(coiled)
+
+    out = np.asarray(out)
+    assert out.shape[-1] == 3
+    np.testing.assert_allclose(_rss(out), _rss(coiled), rtol=1e-3, atol=1e-4)
+
+
+def test_reweighting_moves_a_real_array_in_one_step():
+    """CSM augmentation of multi-coil data, no separate combination step."""
+    _, coiled = _with_array(n_coils=6)
+    sampler = CoilSampler(mode='reweight',
+                          source=Augmented(Birdcage(n_coils=6), rotation_deg=20.0),
+                          seed=0)
+    out, _ = sampler.process_tensor(coiled)
+
+    out = np.asarray(out)
+    assert out.shape == coiled.shape
+    assert not np.allclose(np.abs(out), np.abs(coiled), atol=1e-3), \
+        "the moved array must weight the volume differently"
+    np.testing.assert_allclose(_rss(out), _rss(coiled), rtol=1e-3, atol=1e-4)

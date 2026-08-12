@@ -98,7 +98,8 @@ def test_state_accumulates_across_a_pipeline(volume):
 #   registry   #
 #**************#
 @pytest.mark.parametrize("spec", [s for s in SPECS if not s.spatial and not s.volume
-                                  and not s.needs_multicoil], ids=lambda s: s.label)
+                                  and not s.needs_multicoil and not s.coiled],
+                         ids=lambda s: s.label)
 def test_no_module_drops_the_state(spec, volume):
     """
     Every module must carry the state forward, not reset it.

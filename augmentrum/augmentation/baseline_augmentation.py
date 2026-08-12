@@ -364,6 +364,57 @@ class BaselineAugmentation(BaseModule):
 
         return y
 
+    def _bspline_operator(self, N: int, sw_hz: float, sf_mhz: float, ref_ppm: float):
+        """
+        The basis and penalised system for this spectral axis, cached.
+
+        Everything up to the ridged system matrix depends only on the axis and
+        the module parameters, not on any FID — so one basis build and one
+        lambda search serve every FID in a batch instead of being repeated
+        thousands of times (the source of the old slowness), and the solves go
+        through "np.linalg.solve" on the ridged SPD matrix rather than "pinv"
+        (the source of the old instability).
+        """
+        key = (int(N), float(sw_hz), float(sf_mhz), float(ref_ppm),
+               self.knots_per_ppm, self.ed_per_ppm)
+        if getattr(self, '_bspline_key', None) == key:
+            return self._bspline_op
+
+        dt = 1.0 / float(sw_hz)
+        freq_hz = np.fft.fftshift(np.fft.fftfreq(N, d=dt))
+        ppm = ref_ppm - freq_hz / float(sf_mhz)        # descending axis (e.g., 6→0)
+
+        # ---- Build cubic B-spline basis over ppm domain ----
+        ppm_min, ppm_max = ppm.min(), ppm.max()
+        span_ppm = float(ppm_max - ppm_min)
+        n_knots = max(8, int(np.ceil(span_ppm * self.knots_per_ppm)))  # interior knots
+        knots = np.linspace(ppm_min, ppm_max, n_knots)
+        B = BaselineAugmentation._cubic_bspline_basis(ppm, knots, degree=3)    # [N x n_b]
+        n_b = B.shape[1]
+
+        # ---- P-spline penalty (2nd-diff on coefficients) ----
+        D = BaselineAugmentation._diff_matrix_2(n_b)
+
+        # ---- Choose lambda from desired ED/ppm (rough heuristic) ----
+        target_ED = max(2.0, self.ed_per_ppm * span_ppm)  # lower bound 2 for straight line with 2 dof
+        # λ grid (logspace) – wide range covers most cases
+        lam_grid = 10.0 ** np.linspace(-6, 8, 30)
+        BtB = B.T @ B
+        DtD = D.T @ D
+        ridge = 1e-10 * np.eye(n_b)
+        best = (None, None)                            # (lam, ED)
+        for lam in lam_grid:
+            # Use trace trick: tr(S) = tr(B A^{-1} B^T) = tr(A^{-1} BtB)
+            ED = np.trace(np.linalg.solve(BtB + lam * DtD + ridge, BtB))
+            if best[0] is None or abs(ED - target_ED) < abs(best[1] - target_ED):
+                best = (lam, ED)
+        lam_star, _ = best
+
+        A = BtB + lam_star * DtD + ridge
+        self._bspline_key = key
+        self._bspline_op = (B, A)
+        return B, A
+
     def _add_bspline_baseline(self, fid: np.ndarray, sw_hz: float, sf_mhz: float,
                               ref_ppm: float = 4.7) -> np.ndarray:
         """Add a penalised B-spline baseline to the FID."""
@@ -372,51 +423,18 @@ class BaselineAugmentation(BaseModule):
         fid_2d = fid.reshape(-1, N)
         result = np.zeros_like(fid_2d)
 
+        B, A = self._bspline_operator(N, sw_hz, sf_mhz, ref_ppm)
+
         for i in range(fid_2d.shape[0]):
             fid_1d = fid_2d[i]
 
-            # Go to the (shifted) frequency domain
             spec = fid_1d               # already a spectrum: see DOMAIN
-            dt = 1.0 / float(sw_hz)
-            freq_hz = np.fft.fftshift(np.fft.fftfreq(N, d=dt))
-            ppm = ref_ppm - freq_hz / float(sf_mhz)    # descending axis (e.g., 6→0)
-
-            # ---- Build cubic B-spline basis over ppm domain ----
-            ppm_min, ppm_max = ppm.min(), ppm.max()
-            span_ppm = float(ppm_max - ppm_min)
-            n_knots = max(8, int(np.ceil(span_ppm * self.knots_per_ppm)))  # interior knots
-            knots = np.linspace(ppm_min, ppm_max, n_knots)
-            B = BaselineAugmentation._cubic_bspline_basis(ppm, knots, degree=3)            # [N x n_b]
-            n_b = B.shape[1]
-
-            # ---- P-spline penalty (2nd-diff on coefficients) ----
-            D = BaselineAugmentation._diff_matrix_2(n_b)
-
-            # ---- Choose lambda from desired ED/ppm (rough heuristic) ----
-            target_ED = max(2.0, self.ed_per_ppm * span_ppm)  # lower bound 2 for straight line with 2 dof
-            # λ grid (logspace) – wide range covers most cases
-            lam_grid = 10.0 ** np.linspace(-6, 8, 30)
-            BtB = B.T @ B
-            DtD = D.T @ D
-            best = (None, None, None)  # (lam, ED, Ainv)
-            for lam in lam_grid:
-                A = BtB + lam * DtD
-                # Use trace trick: tr(S) = tr(B A^{-1} B^T) = tr(A^{-1} BtB)
-                Ainv = np.linalg.pinv(A)
-                ED = np.trace(Ainv @ BtB)
-                if best[0] is None or abs(ED - target_ED) < abs(best[1] - target_ED):
-                    best = (lam, ED, Ainv)
-            lam_star, ED_star, Ainv = best
 
             # ---- Draw smooth random coefficients consistent with the penalty ----
-            I = np.eye(n_b)
-            A = BtB + lam_star * DtD + 1e-10 * I   # small ridge for stability
-            Ainv = np.linalg.pinv(A)
-
             # z must be length N to match B.T @ z
             rng = self.rng.numpy_rng()
             z = rng.normal(size=N)                 # N-length white noise
-            a = Ainv @ (B.T @ z)                   # n_b-length smooth coefficient vector
+            a = np.linalg.solve(A, B.T @ z)        # n_b-length smooth coefficient vector
 
             # ---- Make baseline and normalize/scale/phase ----
             baseline = B @ a

@@ -499,14 +499,23 @@ class TestCoilSamplerModes:
         result_data, _ = sampler(nifti_plus, None)
         assert result_data is not None
 
-    @pytest.mark.skip(reason="Deterministic mode requires coil_indices parameter")
     def test_deterministic_mode(self, dummy_nifti_list):
-        """Test deterministic mode."""
+        """Deterministic keeps everything, or exactly the indices passed."""
         sampler = CoilSampler(mode='deterministic')
         nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
 
         result_data, _ = sampler(nifti_plus, None)
-        assert result_data is not None
+        coil_axis = result_data[0].dim_position('DIM_COIL')
+        assert result_data[0].shape[coil_axis] == nifti_plus[0].shape[coil_axis]
+
+    def test_deterministic_mode_with_indices(self, dummy_nifti_list):
+        """Indices are a call-time choice: keep exactly the coils named."""
+        sampler = CoilSampler(mode='deterministic')
+        nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
+
+        result_data, _ = sampler(nifti_plus, None, indices=[0, 2])
+        coil_axis = result_data[0].dim_position('DIM_COIL')
+        assert result_data[0].shape[coil_axis] == 2
 
     def test_with_n_coils_range(self, dummy_nifti_list):
         """Test with n_coils range."""
@@ -516,14 +525,6 @@ class TestCoilSamplerModes:
         result_data, _ = sampler(nifti_plus, None)
         assert result_data is not None
 
-    @pytest.mark.skip(reason="Reweighting not implemented yet")
-    def test_with_reweight(self, dummy_nifti_list):
-        """Test with reweight enabled."""
-        sampler = CoilSampler(mode='random', reweight=True)
-        nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
-
-        result_data, _ = sampler(nifti_plus, None)
-        assert result_data is not None
 
 
 #**************************************************************************************************#

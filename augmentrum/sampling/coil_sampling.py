@@ -540,6 +540,13 @@ class CoilSampler(DimensionSampler):
         Grow a coil axis, "(batch, X, Y, Z, T)" to "(batch, X, Y, Z, T, C)",
         following the NIfTI-MRS convention of coils after the spectral axis.
         Applying maps is a multiply, so gradients reach the data.
+    "reweight"
+        Swap the receive array under data that already has one, in one step:
+        estimate the sensitivities the data was acquired with (per voxel, the
+        rank-1 eigenvector the adaptive combination uses), combine with them,
+        and multiply the new maps in. With an :class:"Augmented" source this
+        is CSM augmentation of real multi-coil data — no separate combination
+        step needed, and the coil count may change on the way.
     "random"
         Draw a random subset of the coils that are there.
     "deterministic"
@@ -575,7 +582,7 @@ class CoilSampler(DimensionSampler):
 
     DIM_TAG = 'DIM_COIL'
     OPERATION = 'Coil Sampling'
-    MODES = ('synthesize', 'random', 'deterministic')
+    MODES = ('synthesize', 'reweight', 'random', 'deterministic')
 
     # Drawing runs natively anywhere; synthesis narrows this per instance,
     # because a NIfTI list holds no coil axis to write into.
@@ -585,12 +592,14 @@ class CoilSampler(DimensionSampler):
         if mode not in self.MODES:
             raise ValueError(f"mode must be one of {self.MODES}, got {mode!r}.")
 
-        if mode == 'synthesize':
+        if mode in ('synthesize', 'reweight'):
             BaseModule.__init__(self)
             self.mode = mode
-            # Synthesis writes a dimension that was not there, and only the
-            # module that added it knows what it is.
-            self.ADDS_DIM_TAGS = (self.DIM_TAG,)
+            if mode == 'synthesize':
+                # Synthesis writes a dimension that was not there, and only
+                # the module that added it knows what it is. Reweighting keeps
+                # the coil axis it found, so its tags pass through unchanged.
+                self.ADDS_DIM_TAGS = (self.DIM_TAG,)
             self.SUPPORTED_BACKENDS = tuple(b for b in Backend
                                             if b is not Backend.NIFTI_LIST)
             # Multiplying sensitivity maps voxel by voxel is the coil forward
@@ -635,6 +644,8 @@ class CoilSampler(DimensionSampler):
         Returns:
             "(data, water_unchanged)".
         """
+        if self.mode == 'reweight':
+            return self._reweight(data_array, water_array, **kwargs)
         if self.mode != 'synthesize':
             return super().process_tensor(data_array, water_array, backend, **kwargs)
 
@@ -658,3 +669,83 @@ class CoilSampler(DimensionSampler):
         maps = ops.reshape(maps, (1,) + shape[1:4] + (1, n_coils))
 
         return ops.reshape(data_array, shape + (1,)) * maps, water_array
+
+    #*****************#
+    #   reweighting   #
+    #*****************#
+    def _reweight(self, data_array, water_array=None, **kwargs):
+        """
+        Swap the receive array under multi-coil data, in one step.
+
+        The sensitivities the data was acquired with are estimated per voxel
+        as the principal eigenvector of the coil covariance — amplitudes
+        included, unlike the phase-only estimate the adaptive combination
+        uses — the data is combined with them, and the new maps are
+        multiplied in. The estimate is detached; the combination and the
+        multiply run on the data's own backend, so gradients reach the data.
+        Sources are RSS-normalized, so reweighting with the array the data was
+        built with reproduces its magnitudes, and the coil count may change.
+
+        Args:
+            data_array: A batch carrying a coil axis — "(batch, X, Y, Z, T,
+                C, ...)" in the NIfTI layout; DIM_COIL is located by the
+                injected "dim_tags", axis 5 when none are passed.
+            water_array: Passed through unchanged — a water reference is a
+                separate acquisition and gets its own reweighting if needed.
+            **kwargs: Absorbs what BaseModule injects, including "dim_tags".
+
+        Returns:
+            "(data, water_unchanged)", the coil axis resized to the source's
+            element count.
+        """
+        shape = tuple(int(n) for n in ops.shape(data_array))
+        rank = len(shape)
+        tags = [t for t in (kwargs.get('dim_tags') or []) if t]
+        if 'DIM_COIL' in tags:
+            coil_axis = 5 + tags.index('DIM_COIL')
+        elif rank >= 6:
+            coil_axis = 5
+        else:
+            raise ValueError(
+                f"CoilSampler[reweight] needs a coil axis, got shape {shape}. "
+                f"Use mode='synthesize' to give coil-combined data an array.")
+        n_have = shape[coil_axis]
+
+        # ── estimate the array the data carries (detached) ──
+        # Principal eigenvector of the per-voxel coil covariance, by two power
+        # iterations (exact for rank-1 data), phase pinned to the first coil.
+        x = ops.to_numpy(data_array).astype(np.complex128)
+        per_voxel = np.moveaxis(np.moveaxis(x, coil_axis, -1), 4, -2)   # (..., T, C)
+        lead = per_voxel.shape[:-2]
+        flat = per_voxel.reshape((-1,) + per_voxel.shape[-2:])
+
+        cov = np.einsum('ntc,ntd->ncd', flat, np.conj(flat))
+        csm = np.ones((flat.shape[0], n_have), dtype=np.complex128)
+        for _ in range(2):
+            csm = np.einsum('ncd,nd->nc', cov, csm)
+            norm = np.linalg.norm(csm, axis=-1, keepdims=True)
+            csm = csm / np.where(norm > 0, norm, 1.0)
+        phase = csm[:, :1] / np.where(np.abs(csm[:, :1]) > 0, np.abs(csm[:, :1]), 1.0)
+        csm = csm * np.conj(phase)
+        self.last_csm_ = csm.reshape(lead + (n_have,))
+
+        # ── combine with them, on the data's own backend ──
+        weights = np.conj(csm) / ((np.abs(csm) ** 2).sum(-1, keepdims=True)
+                                  + np.finfo(float).eps)
+        weights = weights.reshape(lead + (1, n_have))                   # T slot
+        weights = np.moveaxis(np.moveaxis(weights, -2, 4), -1, coil_axis)
+        combined = ops.sum(data_array * ops.match_backend(weights, data_array),
+                           axis=coil_axis)
+
+        # ── multiply the new array in ──
+        maps = self.maps_for(shape[1:4])
+        self.last_maps_ = maps
+        new_shape = [1] * rank
+        new_shape[1:4] = shape[1:4]
+        new_shape[coil_axis] = maps.shape[-1]
+        combined_shape = list(shape)
+        combined_shape[coil_axis] = 1
+
+        maps = ops.match_backend(
+            maps.astype(np.complex64).reshape(tuple(new_shape)), data_array)
+        return ops.reshape(combined, tuple(combined_shape)) * maps, water_array

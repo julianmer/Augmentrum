@@ -59,6 +59,8 @@ class ModuleSpec:
         needs_multicoil: needs the multi-coil fixture (DIM_COIL + DIM_DYN).
         spatial: operates on 2-D image tensors "(batch, X, Y, C)" rather than spectra.
         volume: operates on 5-D volumes "(batch, X, Y, Z, T)".
+        coiled: needs a receive array on the tensor path — the sweeps hand it
+            "(batch, X, Y, Z, T, C)" with DIM_COIL tagged.
         changes_length: rewrites the spectral length, so shape-preservation
             assertions do not apply — "ZeroFill" and "Apodization[truncate]".
         identity: passes data through unchanged by design, so the
@@ -78,6 +80,7 @@ class ModuleSpec:
     needs_multicoil: bool = False
     spatial: bool = False
     volume: bool = False
+    coiled: bool = False
     changes_length: bool = False
     identity: bool = False
     own_provenance: bool = False
@@ -115,8 +118,7 @@ SPECS: List[ModuleSpec] = [
     ModuleSpec("ArtificialPeaks", None, {}),
 
     ModuleSpec("BaselineAugmentation[random_walk]", None, {"mode": "random_walk"}),
-    ModuleSpec("BaselineAugmentation[bspline]", None, {"mode": "bspline"},
-               note="float32 precision -> bspline solver NaN/overflow (TODO)"),
+    ModuleSpec("BaselineAugmentation[bspline]", None, {"mode": "bspline"}),
     ModuleSpec("BaselineAugmentation[polynomial]", None, {"mode": "polynomial"}),
 
     ModuleSpec("AverageSampler", None, {"mode": "random"}, needs_multicoil=True),
@@ -133,6 +135,8 @@ SPECS: List[ModuleSpec] = [
 
     ModuleSpec("CoilSampler[synthesize]", None,
                {"mode": "synthesize", "n_coils": 4, "seed": 0}, volume=True),
+    ModuleSpec("CoilSampler[reweight]", None,
+               {"mode": "reweight", "n_coils": 4, "seed": 0}, coiled=True),
 
     ModuleSpec("KspaceUndersampling[cartesian]", None,
                {"ksp_mode": "cartesian", "acceleration_factor": 2.0, "us_seed": 0},
@@ -172,7 +176,13 @@ SPECS: List[ModuleSpec] = [
                nifti_kwargs={"dim": 3}),
 
     ModuleSpec("SpuriousEchoes[replica]", None, {"mode": "replica"}),
-    ModuleSpec("SpuriousEchoes[hybrid]", None, {"mode": "hybrid"}),
+    # The default echo (tau=0.1 s) falls beyond the short FIDs the sweeps use
+    # and a shifted copy of nothing is exactly zero, so the sweep would skip
+    # as "left the data untouched"; this echo lands inside the acquisition.
+    ModuleSpec("SpuriousEchoes[hybrid]", None,
+               {"mode": "hybrid",
+                "echoes": [{"tau": 0.01, "alpha": 0.3, "phase_deg": 10.0,
+                            "T2": 0.01, "df_hz": 30.0}]}),
 
     ModuleSpec("Tap", None, {"name": "tap"}, identity=True),
 

@@ -89,7 +89,7 @@ SPEC_FREQ  = 123.0  # MHz (3T ¹H)
 MRS_MODULES = [
     (spec.label, spec.cls, spec.kwargs)
     for spec in SPECS
-    if not (spec.spatial or spec.volume or spec.needs_multicoil)
+    if not (spec.spatial or spec.volume or spec.needs_multicoil or spec.coiled)
 ]
 
 # Variants that rewrite the spectral length, so the shape-preservation assertion

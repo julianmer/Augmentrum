@@ -412,9 +412,10 @@ class RawProcessor(BaseModule):
     in vectorized sweeps instead of per-FID Python loops.
 
     Deliberate differences from the NIfTI path:
-      * outlier removal keeps the dynamic axis and hands averaging a
-        zero-weight mask — identical results after averaging, which is why it
-        requires ``average=True``;
+      * outlier removal keeps the dynamic axis and masks outliers instead of
+        dropping them: consumed by the weighted average when averaging (then
+        results equal the NIfTI path's exactly), zeroed in place otherwise,
+        with the mask exposed as ``last_keep_mask_``;
       * alignment with registration_method='own' swaps the per-transient
         Powell search for a closed-form phase and a vectorized pattern descent
         over the frequency shift — equal objective values, but on noisy data
@@ -528,6 +529,12 @@ class RawProcessor(BaseModule):
             met, wat, tags = self.registration(met, wat, tags, sw_hz, sf_mhz)
 
         mask = self.outlier_mask(met, tags) if self.remove_outliers else None
+
+        if mask is not None and not self.average:
+            # No average to consume the mask, so removal is expressed as
+            # zeros: the tensor stays rectangular where the NIfTI path would
+            # drop transients, and last_keep_mask_ says which ones survived.
+            met = met * ops.match_backend(mask[..., None].astype(np.float64), met)
 
         if self.average:
             met, wat, tags = self.combine_averages(met, wat, tags, mask)
@@ -686,8 +693,11 @@ class RawProcessor(BaseModule):
         Keep-mask over dynamics, the tensor form of FSL-MRS remove_unlike.
 
         A batched tensor cannot go ragged, so outliers are masked rather than
-        dropped and the mask is consumed by averaging — which must therefore
-        be enabled. Results equal the NIfTI path's after that average.
+        dropped. When averaging follows, the weighted mean consumes the mask
+        and the result equals the NIfTI path's exactly. Without averaging, the
+        outlier transients are zeroed in place and the mask is exposed as
+        "last_keep_mask_" — any later hand-averaging must respect it, or the
+        zeros dilute the mean.
 
         Args:
             met: Metabolite tensor, spectral axis last.
@@ -706,11 +716,9 @@ class RawProcessor(BaseModule):
         if ops.shape(met)[1:4] != (1, 1, 1) or len(tags) != 1:
             raise ValueError('Outlier removal is only specified for SVS data with a single '
                              'dynamic dimension (as in FSL-MRS remove_unlike).')
-        if not self.average:
-            raise NotImplementedError('The tensor path expresses outlier removal as a zero-weight '
-                                      'mask consumed by averaging; enable average=True or use '
-                                      'NIfTI_RawProcessor.')
-        return self._unlike_mask(ops.to_numpy(met))
+        mask = self._unlike_mask(ops.to_numpy(met))
+        self.last_keep_mask_ = mask
+        return mask
 
     def combine_averages(self, met, wat, tags, mask=None):
         """

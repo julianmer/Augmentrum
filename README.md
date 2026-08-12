@@ -117,6 +117,7 @@ no manual conversion needed.
 | `BaselineAugmentation` | random_walk, bspline, polynomial                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `CoilSampler[random, deterministic]` | draw from the coils present            |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `CoilSampler[synthesize]` | grow a `DIM_COIL` axis from sensitivity maps            |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `CoilSampler[reweight]` | swap the array under multi-coil data via estimated CSMs  |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `EddyCurrent` | synthetic, water                                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `FrequencyShift` | shift_hz                                                |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `Noise` | sigma, sigma_frac, snr, snr_db                          |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -140,7 +141,7 @@ Modes that differ in backend support get a row each, named `Module[mode]`.
 
 > **†** `Apodization[truncate]` and `ZeroFill` both change `N_PTS`. Because `target_pts` / `n_pts` is a module-level scalar, the **same length is applied uniformly to every batch member** — the output is still a uniform tensor.
 
-> **‡** `RawProcessor` matches `NIfTI_RawProcessor` to floating-point tolerance, with three deviations: outlier removal **masks** dynamics instead of dropping them (so it requires `average=True`), `registration_method='own'` trades exact FSL-MRS alignment for a much faster vectorized search, and water removal uses a truncated SVD. Gradients flow through the signal path only.
+> **‡** `RawProcessor` matches `NIfTI_RawProcessor` to floating-point tolerance, with three deviations: outlier removal **masks** dynamics instead of dropping them (consumed exactly by averaging; zeroed and exposed as `last_keep_mask_` when not averaging), `registration_method='own'` trades exact FSL-MRS alignment for a much faster vectorized search, and water removal uses a truncated SVD. Gradients flow through the signal path only.
 
 ---
 

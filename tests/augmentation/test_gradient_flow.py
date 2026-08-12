@@ -71,6 +71,20 @@ def seeded_batch():
     return NIfTI_MRS_Plus(nifti_list=objs, backend=Backend.PYTORCH, volatile=True)
 
 
+@pytest.fixture
+def coiled_batch():
+    """The seeded batch with a tagged receive array, for coiled specs."""
+    rng = np.random.default_rng(0)
+    objs = []
+    for _ in range(2):
+        d = (rng.standard_normal((1, 1, 1, N_PTS, 4))
+             + 1j * rng.standard_normal((1, 1, 1, N_PTS, 4))).astype(np.complex64)
+        nifti = gen_nifti_mrs(d, 1 / 2000, 123.0)
+        nifti.set_dim_tag(4, 'DIM_COIL')
+        objs.append(nifti)
+    return NIfTI_MRS_Plus(nifti_list=objs, backend=Backend.PYTORCH, volatile=True)
+
+
 def _grad_reaches_input(plus, module):
     """Run *module* and report whether a gradient gets back to a leaf scalar."""
     leaf = torch.tensor(2.0, requires_grad=True)
@@ -90,9 +104,10 @@ def _grad_reaches_input(plus, module):
 #   per-module gradient flow   #
 #******************************#
 @pytest.mark.parametrize("spec", SPECTRAL_SPECS, ids=lambda s: s.label)
-def test_gradient_survives_module(spec, seeded_batch):
+def test_gradient_survives_module(spec, seeded_batch, coiled_batch):
     """Every module must pass gradients through, whether or not it resizes."""
-    assert _grad_reaches_input(seeded_batch, spec.build()), (
+    batch = coiled_batch if spec.coiled else seeded_batch
+    assert _grad_reaches_input(batch, spec.build()), (
         f"{spec.label} severed the autograd graph. Something in its "
         f"process_tensor path converted the data (to_numpy, .numpy(), or a "
         f"NumPy kernel applied to the data itself) instead of staying on the "

@@ -506,6 +506,28 @@ class TestBackendCompatibility:
         assert Backend.TENSORFLOW not in processor.SUPPORTED_BACKENDS
 
 
+#*****************************#
+#   fsl provenance recording   #
+#*****************************#
+def test_fsl_provenance_is_recorded(dummy_nifti_single_coil):
+    """
+    NIfTI_RawProcessor records provenance per executed FSL operation.
+
+    This is the coverage behind the registry test's own_provenance exemption:
+    constructor arguments are not echoed into self.params provenance because
+    every step that runs writes its own FSL-MRS entry — an absent entry means
+    the step did not run, which records what happened rather than the intent.
+    """
+    processor = NIfTI_RawProcessor(conj=True, coil=False, align=False,
+                                   remove_outliers=False, average=False, ecc=True,
+                                   shift_ref=True, phase_correct=True, volatile=True)
+    out, _ = processor.process_nifti_list([dummy_nifti_single_coil.copy()], None)
+
+    methods = [entry['Method'] for entry in out[0].hdr_ext['ProcessingApplied']]
+    assert methods == ['Conjugation', 'Eddy current correction',
+                       'Frequency and phase correction', 'Phasing']
+
+
 #**************************************#
 #   synthetic parity data for tensor   #
 #**************************************#
@@ -682,12 +704,18 @@ class TestTensorWrapper:
         with pytest.raises(ValueError, match='sw_hz'):
             RawProcessor().process_tensor(np.zeros((1, 1, 1, 1, 8), complex))
 
-    def test_outlier_mask_requires_average(self):
+    def test_outlier_mask_zeroes_without_average(self):
+        """Without an average to consume the mask, outliers are zeroed in place."""
         _, _, met_t, _ = _synth_batch()
         processor = RawProcessor(**{**ALL_OFF, 'coil': True, 'remove_outliers': True},
                                  volatile=True)
-        with pytest.raises(NotImplementedError, match='average'):
-            processor.process_tensor(met_t, sw_hz=SW, sf_mhz=SF, dim_tags=TAGS)
+        out, _ = processor.process_tensor(met_t, sw_hz=SW, sf_mhz=SF, dim_tags=TAGS)
+
+        mask = np.squeeze(processor.last_keep_mask_)
+        assert not mask.all() and mask.any(), "the synthetic outlier must be caught"
+        out = np.squeeze(np.asarray(out))                       # (B, D, T)
+        assert np.abs(out[~mask]).max() == 0, "outliers must be zeroed"
+        assert np.abs(out[mask]).max() > 0, "survivors must pass through"
 
 
 #**************************************************************************************************#

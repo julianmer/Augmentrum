@@ -73,7 +73,7 @@ def test_constructor_params_reach_provenance(spec):
     zoom or rotation range was permitted.
     """
     if spec.own_provenance:
-        pytest.skip(f"{spec.label} records provenance per operation, not via self.params")
+        pytest.skip(f"{spec.label} records provenance per FSL operation, not via self.params — covered by test_raw_processing.py::test_fsl_provenance_is_recorded")
 
     module = spec.build()
     accepted = {
@@ -155,18 +155,21 @@ def test_exported_augmentations_are_reachable_by_name():
 #   provenance end to end   #
 #***************************#
 def _nifti_list(shape, n=2):
-    """*n* NIfTI-MRS objects of the given "(X, Y, Z, T)" shape."""
+    """*n* NIfTI-MRS objects; a 5th axis becomes a tagged receive array."""
     import numpy as np
     from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 
     rng = np.random.default_rng(0)
-    return [
-        gen_nifti_mrs(
+    out = []
+    for _ in range(n):
+        nifti = gen_nifti_mrs(
             (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype('complex64'),
             1 / 2000.0, 123.0,
         )
-        for _ in range(n)
-    ]
+        if len(shape) > 4:
+            nifti.set_dim_tag(4, 'DIM_COIL')
+        out.append(nifti)
+    return out
 
 
 def _processing_applied(nifti):
@@ -190,6 +193,8 @@ def test_running_a_module_writes_provenance(spec):
     from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 
     shape = (8, 8, 4, 16) if spec.volume or spec.nifti_kwargs else (1, 1, 1, 512)
+    if spec.coiled:
+        shape = shape + (4,)
     plus = NIfTI_MRS_Plus(nifti_list=_nifti_list(shape),
                           backend=Backend.NIFTI_LIST, volatile=False)
     out, _ = spec.build_for_nifti()(plus, None)
@@ -214,6 +219,8 @@ def test_volatile_writes_no_provenance(spec):
     from nifti_mrs_plus import NIfTI_MRS_Plus, Backend
 
     shape = (8, 8, 4, 16) if spec.volume or spec.nifti_kwargs else (1, 1, 1, 512)
+    if spec.coiled:
+        shape = shape + (4,)
     plus = NIfTI_MRS_Plus(nifti_list=_nifti_list(shape),
                           backend=Backend.NIFTI_LIST, volatile=True)
     out, _ = spec.build_for_nifti()(plus, None)

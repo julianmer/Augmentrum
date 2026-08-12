@@ -108,9 +108,6 @@ class TestRandomWalkBaseline:
 class TestBSplineBaseline:
     """Test B-spline baseline."""
 
-    @pytest.mark.slow
-    @pytest.mark.skip(reason="B-spline implementation has numerical stability issues causing extremely slow execution")
-    # TODO: Fix!
     def test_bspline_changes_data(self, dummy_nifti_list):
         """Test that B-spline baseline modifies data."""
         baseline = BaselineAugmentation(mode='bspline', knots_per_ppm=8, baseline_frac=0.10)
@@ -122,9 +119,6 @@ class TestBSplineBaseline:
 
         assert not np.allclose(augmented_data, original_data)
 
-    @pytest.mark.slow
-    @pytest.mark.skip(reason="B-spline implementation has numerical stability issues causing extremely slow execution")
-    # TODO: Fix!
     def test_bspline_smoothness(self, dummy_nifti_list):
         """Test that B-spline produces smooth baseline."""
         baseline = BaselineAugmentation(mode='bspline', ed_per_ppm=2.0)

@@ -132,7 +132,7 @@ class ModuleEntry:
 #****************************************************#
 _REGISTRY: list[ModuleEntry] = [
     ModuleEntry(spec.label, spec.factory, note=spec.note,
-                needs_multicoil=spec.needs_multicoil, spatial=spec.spatial,
+                needs_multicoil=spec.needs_multicoil or spec.coiled, spatial=spec.spatial,
                 volume=spec.volume)
     for spec in SPECS
 ]

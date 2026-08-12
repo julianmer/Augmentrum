@@ -62,18 +62,21 @@ SEEDED_SPECS = [s for s in SPECS
 #*************#
 #   helpers   #
 #*************#
-def _batch():
+def _batch(coiled=False):
     """A fixed single-voxel batch, identical on every call."""
     rng = np.random.default_rng(0)
-    d = (rng.standard_normal((1, 1, 1, N_PTS))
-         + 1j * rng.standard_normal((1, 1, 1, N_PTS))).astype(np.complex64)
-    return NIfTI_MRS_Plus([gen_nifti_mrs(d, 1 / 2000, 123.0)],
-                          backend=Backend.NUMPY, volatile=True)
+    shape = (1, 1, 1, N_PTS, 4) if coiled else (1, 1, 1, N_PTS)
+    d = (rng.standard_normal(shape)
+         + 1j * rng.standard_normal(shape)).astype(np.complex64)
+    nifti = gen_nifti_mrs(d, 1 / 2000, 123.0)
+    if coiled:
+        nifti.set_dim_tag(4, 'DIM_COIL')
+    return NIfTI_MRS_Plus([nifti], backend=Backend.NUMPY, volatile=True)
 
 
 def _run(spec, seed):
     module = spec.cls(**{**spec.kwargs, "seed": seed})
-    return module, lambda: np.asarray(module(_batch())[0].numpy())
+    return module, lambda: np.asarray(module(_batch(spec.coiled))[0].numpy())
 
 
 def _is_stochastic(spec) -> bool:
