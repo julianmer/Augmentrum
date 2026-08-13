@@ -249,4 +249,16 @@ class AverageSampler(DimensionSampler):
 
     def __init__(self, mode: str = 'random', n_averages=None, seed=None):
         super().__init__(mode=mode, count=n_averages, seed=seed)
-        self.n_averages = self.count
+
+    #*******************#
+    #   count aliases   #
+    #*******************#
+    # The pipeline injects per-batch values under the constructor's own
+    # argument name, so that name has to reach the count the draw reads.
+    @property
+    def n_averages(self):
+        return self.count
+
+    @n_averages.setter
+    def n_averages(self, value):
+        self.count = self.as_range(value)

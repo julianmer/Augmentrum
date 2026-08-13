@@ -114,6 +114,40 @@ def test_an_unknown_mode_is_refused():
         AverageSampler(mode='randomised')
 
 
+def test_an_injected_average_count_reaches_the_draw(batch):
+    """
+    The pipeline hands per-batch values over by attribute name.
+
+    "Augmentrum(n_averages=(4, 16))" becomes "sampler.n_averages = value" once
+    per batch, so the name from the constructor has to reach the count the
+    draw actually reads - a plain attribute silently kept the constructor's
+    range forever.
+    """
+    sampler = AverageSampler(n_averages=2, seed=0)
+    sampler.n_averages = 5
+
+    drawn, _ = sampler.process_tensor(batch, dim_tags=TAGS)
+    assert drawn.shape[-1] == 5
+
+
+def test_an_injected_coil_count_reaches_the_draw(batch):
+    """The coil sampler takes the same route under its own name."""
+    sampler = CoilSampler(mode='random', n_coils=2, seed=0)
+    sampler.n_coils = 4
+
+    drawn, _ = sampler.process_tensor(batch, dim_tags=TAGS)
+    assert drawn.shape[-2] == 4
+
+
+def test_synthesis_keeps_a_plain_coil_count():
+    """Synthesis has no draw: there n_coils stays a bare element count."""
+    array = CoilSampler(mode='synthesize', n_coils=8)
+    assert array.n_coils == 8
+
+    array.n_coils = 4
+    assert array.n_coils == 4
+
+
 def test_a_seed_replays_exactly(batch):
     """Reproducible on demand, varying without a seed."""
     first, _ = AverageSampler(n_averages=(1, 9), seed=7).process_tensor(batch, dim_tags=TAGS)

@@ -3438,10 +3438,12 @@ class KspaceUndersampling(BaseModule):
 
     Noise
     -----
-    "noise_sigma_k" adds complex Gaussian noise **in k-space before masking**,
-    which is where thermal noise actually is. Adding white noise in the image
-    domain instead would fill the unacquired bins that a real accelerated
-    acquisition leaves exactly zero — a shortcut a network learns immediately.
+    "noise_sigma_k" adds complex Gaussian noise **to the k-space samples before
+    reconstruction** — before masking in the grid modes, on the measured
+    trajectory samples before the adjoint in 'nufft' mode — which is where
+    thermal noise actually is. Adding white noise in the image domain instead
+    would fill the unacquired bins that a real accelerated acquisition leaves
+    exactly zero — a shortcut a network learns immediately.
     Leave it None and use "~augmentrum.augmentation.noise.Noise"
     if you want image-domain noise regardless.
 
@@ -3518,7 +3520,8 @@ class KspaceUndersampling(BaseModule):
         per_sample_masks: draw an independent mask per batch element. False
                 applies one mask to the whole batch.
         noise_sigma_k: standard deviation per channel of complex Gaussian noise
-                added in k-space before masking. None disables it.
+                added to the k-space samples before reconstruction. None
+                disables it.
         us_seed: RNG seed. None (default) draws a fresh mask every call, which is
                 what you want from an augmentation; set it to reproduce a mask.
         pixdim: voxel size in mm per spatial axis. Only used by 'gridded' mode to
@@ -3697,7 +3700,10 @@ class KspaceUndersampling(BaseModule):
                                 (-1,) + im_size)
             # Measure with the chosen interpolator, always reconstruct with
             # Kaiser-Bessel: the point is to study the forward approximation.
-            recon.append(gridder.adjoint(nufft.forward(plane, coords), coords))
+            kdata = nufft.forward(plane, coords)
+            if self.noise_sigma_k:
+                kdata = self._add_kspace_noise(kdata)
+            recon.append(gridder.adjoint(kdata, coords))
         out = ops.stack(recon, axis=0)
 
         if ndim == 2:
@@ -3739,6 +3745,8 @@ class KspaceUndersampling(BaseModule):
             im_size=im_size,
             grid_size=tuple(int(self.nufft_osf * n) for n in im_size),
         )(stack, ktraj)
+        if self.noise_sigma_k:
+            kdata = self._add_kspace_noise(kdata)
 
         # Adjoint wants [B, S, C, L]; every retained shot was concatenated into
         # one readout above, so S = 1 and L = K.
@@ -3938,6 +3946,20 @@ class KspaceUndersampling(BaseModule):
     def _spatial_axes(self, ndim: int = 5) -> Tuple[int, ...]:
         return (1, 2, 3)
 
+    def _add_kspace_noise(self, k):
+        """
+        Complex Gaussian noise on the k-space samples, where thermal noise is.
+
+        Shared by every mode: the grid modes call it on the full grid before
+        masking, the nufft mode on the measured trajectory samples before the
+        adjoint — so the reconstruction shapes the noise exactly as regridding
+        shapes it in an in vivo acquisition.
+        """
+        real = self.rng.normal(tuple(ops.shape(k)), like=ops.real(k))
+        imag = self.rng.normal(tuple(ops.shape(k)), like=ops.real(k))
+        return k + float(self.noise_sigma_k) * ops.cast_like(
+            ops.complex_from(real, imag), k)
+
     def _apply_masks(self, k, masks: np.ndarray):
         """
         Add k-space noise and zero the unacquired bins.
@@ -3953,9 +3975,6 @@ class KspaceUndersampling(BaseModule):
         mask = ops.match_backend(masks[..., None], k)   # broadcast over T
 
         if self.noise_sigma_k:
-            real = self.rng.normal(tuple(ops.shape(k)), like=ops.real(k))
-            imag = self.rng.normal(tuple(ops.shape(k)), like=ops.real(k))
-            k = k + float(self.noise_sigma_k) * ops.cast_like(
-                ops.complex_from(real, imag), k)
+            k = self._add_kspace_noise(k)
 
         return k * ops.cast_like(mask, k)

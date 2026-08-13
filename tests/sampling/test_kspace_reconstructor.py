@@ -334,3 +334,16 @@ def test_rotating_the_trajectory_changes_the_aliasing_when_accelerated():
     turned = _reconstructed(accel=4.0, traj_rotation_deg=30.0)
 
     assert np.corrcoef(plain.ravel(), turned.ravel())[0, 1] < 0.9
+
+
+def test_kspace_noise_reaches_the_nufft_path():
+    """
+    noise_sigma_k has to land on the measured samples, not only on grid modes.
+
+    The nufft path returns before the mask step, so noise added only there was
+    silently dropped for the one mode that actually has shots and regridding.
+    """
+    quiet = _reconstructed(accel=1.0)
+    noisy = _reconstructed(accel=1.0, noise_sigma_k=0.5)
+
+    assert np.abs(quiet - noisy).max() > 1e-4

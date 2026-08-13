@@ -26,7 +26,6 @@ from augmentrum.core.pipeline import AugmentationPipeline
 from augmentrum.core.dataset_utils import (
     create_random_generator,
     create_fixed_generator,
-    create_deterministic_generator,  # Legacy support
     wrap_generator_for_framework,
     output_tokens,
     flatten_structure,
@@ -169,7 +168,6 @@ class Augmentrum:
         'processing': RawProcessor,
 
         # Noise
-        'noise': Noise,
         'noise': Noise,
 
         # Amplitude
@@ -613,7 +611,6 @@ class Augmentrum:
         # Default parameters for modules that require them at init
         # TODO: Maybe solve at module level instead
         DEFAULT_PARAMS = {
-            'noise':          {'sigma_frac': 0.02},
             'noise': {'sigma_frac': 0.02},
         }
 

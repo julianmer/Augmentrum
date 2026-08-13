@@ -16,7 +16,7 @@
 #*************#
 import random
 import numpy as np
-from typing import List, Optional, Tuple, Dict, Callable, Union
+from typing import List, Optional, Dict, Callable, Union
 
 # internal
 from augmentrum.core import NIfTI_MRS_Plus, Backend
@@ -26,8 +26,6 @@ from augmentrum.sampling.subject_splitter import SubjectSplitter
 __all__ = [
     'create_random_generator',
     'create_fixed_generator',
-    'create_deterministic_generator',
-    'create_deterministic_indices',
     'convert_batch_to_backend',
     'wrap_generator_for_framework',
     'output_tokens',
@@ -106,54 +104,6 @@ def _resolve_outputs(pipeline, result, outputs):
     if outputs is None:
         return data, water
     return build_outputs(outputs, data, water, taps)
-
-
-#**********************#
-#   helper functions   #
-#**********************#
-def create_deterministic_indices(data: NIfTI_MRS_Plus, n_coils: Tuple, n_averages: Tuple) -> List[Tuple]:
-    """
-    Create all possible (subject_idx, coil_idx, average_idx) combinations.
-
-    Args:
-        data: NIfTI_MRS_Plus containing subjects
-        n_coils: (min, max) coils to sample
-        n_averages: (min, max) averages to sample
-
-    Returns:
-        List of (subject_idx, coil_idx, average_idx) tuples
-    """
-    indices = []
-    nifti_list = data.list()
-
-    for subj_idx, nifti in enumerate(nifti_list):
-        # Get coil limits
-        if 'DIM_COIL' in getattr(nifti, 'dim_tags', []):
-            c_max = nifti.shape[nifti.dim_position('DIM_COIL')] - 1
-            min_c, max_c = _get_limits(n_coils, c_max)
-        else:
-            min_c, max_c, c_max = 0, 1, 0
-
-        # Get average limits
-        if 'DIM_DYN' in getattr(nifti, 'dim_tags', []):
-            a_max = nifti.shape[nifti.dim_position('DIM_DYN')] - 1
-            min_a, max_a = _get_limits(n_averages, a_max)
-        else:
-            min_a, max_a, a_max = 0, 1, 0
-
-        # Generate all combinations
-        for n_c in range(min_c, max_c + 1):
-            for n_a in range(min_a, max_a + 1):
-                indices.append((subj_idx, c_max - n_c, a_max - n_a))
-
-    return indices
-
-
-def _get_limits(n: Tuple, n_max: int) -> Tuple[int, int]:
-    """Convert (min, max) with possible None to concrete limits."""
-    min_n = n_max if n[0] is None else max(0, min(n[0], n_max))
-    max_n = n_max if n[1] is None else min(n[1], n_max)
-    return min_n, max_n
 
 
 #*********************************#
@@ -245,61 +195,6 @@ def create_fixed_generator(data: NIfTI_MRS_Plus,
         batch_data, batch_water = _make_batch(data, water, batch_idx, copy=True)
         result = pipeline(batch_data, batch_water, batch_params=fixed_params)
         yield _resolve_outputs(pipeline, result, outputs)
-
-
-def create_deterministic_generator(data: NIfTI_MRS_Plus,
-                                   water: Optional[NIfTI_MRS_Plus],
-                                   pipeline,
-                                   batch_size: int,
-                                   n_coils: Tuple,
-                                   n_averages: Tuple,
-                                   shuffle: bool = False):
-    """
-    Create deterministic generator over all combinations (backend-agnostic).
-
-    DEPRECATED: Use 'fixed' mode instead for simpler iteration.
-    This creates a combinatorial explosion of (subject × coils × averages).
-
-    Args:
-        data: NIfTI_MRS_Plus with subjects
-        water: Optional water reference
-        pipeline: Augmentation pipeline to apply
-        batch_size: Batch size
-        n_coils: (min, max) coils
-        n_averages: (min, max) averages
-        shuffle: Whether to shuffle indices
-
-    Yields:
-        (batch_data, batch_water) tuples
-    """
-    # Create all possible indices
-    indices = create_deterministic_indices(data, n_coils, n_averages)
-
-    if shuffle:
-        import random
-        random.shuffle(indices)
-
-    # Yield batches
-    for i in range(0, len(indices), batch_size):
-        batch_indices = indices[i:i + batch_size]
-        batch_data_list, batch_water_list = [], []
-
-        for subj_idx, coil_idx, avg_idx in batch_indices:
-            # Get subject
-            subj_data = data[subj_idx]
-            subj_water = water[subj_idx] if water is not None else None
-
-            # Apply pipeline with specific indices
-            aug_data, aug_water = pipeline(
-                subj_data, subj_water,
-                coil_indices=coil_idx,
-                average_indices=avg_idx
-            )
-
-            batch_data_list.append(aug_data)
-            batch_water_list.append(aug_water)
-
-        yield batch_data_list, batch_water_list
 
 
 #**********************************#

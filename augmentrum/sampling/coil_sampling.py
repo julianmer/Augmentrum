@@ -608,9 +608,27 @@ class CoilSampler(DimensionSampler):
             self.n_coils = None if n_coils is None else int(n_coils)
         else:
             super().__init__(mode=mode, count=n_coils, seed=seed)
-            self.n_coils = self.count
 
         self.source = source or Birdcage()
+
+    #*******************#
+    #   count aliases   #
+    #*******************#
+    # The pipeline injects per-batch values under the constructor's own
+    # argument name, so that name has to reach the count the draw reads.
+    # Synthesis has no draw: there the name is a plain element count.
+    @property
+    def n_coils(self):
+        if self.mode in ('synthesize', 'reweight'):
+            return self._n_coils
+        return self.count
+
+    @n_coils.setter
+    def n_coils(self, value):
+        if self.mode in ('synthesize', 'reweight'):
+            self._n_coils = None if value is None else int(value)
+        else:
+            self.count = self.as_range(value)
 
     #***************#
     #   synthesis   #

@@ -505,9 +505,10 @@ class SpatialAugmentations(BaseModule):
             augmentation to the samples instead.
         returns the transformed tensor in the same layout.
         """
+        amplitude = None
         if domain == 'kspace':
             spatial = tuple(int(n) for n in ops.shape(x)[1:1 + theta.shape[1]])
-            theta, shifts = self._kspace_theta(theta, spatial)
+            theta, shifts, amplitude = self._kspace_theta(theta, spatial)
             # The ramp belongs on the samples the resampling will read, not on
             # the ones it writes: the displacement rides on the transformed
             # coordinate, so it has to be in place before the matrix is applied.
@@ -540,7 +541,11 @@ class SpatialAugmentations(BaseModule):
             else:
                 outs.append(self._grid_sample(block, grid))
 
-        return ops.transpose(ops.concatenate(outs, axis=1), perm)
+        out = ops.transpose(ops.concatenate(outs, axis=1), perm)
+        if amplitude is not None:
+            scale = amplitude.reshape((-1,) + (1,) * (len(ops.shape(out)) - 1))
+            out = out * ops.cast_like(ops.match_backend(scale, out), out)
+        return out
 
     #**********************#
     #   the k-space form   #
@@ -568,8 +573,9 @@ class SpatialAugmentations(BaseModule):
             spatial: Grid lengths, in the data's own axis order.
 
         Returns:
-            "(kspace_theta, shifts)" - the matrix to resample k-space with, and
-            the shifts left for the phase ramp.
+            "(kspace_theta, shifts, amplitude)" - the matrix to resample
+            k-space with, the shifts left for the phase ramp, and the "(N,)"
+            Jacobian factor the resampled k-space must be multiplied by.
         """
         ndim = theta.shape[1]
         linear, shifts = theta[:, :, :ndim], theta[:, :, ndim]
@@ -583,6 +589,13 @@ class SpatialAugmentations(BaseModule):
         matrix = (np.transpose(np.linalg.inv(linear), (0, 2, 1))
                   * aspect[None]).astype(theta.dtype)
 
+        # The coordinate change scales the transform by its Jacobian: zooming
+        # an image in concentrates the same object into more voxels, and its
+        # spectrum grows by exactly 1/|det|. Rotations have determinant one,
+        # so - like the matrix itself - getting this wrong looks perfectly
+        # correct on every rotation-only test.
+        amplitude = (1.0 / np.abs(np.linalg.det(linear))).astype(theta.dtype)
+
         # A voxel spans 2/n of the normalized extent, so half of one is 1/n.
         center = np.array([1.0 / n if n % 2 == 0 else 0.0 for n in spatial],
                           dtype=theta.dtype)
@@ -590,7 +603,7 @@ class SpatialAugmentations(BaseModule):
         kspace = np.zeros_like(theta)
         kspace[:, :, :ndim] = matrix
         kspace[:, :, ndim] = center - matrix @ center
-        return kspace, shifts
+        return kspace, shifts, amplitude
 
     def _phase_ramp(self, x, shifts):
         """
@@ -837,7 +850,6 @@ class SpatialAugmentations(BaseModule):
         aug_spec_list = kwargs.get('aug_spec_list', None)
 
         # Stay on whatever backend the caller handed us
-        return_numpy = False
         data_array = ops.cast(
             data_array, "complex64" if ops.is_complex(data_array) else "float32")
 
@@ -857,14 +869,6 @@ class SpatialAugmentations(BaseModule):
         )
 
         self.aug_specs_ = aug_list  # store for provenance / reproducibility
-
-        # Convert back to numpy if needed
-        if return_numpy:
-            if isinstance(data_aug, list):
-                # Handle list of tensors (variable coil counts)
-                data_aug = [ops.to_numpy(d) for d in data_aug]
-            else:
-                data_aug = ops.to_numpy(data_aug)
 
         return data_aug, water_array
 

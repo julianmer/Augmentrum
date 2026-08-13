@@ -144,6 +144,33 @@ def test_everything_at_once(shape):
     assert _agreement(shape, linear, (0.2, 0.1)) > COMBINED
 
 
+@pytest.mark.parametrize("shape", [(32, 48), (33, 49)])
+def test_the_scale_matches_too(shape):
+    """
+    The Jacobian is the part every normalized comparison forgives.
+
+    Zooming spreads the same object over a different number of voxels, and its
+    transform scales by exactly 1/|det|. A rotation has determinant one and the
+    agreement scores above are scale-invariant, so only a zoom compared by
+    magnitude can tell the factor is there.
+
+    The honest ratio is ~0.87, not 1.0: bilinear resampling of k-space smooths
+    away edge energy the image path keeps. That is an operator property, and it
+    sits far from the ~1.37 a missing Jacobian lands at for diag(1.25, 1.25).
+    """
+    aug = SpatialAugmentations(dim=2, prob=1.0)
+    x = _object(shape)
+
+    theta = np.zeros((1, 2, 3), np.float32)
+    theta[0, :, :2] = np.diag([1.25, 1.25])
+
+    in_image = aug._apply_affine_batch(x, theta)
+    in_kspace = _to_image(aug._apply_affine_batch(_to_kspace(x), theta, domain='kspace'))
+
+    ratio = np.linalg.norm(in_kspace) / np.linalg.norm(in_image)
+    assert 0.8 < ratio < 1.15, ratio
+
+
 #************************#
 #   what would hide it   #
 #************************#

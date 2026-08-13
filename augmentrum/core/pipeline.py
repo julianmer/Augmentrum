@@ -149,13 +149,14 @@ class AugmentationPipeline:
 
     def sample_batch_parameters(self, batch_size: int):
         """
-        Sample parameters for an entire batch (one value per sample).
+        Sample one value per ranged parameter for the coming batch.
 
-        For on-the-fly mode with batch_size=16, this samples 16 different
-        values for each parameter that has a range.
+        Every sample in the batch shares the draw: parameters vary from batch
+        to batch, not from sample to sample within one.
 
         Args:
-            batch_size: Number of samples in the batch
+            batch_size: Number of samples in the batch. Unused — kept so the
+                signature states what the draw is for.
 
         Returns:
             Dictionary mapping step index to parameter dictionaries
