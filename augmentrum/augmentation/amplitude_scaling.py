@@ -69,6 +69,9 @@ class AmplitudeScaling(BaseModule):
     SUPPORTED_BACKENDS = [Backend.NIFTI_LIST, Backend.NUMPY, Backend.PYTORCH,
                          Backend.TENSORFLOW, Backend.JAX, Backend.KERAS]
 
+    # A scale broadcasts, so a batch can carry one factor per sample.
+    PER_SAMPLE_PARAMS = ('scale_factor',)
+
     def __init__(
         self,
         scale_factor: Union[float, Tuple[float, float]] = 1.0,
@@ -87,8 +90,10 @@ class AmplitudeScaling(BaseModule):
         if distribution not in ['uniform', 'normal']:
             raise ValueError(f"distribution must be 'uniform' or 'normal', got {distribution}")
 
-    def _get_scale_factor(self) -> float:
-        """Get scale factor (sample if range is provided)."""
+    def _get_scale_factor(self, index: int = 0) -> float:
+        """Get scale factor (sample if a range, index if a per-sample vector)."""
+        if isinstance(self.scale_factor, np.ndarray) and self.scale_factor.ndim:
+            return float(self.sample_of(self.scale_factor, index))
         if isinstance(self.scale_factor, (tuple, list)):
             min_scale, max_scale = self.scale_factor
 
@@ -120,9 +125,9 @@ class AmplitudeScaling(BaseModule):
         """
         scaled_data = []
 
-        for nifti in data_list:
-            # Get scale factor (sample if random)
-            scale = self._get_scale_factor()
+        for i, nifti in enumerate(data_list):
+            # Get scale factor (sample if random, index if per-sample)
+            scale = self._get_scale_factor(i)
 
             # Get data
             fid = nifti[:].copy()
@@ -157,7 +162,7 @@ class AmplitudeScaling(BaseModule):
         """
         # Get scale factor for each sample in batch
         batch_size = data.shape[0]
-        scales = np.array([self._get_scale_factor() for _ in range(batch_size)])
+        scales = np.array([self._get_scale_factor(i) for i in range(batch_size)])
 
         # Reshape scales for broadcasting
         scale_shape = [batch_size] + [1] * (data.ndim - 1)

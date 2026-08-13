@@ -16,7 +16,7 @@
 #*************#
 import random
 import numpy as np
-from typing import List, Optional, Dict, Callable, Union
+from typing import List, Optional, Callable
 
 # internal
 from augmentrum.core import NIfTI_MRS_Plus, Backend
@@ -193,8 +193,24 @@ def create_fixed_generator(data: NIfTI_MRS_Plus,
     for start in range(0, n_subjects, batch_size):
         batch_idx = indices[start : start + batch_size]
         batch_data, batch_water = _make_batch(data, water, batch_idx, copy=True)
-        result = pipeline(batch_data, batch_water, batch_params=fixed_params)
+        params = _trim_batch_params(fixed_params, len(batch_idx))
+        result = pipeline(batch_data, batch_water, batch_params=params)
         yield _resolve_outputs(pipeline, result, outputs)
+
+
+def _trim_batch_params(batch_params, n):
+    """
+    Per-sample vectors cut to a short final batch; scalars pass untouched.
+
+    Parameters are sampled once for the full batch size, but the last batch of
+    a single pass carries the remainder of the subjects, and a vector longer
+    than the batch would not broadcast.
+    """
+    return {
+        step: {name: value[:n] if isinstance(value, np.ndarray) and value.ndim else value
+               for name, value in params.items()}
+        for step, params in batch_params.items()
+    }
 
 
 #**********************************#

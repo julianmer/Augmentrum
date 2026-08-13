@@ -13,6 +13,9 @@ import pytest
 import numpy as np
 from augmentrum import Augmentrum
 from augmentrum.core import Backend
+from augmentrum.core.pipeline import AugmentationPipeline
+from augmentrum.augmentation import (AmplitudeScaling, FrequencyShift,
+                                     LineBroadening, Noise, PhaseShift)
 
 
 #**************************************************************************************************#
@@ -430,3 +433,109 @@ class TestParameterSamplingIntegration:
         )
 
         assert augmenter is not None
+
+
+#**************************************************************************************************#
+#                                   Class TestPerSampleSampling                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# A batch carries a spread of a ranged parameter, not one point of it.                             #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestPerSampleSampling:
+    """
+    Ranged parameters a module declares in PER_SAMPLE_PARAMS are drawn once
+    per sample; everything else keeps the one-value-per-batch behavior. The
+    module tests below drive the same attributes the pipeline injects.
+    """
+
+    @staticmethod
+    def _fid_batch(n=3, n_pts=256, sw_hz=2000.0):
+        """Identical decaying FIDs, so any spread in the output is the parameter's."""
+        t = np.arange(n_pts) / sw_hz
+        fid = np.exp(-20.0 * t) * np.exp(1j * 2.0 * np.pi * 30.0 * t)
+        return np.tile(fid.astype(np.complex64), (n, 1))
+
+    def test_declared_params_are_drawn_per_sample(self):
+        """shift_hz is declared and comes back as a vector; first_order_deg is not."""
+        pipeline = AugmentationPipeline(
+            [FrequencyShift(), PhaseShift()],
+            user_kwargs={'shift_hz': (5.0, 15.0), 'first_order_deg': (5.0, 10.0)})
+
+        params = pipeline.sample_batch_parameters(6)
+
+        shifts = params[0]['shift_hz']
+        assert isinstance(shifts, np.ndarray) and shifts.shape == (6,)
+        assert np.all((shifts >= 5.0) & (shifts <= 15.0))
+        assert len(np.unique(shifts)) > 1, "six draws collapsed to one value"
+
+        ramp = params[1]['first_order_deg']
+        assert np.ndim(ramp) == 0, "an undeclared parameter must stay scalar"
+
+    def test_frequency_shift_vector_matches_per_row_scalars(self):
+        """One vector pass is exactly the per-row scalar passes stacked."""
+        batch, shifts = self._fid_batch(), np.array([5.0, 10.0, 20.0])
+
+        module = FrequencyShift()
+        module.shift_hz = shifts
+        out, _ = module.process_tensor(batch, sw_hz=2000.0)
+
+        for i, shift in enumerate(shifts):
+            ref, _ = FrequencyShift(shift_hz=float(shift)).process_tensor(
+                batch[i:i + 1], sw_hz=2000.0)
+            assert np.allclose(out[i], ref[0], atol=1e-6)
+
+    def test_zero_order_phase_vector_matches_per_row_scalars(self):
+        batch, phases = self._fid_batch(), np.array([-90.0, 0.0, 45.0])
+
+        module = PhaseShift()
+        module.zero_order_deg = phases
+        out, _ = module.process_tensor(batch, sw_hz=2000.0)
+
+        for i, phase in enumerate(phases):
+            ref, _ = PhaseShift(zero_order_deg=float(phase)).process_tensor(
+                batch[i:i + 1], sw_hz=2000.0)
+            assert np.allclose(out[i], ref[0], atol=1e-6)
+
+    def test_line_broadening_vector_matches_per_row_scalars(self):
+        batch, widths = self._fid_batch(), np.array([0.0, 5.0, 15.0])
+
+        module = LineBroadening(mode='lorentzian')
+        module.lb_hz = widths
+        out, _ = module.process_tensor(batch, sw_hz=2000.0)
+
+        for i, width in enumerate(widths):
+            ref, _ = LineBroadening(lb_hz=float(width), mode='lorentzian').process_tensor(
+                batch[i:i + 1], sw_hz=2000.0)
+            assert np.allclose(out[i], ref[0], atol=1e-6)
+
+    def test_amplitude_vector_is_used_verbatim(self):
+        batch, scales = self._fid_batch(), np.array([1.0, 2.0, 0.5])
+
+        module = AmplitudeScaling(scale_factor=(0.9, 1.1))
+        module.scale_factor = scales
+        out, _ = module.process_tensor(batch)
+
+        for i, scale in enumerate(scales):
+            assert np.allclose(out[i], batch[i] * scale, atol=1e-6)
+
+    def test_noise_sigma_vector_gives_each_sample_its_own_level(self):
+        """Sigma zero leaves its row untouched while its neighbor gets noise."""
+        batch = self._fid_batch(2)
+
+        module = Noise(sigma=0.1, seed=0)
+        module.sigma = np.array([0.0, 1.0])
+        out, _ = module.process_tensor(batch)
+
+        assert np.allclose(np.asarray(out)[0], batch[0])
+        assert not np.allclose(np.asarray(out)[1], batch[1])
+
+    def test_a_short_final_batch_trims_the_vectors(self):
+        """A single pass ends on the remainder, and the vectors must follow."""
+        from augmentrum.core.dataset_utils import _trim_batch_params
+
+        params = {0: {'shift_hz': np.arange(8.0), 'first_order_deg': 3.0}}
+        trimmed = _trim_batch_params(params, 3)
+
+        assert trimmed[0]['shift_hz'].shape == (3,)
+        assert trimmed[0]['first_order_deg'] == 3.0

@@ -149,14 +149,16 @@ class AugmentationPipeline:
 
     def sample_batch_parameters(self, batch_size: int):
         """
-        Sample one value per ranged parameter for the coming batch.
+        Sample the ranged parameters for the coming batch.
 
-        Every sample in the batch shares the draw: parameters vary from batch
-        to batch, not from sample to sample within one.
+        The default is one value per batch, shared by every sample. Parameters
+        a module names in its "PER_SAMPLE_PARAMS" are drawn as a "(batch_size,)"
+        vector instead, so the batch carries a spread of the range rather than
+        one point of it.
 
         Args:
-            batch_size: Number of samples in the batch. Unused — kept so the
-                signature states what the draw is for.
+            batch_size: Number of samples in the batch, and so the length of
+                any per-sample draw.
 
         Returns:
             Dictionary mapping step index to parameter dictionaries
@@ -170,31 +172,37 @@ class AugmentationPipeline:
 
         # Sample from stored module_params (extracted from user_kwargs)
         for step_idx, params in self.module_params.items():
+            step = self.steps[step_idx]
+            per_sample = getattr(step, 'PER_SAMPLE_PARAMS', ())
             step_params = {}
-            
+
             for param_name, param_value in params.items():
                 # Get distribution for this parameter
                 distribution = per_param_distributions.get(param_name, global_distribution)
-                
-                # Sample value
-                sampled_val = self._sample_from_range(param_value, distribution)
+
+                # Sample value — a vector where the module can broadcast one
+                size = batch_size if param_name in per_sample else None
+                sampled_val = self._sample_from_range(param_value, distribution, size)
                 step_params[param_name] = sampled_val
 
             if step_params:
                 batch_params[step_idx] = step_params
 
         return batch_params
-    
-    def _sample_from_range(self, param, distribution: str = 'uniform'):
+
+    def _sample_from_range(self, param, distribution: str = 'uniform', size=None):
         """
-        Sample a scalar value from a parameter (range or scalar).
+        Sample from a parameter (range or scalar).
 
         Args:
             param: Either scalar (float/int) or tuple (min, max) for range
             distribution: 'uniform', 'gaussian', 'normal', 'exponential', 'beta'
+            size: None for a single scalar draw, or a count for a vector of
+                independent draws. Scalars pass through either way — a fixed
+                value is fixed for every sample.
 
         Returns:
-            Scalar value
+            Scalar value, or an array of *size* draws for a ranged parameter.
         """
         import numpy as np
 
@@ -220,31 +228,28 @@ class AugmentationPipeline:
                 max_val = min_val * 2.0
 
             # Sample based on distribution
-            if distribution == 'uniform':
-                return np.random.uniform(min_val, max_val)
-
-            elif distribution in ['gaussian', 'normal']:
+            if distribution in ['gaussian', 'normal']:
                 # Gaussian centered at midpoint, std = range/6 (99.7% within range)
                 mean = (min_val + max_val) / 2.0
                 std = (max_val - min_val) / 6.0
-                value = np.random.normal(mean, std)
+                value = np.random.normal(mean, std, size)
                 return np.clip(value, min_val, max_val)
 
             elif distribution == 'exponential':
                 # Exponential biased toward min_val
                 scale = (max_val - min_val) / 3.0
-                value = min_val + np.random.exponential(scale)
+                value = min_val + np.random.exponential(scale, size)
                 return np.clip(value, min_val, max_val)
 
             elif distribution == 'beta':
                 # Beta distribution (slightly biased to center)
                 alpha, beta = 2.0, 2.0
-                value = np.random.beta(alpha, beta)
+                value = np.random.beta(alpha, beta, size)
                 return min_val + value * (max_val - min_val)
 
             else:
-                # Default to uniform
-                return np.random.uniform(min_val, max_val)
+                # 'uniform', and the default for anything unrecognized
+                return np.random.uniform(min_val, max_val, size)
 
         # If single-element tuple
         if isinstance(param, tuple) and len(param) == 1:

@@ -15,6 +15,7 @@
 #   imports   #
 #*************#
 import math
+import numpy as np
 from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
@@ -67,6 +68,9 @@ class LineBroadening(BaseModule):
     # spectrum would be a convolution, not a multiply.
     DOMAIN = Domain(spectral='time')
 
+    # The envelope broadcasts, so a batch can carry one width per sample.
+    PER_SAMPLE_PARAMS = ('lb_hz', 'gb_hz')
+
     def __init__(self, lb_hz: float = 0.0, gb_hz: float = 0.0, mode: str = 'voigt'):
         """Initialize line broadening module."""
         super().__init__()
@@ -92,20 +96,24 @@ class LineBroadening(BaseModule):
         """
         processed_data = []
 
-        for nifti in data_list:
+        for i, nifti in enumerate(data_list):
             # Get spectral width from NIFTI_MRS
             sw_hz = 1.0 / nifti.dwelltime
 
             # Get FID data
             fid = nifti[:]
 
+            # This subject's widths, out of a per-sample vector or the scalar
+            lb_hz = self.sample_of(self.lb_hz, i)
+            gb_hz = self.sample_of(self.gb_hz, i)
+
             # Apply broadening based on mode
             if self.mode == 'lorentzian':
-                fid_broadened = self._apply_lorentzian(fid, sw_hz, self.lb_hz)
+                fid_broadened = self._apply_lorentzian(fid, sw_hz, lb_hz)
             elif self.mode == 'gaussian':
-                fid_broadened = self._apply_gaussian(fid, sw_hz, self.gb_hz)
+                fid_broadened = self._apply_gaussian(fid, sw_hz, gb_hz)
             else:  # voigt
-                fid_broadened = self._apply_voigt(fid, sw_hz, self.lb_hz, self.gb_hz)
+                fid_broadened = self._apply_voigt(fid, sw_hz, lb_hz, gb_hz)
 
             # Update NIFTI_MRS data
             nifti[:] = fid_broadened
@@ -150,26 +158,38 @@ class LineBroadening(BaseModule):
     # dispatches on the tensor it is handed rather than on a global setting.
 
     @staticmethod
+    def _width(value, t, ndim):
+        """A width in Hz as something *t* can be multiplied by: a plain float,
+        or a per-sample column promoted onto *t*'s backend."""
+        arr = np.asarray(value, dtype=np.float64)
+        if arr.ndim == 0:
+            return float(arr)
+        return ops.match_backend(arr.reshape((-1,) + (1,) * (ndim - 1)), t)
+
+    @staticmethod
     def _make_time_envelope(fid, sw_hz, lb_hz, gb_hz):
         """Build the broadening envelope on *fid*'s backend, shaped to broadcast."""
         n_pts = fid.shape[-1]
+        ndim = len(fid.shape)
         t = ops.arange_like(fid, n_pts) / float(sw_hz)
 
         # Reshape t for broadcasting: (1, 1, ..., N)
-        t = ops.reshape(t, [1] * (len(fid.shape) - 1) + [n_pts])
+        t = ops.reshape(t, [1] * (ndim - 1) + [n_pts])
 
         env = None
-        if lb_hz > 0:
-            env = ops.exp(-math.pi * lb_hz * t)
-        if gb_hz > 0:
-            gauss = ops.exp(-((math.pi * gb_hz * t) ** 2) / (4 * math.log(2)))
+        if np.any(np.asarray(lb_hz) > 0):
+            lb = LineBroadening._width(lb_hz, t, ndim)
+            env = ops.exp(-math.pi * lb * t)
+        if np.any(np.asarray(gb_hz) > 0):
+            gb = LineBroadening._width(gb_hz, t, ndim)
+            gauss = ops.exp(-((math.pi * gb * t) ** 2) / (4 * math.log(2)))
             env = gauss if env is None else env * gauss
         return env
 
     @staticmethod
     def _apply_lorentzian(fid, sw_hz, lb_hz):
         """Apply Lorentzian (exponential) line broadening."""
-        if lb_hz <= 0:
+        if not np.any(np.asarray(lb_hz) > 0):
             return fid
         envelope = LineBroadening._make_time_envelope(fid, sw_hz, lb_hz, 0.0)
         return fid * ops.cast_like(envelope, fid)
@@ -177,7 +197,7 @@ class LineBroadening(BaseModule):
     @staticmethod
     def _apply_gaussian(fid, sw_hz, gb_hz):
         """Apply Gaussian line broadening."""
-        if gb_hz <= 0:
+        if not np.any(np.asarray(gb_hz) > 0):
             return fid
         envelope = LineBroadening._make_time_envelope(fid, sw_hz, 0.0, gb_hz)
         return fid * ops.cast_like(envelope, fid)
@@ -185,7 +205,7 @@ class LineBroadening(BaseModule):
     @staticmethod
     def _apply_voigt(fid, sw_hz, lb_hz, gb_hz):
         """Apply Voigt (Lorentzian × Gaussian) line broadening."""
-        if lb_hz <= 0 and gb_hz <= 0:
+        if not (np.any(np.asarray(lb_hz) > 0) or np.any(np.asarray(gb_hz) > 0)):
             return fid
         envelope = LineBroadening._make_time_envelope(fid, sw_hz, lb_hz, gb_hz)
         return fid * ops.cast_like(envelope, fid)

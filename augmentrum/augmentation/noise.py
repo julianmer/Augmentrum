@@ -388,6 +388,9 @@ class Noise(BaseModule):
 
     SUPPORTED_BACKENDS = tuple(Backend)
 
+    # The level broadcasts, so a batch can carry one SNR / sigma per sample.
+    PER_SAMPLE_PARAMS = ('snr', 'snr_db', 'sigma', 'sigma_frac')
+
     def __init__(self,
                  covariance: Optional['NoiseCovariance'] = None,
                  profile: Optional['NoiseProfile'] = None,
@@ -419,9 +422,9 @@ class Noise(BaseModule):
     def process_nifti_list(self, data_list: List, water_list: Optional[List] = None, **kwargs):
         """Add Gaussian noise to list of NIFTI_MRS objects."""
         processed_data = []
-        for nifti in data_list:
+        for i, nifti in enumerate(data_list):
             fid = nifti[:]
-            fid_noisy = self._add_noise_numpy(fid)
+            fid_noisy = self._add_noise_numpy(fid, index=i)
             nifti[:] = fid_noisy
             processed_data.append(nifti)
         return processed_data, water_list
@@ -463,7 +466,8 @@ class Noise(BaseModule):
         if self.sigma is not None:
             # Fixed sigma — no data stats needed, but still built on this
             # backend so the multiply below never crosses frameworks.
-            scale = ops.cast_like(magnitude * 0.0 + float(self.sigma), magnitude)
+            scale = ops.cast_like(
+                magnitude * 0.0 + self._level(self.sigma, magnitude, ndim), magnitude)
         else:
             # global_scale: one statistic per batch element; otherwise per trace.
             # Per trace means along the spectral axis — axis 4 in the NIfTI
@@ -475,13 +479,14 @@ class Noise(BaseModule):
             if self.sigma_frac is not None:
                 peak = ops.amax(magnitude, axis=red_axes, keepdims=True)
                 peak = ops.where(peak > 0, peak, ops.cast_like(peak * 0.0 + 1.0, peak))
-                scale = self.sigma_frac * peak
+                scale = self._level(self.sigma_frac, peak, ndim) * peak
             else:
                 sig_pow = ops.mean(magnitude ** 2, axis=red_axes, keepdims=True) + 1e-16
                 if self.snr is not None:
-                    noise_pow = sig_pow / float(self.snr)
+                    snr = self.snr
                 else:
-                    noise_pow = sig_pow / (10.0 ** (float(self.snr_db) / 10.0))
+                    snr = 10.0 ** (np.asarray(self.snr_db, dtype=np.float64) / 10.0)
+                noise_pow = sig_pow / self._level(snr, sig_pow, ndim)
                 scale = ops.sqrt(noise_pow / 2.0)  # per-channel std
 
         scale = self._shaped(scale, original_shape)
@@ -509,6 +514,20 @@ class Noise(BaseModule):
     #********************#
     #   how loud where   #
     #********************#
+    @staticmethod
+    def _level(value, like, ndim):
+        """
+        A level parameter as something *like* can be multiplied or divided by.
+
+        A scalar stays a plain float; a "(batch,)" per-sample vector becomes a
+        column on *like*'s backend, so each sample gets its own level.
+        """
+        arr = np.asarray(value, dtype=np.float64)
+        if arr.ndim == 0:
+            return float(arr)
+        col = arr.reshape((-1,) + (1,) * (ndim - 1))
+        return ops.cast_like(ops.match_backend(col, like), like)
+
     def _shaped(self, scale, shape):
         """
         Modulate the level by where in the volume it is.
@@ -625,7 +644,7 @@ class Noise(BaseModule):
     #********************************************************************#
     #   pure-numpy path for process_nifti_list (input is always numpy)   #
     #********************************************************************#
-    def _add_noise_numpy(self, fid: np.ndarray) -> np.ndarray:
+    def _add_noise_numpy(self, fid: np.ndarray, index: int = 0) -> np.ndarray:
         """Add Gaussian noise to numpy FID data."""
         # Draw from the module's own stream, so this path matches the tensor
         # path: it advances between calls and reproduces from the same seed.
@@ -637,21 +656,22 @@ class Noise(BaseModule):
         fid_flat = fid_flat.astype(out_dtype, copy=False)
 
         # This path handles one NIFTI_MRS object at a time, so "global" means a
-        # single statistic over the whole array rather than one per FID trace.
+        # single statistic over the whole array rather than one per FID trace —
+        # and a per-sample vector is read at this subject's *index*.
         red_axis = None if self.global_scale else -1
 
         if self.sigma is not None:
-            scale = float(self.sigma)
+            scale = float(self.sample_of(self.sigma, index))
         elif self.sigma_frac is not None:
             peak = np.max(np.abs(fid_flat), axis=red_axis, keepdims=True)
             peak = np.where(peak > 0, peak, 1.0)
-            scale = self.sigma_frac * peak
+            scale = float(self.sample_of(self.sigma_frac, index)) * peak
         else:
             sig_pow = np.mean(np.abs(fid_flat) ** 2, axis=red_axis, keepdims=True) + 1e-16
             if self.snr is not None:
-                noise_pow = sig_pow / float(self.snr)
+                noise_pow = sig_pow / float(self.sample_of(self.snr, index))
             else:
-                noise_pow = sig_pow / (10.0 ** (float(self.snr_db) / 10.0))
+                noise_pow = sig_pow / (10.0 ** (float(self.sample_of(self.snr_db, index)) / 10.0))
             scale = np.sqrt(noise_pow / 2.0)
 
         noise = (rng.normal(0.0, 1.0, size=fid_flat.shape)

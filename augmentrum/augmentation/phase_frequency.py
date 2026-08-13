@@ -61,6 +61,11 @@ class PhaseShift(BaseModule):
 
     SUPPORTED_BACKENDS = tuple(Backend)
 
+    # A constant rotation broadcasts, so a batch can carry one phase per
+    # sample. The first-order ramp stays one per batch: its value decides the
+    # module's domain, and a mixed batch would have no single answer.
+    PER_SAMPLE_PARAMS = ('zero_order_deg',)
+
     def __init__(self, zero_order_deg: float = 0.0, first_order_deg: float = 0.0):
         """Initialize phase shift module."""
         super().__init__()
@@ -106,7 +111,8 @@ class PhaseShift(BaseModule):
             sw_hz = 1.0 / nifti.dwelltime
 
             # Apply phase shifts
-            fid_phased = self._apply_phase(fid, sw_hz)
+            fid_phased = self._apply_phase(
+                fid, sw_hz, self.sample_of(self.zero_order_deg, len(processed_data)))
 
             # Update NIFTI_MRS data
             nifti[:] = fid_phased
@@ -131,22 +137,24 @@ class PhaseShift(BaseModule):
             Tuple of (processed_data, water_array)
         """
         sw_hz = kwargs.get('sw_hz', 1.0)
-        result = self._apply_phase(data_array, sw_hz)
+        result = self._apply_phase(data_array, sw_hz, self.zero_order_deg)
         return result, water_array
 
-    def _apply_phase(self, fid, sw_hz: float):
+    def _apply_phase(self, fid, sw_hz: float, zero_order_deg):
         """
         Apply phase shifts to FID data (any backend tensor).
 
-        Zero-order phase is a scalar complex multiplication (fully vectorized).
-        First-order phase requires FFT → ramp → IFFT (uses tensor_ops).
+        Zero-order phase is a constant complex multiplication (fully
+        vectorized); a "(batch,)" *zero_order_deg* rotates each sample by its
+        own phase. First-order phase requires FFT → ramp → IFFT (tensor_ops).
         """
-        # Zero-order: fully vectorized scalar multiply
-        if self.zero_order_deg != 0.0:
-            phi = math.radians(self.zero_order_deg)
-            # complex scalar * any-backend tensor — works everywhere
+        # Zero-order: fully vectorized constant multiply
+        if np.any(np.asarray(zero_order_deg) != 0.0):
+            phi = np.deg2rad(self.per_sample(np.asarray(zero_order_deg, dtype=np.float64),
+                                             len(fid.shape)))
+            # complex factor * any-backend tensor — works everywhere
             phase_factor = np.exp(-1j * phi)
-            fid = fid * match_backend(np.array(phase_factor), fid)
+            fid = fid * match_backend(np.asarray(phase_factor), fid)
 
         # First-order: needs spectral domain
         if self.first_order_deg != 0.0:
@@ -217,6 +225,9 @@ class FrequencyShift(BaseModule):
     # A frequency shift is applied as a phase that winds along the FID.
     DOMAIN = Domain(spectral='time')
 
+    # The phasor broadcasts, so a batch can carry one shift per sample.
+    PER_SAMPLE_PARAMS = ('shift_hz',)
+
     def __init__(self, shift_hz: float = 0.0):
         """Initialize frequency shift module."""
         super().__init__()
@@ -245,7 +256,8 @@ class FrequencyShift(BaseModule):
             sw_hz = 1.0 / nifti.dwelltime
 
             # Apply frequency shift
-            fid_shifted = self._apply_shift(fid, sw_hz)
+            fid_shifted = self._apply_shift(fid, sw_hz,
+                                            self.sample_of(self.shift_hz, len(processed_data)))
 
             # Update NIFTI_MRS data
             nifti[:] = fid_shifted
@@ -272,17 +284,18 @@ class FrequencyShift(BaseModule):
         if sw_hz is None:
             raise ValueError("FrequencyShift.process_tensor requires 'sw_hz' in kwargs")
 
-        result = self._apply_shift(data_array, sw_hz)
+        result = self._apply_shift(data_array, sw_hz, self.shift_hz)
         return result, water_array
 
-    def _apply_shift(self, fid, sw_hz: float):
+    def _apply_shift(self, fid, sw_hz: float, shift_hz):
         """
         Apply frequency shift to FID data (any backend tensor).
 
         The shift phasor is a numpy array; multiplication with the FID tensor
-        auto-promotes to the correct backend.
+        auto-promotes to the correct backend. A "(batch,)" *shift_hz* gives
+        each sample its own shift.
         """
-        if self.shift_hz == 0.0:
+        if not np.any(np.asarray(shift_hz) != 0.0):
             return fid
 
         N = fid.shape[-1]
@@ -291,8 +304,10 @@ class FrequencyShift(BaseModule):
         t = np.arange(N, dtype=np.float64) / float(sw_hz)
         t = t.reshape([1] * (len(fid.shape) - 1) + [N])
 
-        # Shift phasor (numpy complex)
-        shift_factor = np.exp(1j * 2.0 * math.pi * float(self.shift_hz) * t)
+        # Shift phasor (numpy complex), one row per sample for a vector shift
+        shift = self.per_sample(np.asarray(shift_hz, dtype=np.float64),
+                                len(fid.shape))
+        shift_factor = np.exp(1j * 2.0 * math.pi * shift * t)
 
         # Multiply: convert phasor to same backend, preserves gradients
         return fid * match_backend(shift_factor, fid)

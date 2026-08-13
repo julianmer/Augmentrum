@@ -15,6 +15,7 @@
 #*************#
 import functools
 import inspect
+import numpy as np
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple, Union
 from augmentrum.core import NIfTI_MRS_Plus, Backend
@@ -63,6 +64,12 @@ class BaseModule(ABC):
     # is a pipeline mistake rather than something to silently correct.
     DOMAIN = None
     STRICT: bool = False
+
+    # Parameters this module can broadcast per sample. The pipeline samples a
+    # range once per batch by default; for names listed here it draws one value
+    # per sample instead, so a batch carries a spread rather than one point of
+    # it. Only modules whose processing paths handle a vector may declare this.
+    PER_SAMPLE_PARAMS: Tuple[str, ...] = ()
 
     def __init_subclass__(cls, **kwargs):
         """
@@ -120,6 +127,42 @@ class BaseModule(ABC):
         # Every module draws from one generator, held for its lifetime: a seeded
         # run reproduces while each batch still receives a fresh perturbation.
         self.rng = SeedGenerator(self.params.get('seed'))
+
+    #**********************#
+    #   per-sample values   #
+    #**********************#
+    @staticmethod
+    def per_sample(value, ndim):
+        """
+        A per-sample vector shaped to broadcast over a "(batch, ...)" tensor.
+
+        Scalars pass through untouched, so a call site stays one line whether
+        the pipeline injected one value for the batch or one per sample.
+
+        Args:
+            value: A scalar, or a "(batch,)" vector of per-sample values.
+            ndim: Rank of the tensor the value will multiply.
+
+        Returns:
+            The scalar itself, or the vector reshaped to "(batch, 1, ..., 1)".
+        """
+        arr = np.asarray(value)
+        if arr.ndim == 0:
+            return value
+        return arr.reshape((-1,) + (1,) * (ndim - 1))
+
+    @staticmethod
+    def sample_of(value, index):
+        """
+        One subject's value out of a per-sample vector; scalars pass through.
+
+        The NIfTI-list paths process one subject at a time, so a vector the
+        pipeline sampled for the batch has to be read entry by entry there.
+        """
+        arr = np.asarray(value)
+        if arr.ndim == 0:
+            return value
+        return arr[index % len(arr)]
 
     def __call__(self, data: NIfTI_MRS_Plus, water: Optional[NIfTI_MRS_Plus] = None,
                  **kwargs) -> Tuple[NIfTI_MRS_Plus, Optional[NIfTI_MRS_Plus]]:
