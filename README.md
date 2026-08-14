@@ -32,9 +32,6 @@ From MRSI reconstruction and acquisition variability to spectral perturbations a
 - Native NIfTI-MRS I/O and metadata tracking
 - Customizable pipelines with user-defined parameters
 - On-the-fly augmentation for machine learning workflows
-- Edited MRS (MEGA-PRESS) support: DIM_EDIT-aware loading and ON/OFF combination
-- Transient-train synthesis with correlated scan structure (drift, respiration, motion events)
-- Dual-trajectory k-space augmentation: spatial transforms with a single interpolation, no image-domain resampling
 
 ---
 
