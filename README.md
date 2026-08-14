@@ -32,6 +32,9 @@ From MRSI reconstruction and acquisition variability to spectral perturbations a
 - Native NIfTI-MRS I/O and metadata tracking
 - Customizable pipelines with user-defined parameters
 - On-the-fly augmentation for machine learning workflows
+- Edited MRS (MEGA-PRESS) support: DIM_EDIT-aware loading and ON/OFF combination
+- Transient-train synthesis with correlated scan structure (drift, respiration, motion events)
+- Dual-trajectory k-space augmentation: spatial transforms with a single interpolation, no image-domain resampling
 
 ---
 
@@ -111,23 +114,25 @@ no manual conversion needed.
 | Module | Modes / Methods                                         | NIfTI | NumPy | PyTorch | TensorFlow | JAX | Keras |
 |:---|:--------------------------------------------------------|:-----:|:---:|:---:|:---:|:---:|:---:|
 | `AmplitudeScaling` | uniform, normal                                         |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `Apodization` | exponential, truncate                                   |   ✓   | ✓† | ✓† | ✓† | ✓† | ✓† |
+| `Apodization` | exponential, gaussian, hamming, truncate                |   ✓   | ✓† | ✓† | ✓† | ✓† | ✓† |
 | `ArtificialPeaks` | Lorentzian, Gaussian, Voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `AverageSampler` | random, deterministic                                   |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `AverageSampler` | random, consecutive, strided, deterministic             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `BaselineAugmentation` | random_walk, bspline, polynomial                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `CoilSampler` | draw random, reweight, grow from CSMs |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `EddyCurrent` | synthetic, water                                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `EditCombiner` | diff, sum along DIM_EDIT            |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `FrequencyShift` | shift_hz                                                |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `Noise` | sigma, sigma_frac, snr, snr_db                          |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `KspaceUndersampling` | cartesian, gridded, nufft                               |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `KspaceUndersampling` | cartesian, gridded, nufft, dual trajectory              |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `LineBroadening` | lorentzian, gaussian, voigt                             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `Macromolecules` | parametrized, measured, supplied     |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `RawProcessor` | coil combination, registration, ECC, ... |   ✓   | ✓‡ | ✓‡ | ✓‡ | ✓‡ | ✓‡ |
 | `PhaseShift` | zero_order, first_order                                 |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `ResidualWater` | lorentzian                                              |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `ResidualWater` | lobes, turco (7-Lorentzian WaterFit)                    |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `SpatialAugmentations` | 2-D / 3-D affine, flip, zoom, shear                     |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `SpuriousEchoes` | replica, hybrid                                         |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `SpuriousEchoes` | echo, replica, hybrid                                   |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `Tap` | marker: snapshot a stage for `outputs`         |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `TransientSynthesizer` | correlated drift, respiration, motion events            |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `ZeroFill` | pad FID to target length                                |   ✓   | ✓† | ✓† | ✓† | ✓† | ✓† |
 
 **✓** native — data tensor stays in the target framework throughout.  

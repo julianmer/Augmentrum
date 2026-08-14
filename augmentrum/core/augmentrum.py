@@ -54,6 +54,7 @@ from augmentrum.augmentation.phase_frequency import PhaseShift, FrequencyShift
 from augmentrum.augmentation.spatial_augmentations import SpatialAugmentations
 from augmentrum.augmentation.transient_synthesis import TransientSynthesizer
 from augmentrum.augmentation.zero_fill import ZeroFill
+from augmentrum.processing.edit_combination import EditCombiner
 
 
 __all__ = ['Augmentrum']
@@ -167,6 +168,7 @@ class Augmentrum:
         'coil_sampling': CoilSampler,
         'average_sampling': AverageSampler,
         'transient_synthesis': TransientSynthesizer,
+        'edit_combination': EditCombiner,
         'processing': RawProcessor,
 
         # Noise

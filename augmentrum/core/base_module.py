@@ -57,6 +57,11 @@ class BaseModule(ABC):
     # takes its tags from the source, which by definition does not have them.
     ADDS_DIM_TAGS: Tuple[str, ...] = ()
 
+    # Dimension tags a module consumes. A module that collapses an axis must
+    # name it, for the same reason: the source still carries the tag the
+    # output no longer has an axis for.
+    REMOVES_DIM_TAGS: Tuple[str, ...] = ()
+
     # Which domain this module works in. None means it does not care and runs
     # wherever it finds the data, which is the common case. A module that names
     # one is moved there and back; one that also sets STRICT is not moved at
@@ -506,10 +511,14 @@ class BaseModule(ABC):
         objects being wrapped are the source's own and may already be behind by
         several steps. A full list composes; a delta against a stale list does
         not.
+
+        Added axes go last, because that is where the modules that grow the
+        array put them; removed tags drop out with the axis they named.
         """
-        tags = list(source.dim_tags or [None, None, None])
-        for position, tag in enumerate(self.ADDS_DIM_TAGS):
-            tags.insert(position, tag)
+        tags = [t for t in (source.dim_tags or [])
+                if t is not None and t not in self.REMOVES_DIM_TAGS]
+        tags += list(self.ADDS_DIM_TAGS)
+        tags += [None] * (3 - len(tags))
         return tags[:3]
 
     def _process_via_forward(self, data: NIfTI_MRS_Plus, water: Optional[NIfTI_MRS_Plus],

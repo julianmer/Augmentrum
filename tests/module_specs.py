@@ -129,6 +129,10 @@ SPECS: List[ModuleSpec] = [
 
     ModuleSpec("CoilSampler[draw]", None, {"mode": "random"}, needs_multicoil=True),
 
+    # The sweep fixtures carry no DIM_EDIT, so the combiner passes their data
+    # through untouched by design; its real behavior has its own tests.
+    ModuleSpec("EditCombiner", None, {"mode": "diff"}, identity=True),
+
     ModuleSpec("EddyCurrent[synthetic]", None, {"mode": "synthetic"}),
 
     ModuleSpec("FrequencyShift", None, {"shift_hz": 5.0}),
