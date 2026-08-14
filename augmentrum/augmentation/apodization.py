@@ -41,13 +41,16 @@ class Apodization(BaseModule):
     Parameters
     ----------
     mode : str
-        Apodization mode: 'truncate' or 'exponential' (default: 'exponential')
+        Apodization mode: 'truncate', 'exponential', 'gaussian', or 'hamming'
+        (default: 'exponential')
     n_pts : int, optional
         Number of points to keep (for truncation mode)
     frac_pts : float, optional
         Fraction of points to keep (for truncation mode), range [0, 1]
     lb_hz : float, optional
         Lorentzian broadening in Hz (for exponential mode)
+    gb_hz : float, optional
+        Gaussian broadening FWHM in Hz (for gaussian mode)
     auto_lb : bool
         Auto-calculate lb_hz to preserve signal (default: False)
     target_damp : float
@@ -63,6 +66,12 @@ class Apodization(BaseModule):
     >>> # Exponential mode with manual lb
     >>> apod = Apodization(mode='exponential', lb_hz=5.0)
     >>>
+    >>> # Gaussian window
+    >>> apod = Apodization(mode='gaussian', gb_hz=8.0)
+    >>>
+    >>> # Hamming window over the acquisition
+    >>> apod = Apodization(mode='hamming')
+    >>>
     >>> # Exponential mode with auto lb
     >>> apod = Apodization(mode='exponential', auto_lb=True, target_pts=1024)
     """
@@ -72,10 +81,13 @@ class Apodization(BaseModule):
     # A window and a truncation both act on the FID.
     DOMAIN = Domain(spectral='time')
 
+    MODES = ('truncate', 'exponential', 'gaussian', 'hamming')
+
     def __init__(self, mode: str = 'exponential',
                  n_pts: Optional[int] = None,
                  frac_pts: Optional[float] = None,
                  lb_hz: Optional[float] = None,
+                 gb_hz: Optional[float] = None,
                  auto_lb: bool = False,
                  target_damp: float = 0.01,
                  target_pts: Optional[int] = None):
@@ -86,12 +98,13 @@ class Apodization(BaseModule):
         self.n_pts = n_pts
         self.frac_pts = frac_pts
         self.lb_hz = lb_hz
+        self.gb_hz = gb_hz
         self.auto_lb = auto_lb
         self.target_damp = target_damp
         self.target_pts = target_pts
 
-        if self.mode not in ['truncate', 'exponential']:
-            raise ValueError(f"mode must be 'truncate' or 'exponential', got '{mode}'")
+        if self.mode not in self.MODES:
+            raise ValueError(f"mode must be one of {self.MODES}, got '{mode}'")
 
     def process_nifti_list(self, data_list: List, water_list: Optional[List] = None, **kwargs):
         """
@@ -117,8 +130,8 @@ class Apodization(BaseModule):
             # Apply apodization
             if self.mode == 'truncate':
                 fid_apod = self._apply_truncation(fid)
-            else:  # exponential
-                fid_apod = self._apply_exponential(fid, sw_hz)
+            else:  # a weighting window
+                fid_apod = self._apply_window(fid, sw_hz)
 
             # Update NIFTI_MRS data
             if fid_apod.shape[-1] != fid.shape[-1]:
@@ -186,26 +199,17 @@ class Apodization(BaseModule):
             # Native slice — valid in numpy, torch, jax, tf
             return data_array[..., :n_keep], water_array
 
-        else:  # exponential
+        else:  # a weighting window
             sw_hz = kwargs.get('sw_hz')
             if sw_hz is None:
-                raise ValueError("Apodization.process_tensor requires 'sw_hz' for exponential mode")
-
-            if self.auto_lb:
-                if self.target_pts is None:
-                    raise ValueError("Must provide target_pts when auto_lb=True")
-                lb = self._calc_lb(None, sw_hz, self.target_pts, self.target_damp)
-            elif self.lb_hz is not None:
-                lb = self.lb_hz
-            else:
-                raise ValueError("Must provide lb_hz or set auto_lb=True for exponential mode")
+                raise ValueError(f"Apodization.process_tensor requires 'sw_hz' for {self.mode} mode")
 
             N = data_array.shape[-1]
-            t = np.arange(N, dtype=np.float64) / float(sw_hz)
-            t_shape = [1] * (len(data_array.shape) - 1) + [N]
-            t = t.reshape(t_shape)
+            envelope = self._envelope(N, sw_hz)
+            if envelope is None:
+                return data_array, water_array
 
-            envelope = np.exp(-np.pi * float(lb) * t)
+            envelope = envelope.reshape([1] * (len(data_array.shape) - 1) + [N])
             # Backend-native multiply (envelope is data-independent numpy array)
             return data_array * match_backend(envelope, data_array), water_array
 
@@ -234,9 +238,9 @@ class Apodization(BaseModule):
         # Truncate along last dimension
         return fid[..., :data_keep]
 
-    def _apply_exponential(self, fid: np.ndarray, sw_hz: float) -> np.ndarray:
+    def _apply_window(self, fid: np.ndarray, sw_hz: float) -> np.ndarray:
         """
-        Apply exponential apodization.
+        Multiply the FID by this mode's weighting window.
 
         Args:
             fid: Input FID data
@@ -245,30 +249,47 @@ class Apodization(BaseModule):
         Returns:
             Apodized FID
         """
-        # Determine lb_hz
-        if self.auto_lb:
-            if self.target_pts is None:
-                raise ValueError("Must provide target_pts when auto_lb=True")
-            lb = self._calc_lb(fid, sw_hz, self.target_pts, self.target_damp)
-        elif self.lb_hz is not None:
-            lb = self.lb_hz
-        else:
-            raise ValueError("Must provide lb_hz or set auto_lb=True for exponential mode")
-
-        if lb <= 0:
+        N = fid.shape[-1]
+        envelope = self._envelope(N, sw_hz)
+        if envelope is None:
             return fid
 
-        # Get time points for last dimension
-        N = fid.shape[-1]
-        t = np.arange(N, dtype=float) / float(sw_hz)
+        return fid * envelope.reshape(tuple([1] * (fid.ndim - 1) + [N]))
 
-        # Reshape t to broadcast correctly
-        t_shape = tuple([1] * (fid.ndim - 1) + [N])
-        t = t.reshape(t_shape)
+    def _envelope(self, n_pts: int, sw_hz: float) -> Optional[np.ndarray]:
+        """
+        This mode's weighting window "w(t)" over *n_pts* samples.
 
-        # Apply exponential decay
-        envelope = np.exp(-np.pi * float(lb) * t)
-        return fid * envelope
+        Every window is data-independent, so both processing paths build it
+        here once, in NumPy, and multiply it in natively.
+
+        Returns:
+            The "(n_pts,)" window, or None when the weight would be identity.
+        """
+        t = np.arange(n_pts, dtype=np.float64) / float(sw_hz)
+
+        if self.mode == 'exponential':
+            if self.auto_lb:
+                if self.target_pts is None:
+                    raise ValueError("Must provide target_pts when auto_lb=True")
+                lb = self._calc_lb(None, sw_hz, self.target_pts, self.target_damp)
+            elif self.lb_hz is not None:
+                lb = self.lb_hz
+            else:
+                raise ValueError("Must provide lb_hz or set auto_lb=True for exponential mode")
+            return None if lb <= 0 else np.exp(-np.pi * float(lb) * t)
+
+        if self.mode == 'gaussian':
+            if self.gb_hz is None:
+                raise ValueError("Must provide gb_hz for gaussian mode")
+            if self.gb_hz <= 0:
+                return None
+            return np.exp(-((np.pi * float(self.gb_hz) * t) ** 2) / (4.0 * np.log(2.0)))
+
+        # 'hamming' — the decaying half of the window over the acquisition,
+        # 1 at t=0 falling to 0.08 at the last sample. No parameter to it.
+        n = np.arange(n_pts, dtype=np.float64)
+        return 0.54 + 0.46 * np.cos(np.pi * n / max(n_pts - 1, 1))
 
     @staticmethod
     def _calc_lb(fid, sw_hz: float, desired_npts: int, target_damp: float = 0.01) -> float:

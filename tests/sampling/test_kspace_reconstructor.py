@@ -347,3 +347,97 @@ def test_kspace_noise_reaches_the_nufft_path():
     noisy = _reconstructed(accel=1.0, noise_sigma_k=0.5)
 
     assert np.abs(quiet - noisy).max() > 1e-4
+
+
+#***********************#
+#   the dual pair       #
+#***********************#
+# Sampling on the transformed trajectory and regridding on the untouched
+# reference is what turns trajectory geometry into a spatial augmentation:
+# the object comes back warped, with no image-domain interpolation anywhere.
+
+def _dual(accel=1.0, **kwargs):
+    """An asymmetric object through the dual-trajectory path — a rectangle
+    with a bright corner, so a wrong rotation direction cannot hide behind
+    the rectangle's own 180-degree symmetry."""
+    from augmentrum.sampling import KspaceUndersampling
+
+    vol = np.zeros((1, 32, 32, 1, 4), np.complex64)
+    vol[0, 10:22, 12:20, 0, :] = 1.0
+    vol[0, 10:13, 12:16, 0, :] = 2.0
+    module = KspaceUndersampling(ksp_mode='nufft', trajectory='radial_2d',
+                                 acceleration_factor=accel, us_seed=0,
+                                 dual_trajectory=True, **kwargs)
+    return np.abs(np.asarray(module.process_tensor(vol)[0])[0, :, :, 0, 0])
+
+
+def test_dual_identity_reproduces_the_object():
+    """With A = I the pair collapses to an ordinary DCF reconstruction."""
+    vol = np.zeros((32, 32))
+    vol[10:22, 12:20] = 1.0
+
+    recon = _dual()
+    assert np.corrcoef(vol.ravel(), recon.ravel())[0, 1] > 0.95
+
+
+def test_dual_rotation_turns_the_object_not_the_pattern():
+    """
+    The whole point of the pair.
+
+    The non-dual path is pinned above to leave a fully sampled image alone
+    under trajectory rotation; the dual path must do the opposite and hand
+    back the rotated object — and in the right direction.
+    """
+    identity = _dual()
+    turned = _dual(traj_rotation_deg=90.0)
+
+    one_way = np.corrcoef(np.rot90(identity).ravel(), turned.ravel())[0, 1]
+    other_way = np.corrcoef(np.rot90(identity, k=-1).ravel(), turned.ravel())[0, 1]
+
+    assert max(one_way, other_way) > 0.8, (one_way, other_way)
+    assert abs(one_way - other_way) > 0.1, "rotation direction is ambiguous"
+
+
+def test_dual_zoom_scales_the_object():
+    """A = zI with z > 1 zooms in: the object must cover more voxels."""
+    identity = _dual()
+    zoomed = _dual(traj_scale=1.25)
+
+    area = lambda im: float((im > 0.3 * im.max()).sum())
+    assert area(zoomed) > 1.25 * area(identity), (area(identity), area(zoomed))
+
+
+def test_dual_shift_is_a_phase_ramp_that_moves_the_object():
+    """A quarter-FOV shift displaces the object by exactly eight voxels."""
+    identity = _dual()
+    moved = _dual(traj_shift=(0.25, 0.0))
+
+    # Phase correlation: exact under the periodic shift the ramp implements,
+    # and blind to the reconstruction haze that dilutes a center of mass.
+    xcorr = np.abs(np.fft.ifft2(np.fft.fft2(moved)
+                                * np.conj(np.fft.fft2(identity))))
+    displacement = np.unravel_index(xcorr.argmax(), xcorr.shape)
+
+    assert displacement == (8, 0), displacement
+
+
+def test_dual_anisotropy_needs_no_special_case():
+    """diag(1.5, 1) stretches one axis through the same general matrix."""
+    identity = _dual()
+    stretched = _dual(traj_affine=((1.5, 0.0), (0.0, 1.0)))
+
+    extent = lambda im, ax: float(np.ptp(np.nonzero(im > 0.3 * im.max())[ax]))
+    ratio_x = extent(stretched, 0) / max(extent(identity, 0), 1.0)
+    ratio_y = extent(stretched, 1) / max(extent(identity, 1), 1.0)
+
+    assert (ratio_x > 1.25) != (ratio_y > 1.25), (ratio_x, ratio_y)
+
+
+def test_dual_refuses_the_modes_that_cannot_do_it():
+    from augmentrum.sampling import KspaceUndersampling
+
+    with pytest.raises(ValueError, match="dual_trajectory requires"):
+        KspaceUndersampling(ksp_mode='cartesian', dual_trajectory=True)
+    with pytest.raises(ValueError, match="gridding engine"):
+        KspaceUndersampling(ksp_mode='nufft', nufft_impl='torchkbnufft',
+                            dual_trajectory=True)

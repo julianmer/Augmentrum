@@ -101,6 +101,10 @@ LENGTH_CHANGING = {spec.label for spec in SPECS if spec.changes_length}
 # assertion below does not apply to them.
 IDENTITY = {spec.label for spec in SPECS if spec.identity}
 
+# Variants that append a new acquisition axis, so the assertion is growth by
+# exactly one trailing axis rather than shape preservation.
+ADDS_DIM = {spec.label for spec in SPECS if spec.adds_dim}
+
 
 # ── Shared fixtures ───────────────────────────────────────────────────────────
 
@@ -181,6 +185,20 @@ def test_module_on_backend(
         )
         assert result[0][:].shape[-1] != N_PTS, (
             f"{module_name}/{backend_name}: spectral length unchanged at {N_PTS}"
+        )
+        return
+
+    # Dimension-adding modules: the input shape must survive as the leading
+    # axes, with exactly one new acquisition axis behind it.
+    if module_name in ADDS_DIM:
+        grown = result[0][:]
+        assert grown.shape[:original_data.ndim] == original_data.shape, (
+            f"{module_name}/{backend_name}: leading axes changed "
+            f"{original_data.shape} → {grown.shape}"
+        )
+        assert grown.ndim == original_data.ndim + 1, (
+            f"{module_name}/{backend_name}: expected one new axis, got "
+            f"{original_data.shape} → {grown.shape}"
         )
         return
 

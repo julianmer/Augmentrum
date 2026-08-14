@@ -52,6 +52,7 @@ from augmentrum.augmentation.eddy_current import EddyCurrent
 from augmentrum.augmentation.apodization import Apodization
 from augmentrum.augmentation.phase_frequency import PhaseShift, FrequencyShift
 from augmentrum.augmentation.spatial_augmentations import SpatialAugmentations
+from augmentrum.augmentation.transient_synthesis import TransientSynthesizer
 from augmentrum.augmentation.zero_fill import ZeroFill
 
 
@@ -165,6 +166,7 @@ class Augmentrum:
         # Processing
         'coil_sampling': CoilSampler,
         'average_sampling': AverageSampler,
+        'transient_synthesis': TransientSynthesizer,
         'processing': RawProcessor,
 
         # Noise

@@ -62,7 +62,11 @@ class SpuriousEchoes(BaseModule):
         - gaussian_env: Use Gaussian envelope (bool, default False)
 
     mode : str
-        'replica' (default) or 'hybrid'
+        'echo', 'replica' (default), or 'hybrid'. 'echo' is the localized
+        echo of Berrington et al. 2021 / SMART MRS (Bugler et al. 2025): an
+        independent additive signal "A·exp(-|t-t_echo|/T2)·exp(i(2πf·t+φ))".
+        'replica' modulates a delayed copy of the FID itself; 'hybrid'
+        combines the replica with the localized envelope.
     global_phase_deg : float
         Global phase offset for all echoes (default: 0.0)
     alpha_reference : str
@@ -105,8 +109,8 @@ class SpuriousEchoes(BaseModule):
         super().__init__()
 
         self.mode = mode.lower()
-        if self.mode not in ('replica', 'hybrid'):
-            raise ValueError(f"mode must be 'replica' or 'hybrid', got '{mode}'")
+        if self.mode not in ('echo', 'replica', 'hybrid'):
+            raise ValueError(f"mode must be 'echo', 'replica' or 'hybrid', got '{mode}'")
 
         self.global_phase_deg = global_phase_deg
         self.alpha_reference = alpha_reference
@@ -185,6 +189,22 @@ class SpuriousEchoes(BaseModule):
 
         original_shape = data_array.shape
         N = original_shape[-1]
+
+        if self.mode == 'echo':
+            # An independent additive echo: purely time-based apart from one
+            # amplitude reference per FID, taken on the data's own backend.
+            t = np.arange(N, dtype=np.float64) / float(sw_hz)
+            t_shape = [1] * (len(original_shape) - 1) + [N]
+            t = t.reshape(t_shape)
+
+            echo_sum = np.zeros(t_shape, dtype=np.complex128)
+            for echo in self.echoes:
+                echo_sum += self._echo_profile(echo, t)
+
+            max_abs = ops.amax(ops.abs(data_array), axis=-1, keepdims=True)
+            ghost = ops.cast_like(max_abs, data_array) * ops.cast_like(
+                match_backend(echo_sum, data_array), data_array)
+            return data_array + ghost, water_array
 
         if self.mode == 'replica':
             # Envelope is purely time-based — no data dependency at all
@@ -300,11 +320,50 @@ class SpuriousEchoes(BaseModule):
             fid_1d = fid_2d[i]
             if self.mode == 'hybrid':
                 result[i] = self._add_echoes_hybrid_1d(fid_1d, sw_hz)
+            elif self.mode == 'echo':
+                result[i] = self._add_echoes_echo_1d(fid_1d, sw_hz)
             else:
                 result[i] = self._add_echoes_replica_1d(fid_1d, sw_hz)
 
         # Reshape back to original shape
         return result.reshape(original_shape)
+
+    # ── Echo mode (Berrington 2021 / SMART MRS localized echo) ───────────
+
+    def _echo_profile(self, echo: dict, t: np.ndarray) -> np.ndarray:
+        """
+        One localized echo at unit amplitude reference.
+
+        The model of Berrington et al. 2021 as packaged by SMART MRS
+        (Bugler et al. 2025): an envelope peaking at "t_echo", carrying its
+        own frequency and phase, independent of the FID it is added to. The
+        caller multiplies by its amplitude reference (max |FID|).
+        """
+        alpha = echo.get('alpha', echo.get('amp', echo.get('amplitude', 0.05)))
+        phase_deg = echo.get('phase_deg', 0.0)
+        T2 = echo.get('T2', 0.04)
+        freq_hz = echo.get('freq_hz', echo.get('df_hz', 0.0))
+        t_echo = echo.get('t_echo', echo.get('tau', echo.get('delay_s', 0.18)))
+        gaussian_env = echo.get('gaussian_env', False)
+
+        if gaussian_env:
+            env = np.exp(-((t - t_echo) ** 2) / (2.0 * T2 ** 2))
+        else:
+            env = np.exp(-np.abs(t - t_echo) / T2)
+
+        phase_rad = np.deg2rad(self.global_phase_deg) + np.deg2rad(phase_deg)
+        return alpha * env * np.exp(1j * (2.0 * np.pi * freq_hz * t + phase_rad))
+
+    def _add_echoes_echo_1d(self, fid: np.ndarray, sw_hz: float) -> np.ndarray:
+        """Add independent localized echoes to a 1D FID."""
+        f = np.asarray(fid, dtype=np.complex128)
+        t = np.arange(f.size, dtype=float) / float(sw_hz)
+
+        amp_ref = np.max(np.abs(f))
+        out = f.copy()
+        for echo in self.echoes:
+            out += amp_ref * self._echo_profile(echo, t)
+        return out
 
     # ── Replica mode (original simple model) ──────────────────────────────
 
@@ -359,15 +418,16 @@ class SpuriousEchoes(BaseModule):
 
         return out
 
-    # ── Hybrid mode (Kyathanahally / Bugler model) ───────────────────────
+    # ── Hybrid mode (delayed replica under the localized envelope) ───────
 
     def _add_echoes_hybrid_1d(self, fid: np.ndarray, sw_hz: float) -> np.ndarray:
         """
         Add echoes to 1D FID using hybrid model.
 
-        Physically shifts the FID in time, then applies a localized envelope
-        and frequency modulation. Matches the legacy add_spurious_echo_artifact
-        (Kyathanahally et al. 2021, Bugler et al. 2025).
+        Physically shifts the FID in time, then applies the localized envelope
+        of Berrington et al. 2021 / SMART MRS (Bugler et al. 2025) and a
+        frequency modulation — our extension of that echo model to a replica.
+        Matches the legacy add_spurious_echo_artifact.
 
         Args:
             fid: 1D FID data

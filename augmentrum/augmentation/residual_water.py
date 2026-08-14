@@ -43,16 +43,23 @@ class ResidualWater(BaseModule):
     ----------
     center_ppm : float
         Center position of water peak in ppm (default: 4.7)
-    peaks : tuple of tuples
-        Each tuple is (delta_ppm, FWHM_ppm, rel_amp)
+    peaks : tuple of tuples, optional
+        Each tuple is (delta_ppm, FWHM_ppm, rel_amp) or
+        (delta_ppm, FWHM_ppm, rel_amp, phase_deg)
         - delta_ppm: offset from center in ppm
         - FWHM_ppm: Full Width at Half Maximum in ppm
         - rel_amp: relative amplitude
-        Default: Three lobes at 0.0, +0.12, -0.15 ppm
+        - phase_deg: per-peak phase in degrees, optional
+        None (default) uses the peaks of the chosen *model*.
     phase_deg : float
-        Phase of water peaks in degrees (default: 0.0)
+        Global phase of the water profile in degrees (default: 0.0)
     amplitude_scale : float
         Scale factor for water amplitude relative to spectrum (default: 0.1 = 10%)
+    model : str
+        Which peak set None *peaks* means: 'lobes' (default) is three lobes at
+        0.0, +0.12, -0.15 ppm; 'turco' is the seven-Lorentzian model of
+        Turco et al. (WaterFit), seeded at [4.70, 4.75, 4.65, 4.80, 4.60,
+        4.85, 4.55] ppm. Explicit *peaks* always win over the model.
 
     Examples
     --------
@@ -63,12 +70,12 @@ class ResidualWater(BaseModule):
     >>> # Subtle water (5%)
     >>> water = ResidualWater(amplitude_scale=0.05)
 
-    >>> # Strong water (30%)
-    >>> water = ResidualWater(amplitude_scale=0.30)
+    >>> # Turco et al. seven-Lorentzian residual water
+    >>> water = ResidualWater(model='turco')
 
-    >>> # Custom peaks
+    >>> # Custom peaks, with a per-peak phase on the second lobe
     >>> water = ResidualWater(
-    ...     peaks=((0.0, 0.25, 1.0), (0.10, 0.20, 0.5)),
+    ...     peaks=((0.0, 0.25, 1.0), (0.10, 0.20, 0.5, 30.0)),
     ...     phase_deg=15.0
     ... )
     """
@@ -78,17 +85,38 @@ class ResidualWater(BaseModule):
     # Water is a peak at a ppm position, which only exists in a spectrum.
     DOMAIN = Domain(spectral='frequency')
 
+    MODELS = ('lobes', 'turco')
+
+    #: Three asymmetric lobes — the house model of imperfect suppression.
+    LOBE_PEAKS = ((0.0, 0.20, 1.0),
+                  (0.12, 0.18, 0.4),
+                  (-0.15, 0.25, 0.3))
+
+    #: Seven Lorentzians at the WaterFit seeds of Turco et al. (MRM 2026),
+    #: offsets from 4.7 ppm; 0.24 ppm FWHM is their 30 Hz init damping at 3 T.
+    TURCO_PEAKS = ((0.0, 0.24, 1.0),
+                   (0.05, 0.24, 1.0),
+                   (-0.05, 0.24, 1.0),
+                   (0.10, 0.24, 1.0),
+                   (-0.10, 0.24, 1.0),
+                   (0.15, 0.24, 1.0),
+                   (-0.15, 0.24, 1.0))
+
     def __init__(self, center_ppm: float = 4.7,
-                 peaks: tuple = ((0.0, 0.20, 1.0),
-                                (0.12, 0.18, 0.4),
-                                (-0.15, 0.25, 0.3)),
+                 peaks: Optional[tuple] = None,
                  phase_deg: float = 0.0,
-                 amplitude_scale: float = 0.1):
+                 amplitude_scale: float = 0.1,
+                 model: str = 'lobes'):
         """Initialize residual water module."""
         super().__init__()
 
+        if model not in self.MODELS:
+            raise ValueError(f"model must be one of {self.MODELS}, got {model!r}")
+
         self.center_ppm = center_ppm
-        self.peaks = peaks
+        self.model = model
+        self.peaks = peaks if peaks is not None else (
+            self.TURCO_PEAKS if model == 'turco' else self.LOBE_PEAKS)
         self.phase_deg = phase_deg
         self.amplitude_scale = amplitude_scale
 
@@ -111,25 +139,28 @@ class ResidualWater(BaseModule):
         Args:
             ppm_axis: PPM axis
             center_ppm: Center position of water peak (default: 4.7 ppm)
-            peaks: Tuple of (delta_ppm, FWHM_ppm, rel_amp) for each lobe
-            phase_deg: Phase of water peaks in degrees
+            peaks: Tuple of (delta_ppm, FWHM_ppm, rel_amp[, phase_deg]) per lobe
+            phase_deg: Global phase of the water profile in degrees
 
         Returns:
             Complex profile with the same length as ppm_axis, peak magnitude 1
         """
         ppm = np.asarray(ppm_axis, float)
         phi = np.deg2rad(phase_deg)
-        w = np.zeros_like(ppm, float)
+        w = np.zeros_like(ppm, complex)
 
-        # Simple Lorentzians
-        for dppm, fwhm_ppm, rel_amp in peaks:
+        # Simple Lorentzians, each with its own optional phase
+        for peak in peaks:
+            dppm, fwhm_ppm, rel_amp = peak[:3]
+            peak_phi = np.deg2rad(peak[3]) if len(peak) > 3 else 0.0
             x = ppm - (center_ppm + dppm)
             hw = 0.5 * fwhm_ppm
-            w += rel_amp * (hw / (x**2 + hw**2)) / np.pi
+            w = w + rel_amp * np.exp(1j * peak_phi) * (hw / (x**2 + hw**2)) / np.pi
 
         # Normalize lobes to ~unit max
-        w /= np.max(w) if np.max(w) > 0 else 1.0
-        return w * (np.cos(phi) + 1j * np.sin(phi))
+        peak_mag = np.max(np.abs(w))
+        w = w / (peak_mag if peak_mag > 0 else 1.0)
+        return w * np.exp(1j * phi)
 
     @staticmethod
     def _add_water_lobes(spec, ppm_axis, *, center_ppm=4.7,

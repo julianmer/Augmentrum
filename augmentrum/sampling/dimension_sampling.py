@@ -54,6 +54,12 @@ class DimensionSampler(BaseModule):
             exactly the indices passed to the call.
         count: How many to keep, as "(min, max)" inclusive. A bare number means
             exactly that many; "None" means anywhere from one to all of them.
+        scheme: How the kept indices relate to each other. "random" (default)
+            draws them anywhere; "consecutive" keeps one contiguous window at
+            a random start; "strided" keeps every *stride*-th index from a
+            random start. Windows only mean something along an axis with a
+            temporal order, i.e. the averages.
+        stride: Spacing between kept indices for scheme="strided".
         seed: Fixes the sequence. Draws still vary from call to call.
     """
 
@@ -65,15 +71,25 @@ class DimensionSampler(BaseModule):
 
     SUPPORTED_BACKENDS = tuple(Backend)
 
-    def __init__(self, mode: str = 'random', count=None, seed=None):
+    SCHEMES = ('random', 'consecutive', 'strided')
+
+    def __init__(self, mode: str = 'random', count=None, scheme: str = 'random',
+                 stride: int = 1, seed=None):
         super().__init__()
 
         if mode not in ('random', 'deterministic'):
             raise ValueError(
                 f"mode must be 'random' or 'deterministic', got {mode!r}.")
+        if scheme not in self.SCHEMES:
+            raise ValueError(
+                f"scheme must be one of {self.SCHEMES}, got {scheme!r}.")
+        if int(stride) < 1:
+            raise ValueError(f"stride must be at least 1, got {stride!r}.")
 
         self.mode = mode
         self.count = self.as_range(count)
+        self.scheme = scheme
+        self.stride = int(stride)
 
     #************#
     #   counts   #
@@ -120,7 +136,18 @@ class DimensionSampler(BaseModule):
             return None
 
         rng = self.rng.numpy_rng()
-        return rng.permutation(n_total)[:int(rng.integers(low, high))].tolist()
+        kept = int(rng.integers(low, high))
+
+        if self.scheme == 'random':
+            return rng.permutation(n_total)[:kept].tolist()
+
+        # A window of *kept* picks, *step* apart, from a random start. The
+        # window must fit: its last pick is start + step * (kept - 1), so the
+        # count is clamped before the start is drawn rather than after.
+        step = self.stride if self.scheme == 'strided' else 1
+        kept = min(kept, (n_total - 1) // step + 1)
+        start = int(rng.integers(0, n_total - step * (kept - 1)))
+        return list(range(start, start + step * kept, step))
 
     #*************#
     #   drawing   #
@@ -233,6 +260,11 @@ class AverageSampler(DimensionSampler):
             exactly the indices passed to the call.
         n_averages: How many to keep, as "(min, max)" inclusive. A bare number
             means exactly that many; "None" means anywhere from one to all.
+        scheme: "random" draws the kept averages anywhere; "consecutive" keeps
+            a contiguous window at a random start, which is what an actually
+            shorter scan would have recorded; "strided" keeps every *stride*-th
+            transient of a window, thinning the scan instead of ending it.
+        stride: Spacing between kept transients for scheme="strided".
         seed: Fixes the sequence. Draws still vary from call to call.
 
     Examples:
@@ -247,8 +279,10 @@ class AverageSampler(DimensionSampler):
     DIM_TAG = 'DIM_DYN'
     OPERATION = 'Average Sampling'
 
-    def __init__(self, mode: str = 'random', n_averages=None, seed=None):
-        super().__init__(mode=mode, count=n_averages, seed=seed)
+    def __init__(self, mode: str = 'random', n_averages=None,
+                 scheme: str = 'random', stride: int = 1, seed=None):
+        super().__init__(mode=mode, count=n_averages, scheme=scheme,
+                         stride=stride, seed=seed)
 
     #*******************#
     #   count aliases   #

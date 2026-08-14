@@ -218,3 +218,56 @@ class TestArtifactsIntegration:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+#**************************************************************************************************#
+#                                    Class TestTurcoWater                                          #
+#**************************************************************************************************#
+#                                                                                                  #
+# The seven-Lorentzian residual water of Turco et al. (WaterFit), as a model preset.               #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestTurcoWater:
+    """model='turco' selects the WaterFit peak set; explicit peaks still win."""
+
+    def test_turco_selects_the_seven_seeds(self):
+        water = ResidualWater(model='turco')
+
+        assert water.peaks == ResidualWater.TURCO_PEAKS
+        assert len(water.peaks) == 7
+        # the seeds sit at 4.7 + delta for delta in +-{0, 0.05, 0.10, 0.15}
+        offsets = sorted(round(p[0], 2) for p in water.peaks)
+        assert offsets == [-0.15, -0.10, -0.05, 0.0, 0.05, 0.10, 0.15]
+
+    def test_default_model_is_unchanged(self):
+        assert ResidualWater().peaks == ResidualWater.LOBE_PEAKS
+
+    def test_explicit_peaks_beat_the_model(self):
+        peaks = ((0.0, 0.3, 1.0),)
+        assert ResidualWater(model='turco', peaks=peaks).peaks == peaks
+
+    def test_an_unknown_model_is_refused(self):
+        with pytest.raises(ValueError, match="model must be"):
+            ResidualWater(model='hlsvd')
+
+    def test_a_per_peak_phase_equals_the_global_phase_for_one_peak(self):
+        """With a single lobe the two phase routes must be the same rotation."""
+        ppm = np.linspace(3.0, 6.0, 512)
+
+        per_peak = ResidualWater._water_lobe_profile(
+            ppm, peaks=((0.0, 0.2, 1.0, 35.0),), phase_deg=0.0)
+        global_ph = ResidualWater._water_lobe_profile(
+            ppm, peaks=((0.0, 0.2, 1.0),), phase_deg=35.0)
+
+        assert np.allclose(per_peak, global_ph, atol=1e-12)
+
+    def test_turco_water_stays_in_the_water_region(self):
+        """Seven merged Lorentzians must still be a water hump, not a baseline."""
+        ppm = np.linspace(0.0, 9.4, 2048)
+        profile = ResidualWater._water_lobe_profile(
+            ppm, peaks=ResidualWater.TURCO_PEAKS)
+
+        magnitude = np.abs(profile)
+        inside = (ppm > 4.3) & (ppm < 5.1)
+        assert magnitude[inside].max() == pytest.approx(1.0, abs=1e-9)
+        assert magnitude[~inside].max() < 0.2

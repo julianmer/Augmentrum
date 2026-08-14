@@ -148,6 +148,51 @@ def test_synthesis_keeps_a_plain_coil_count():
     assert array.n_coils == 4
 
 
+#**************#
+#   windowing  #
+#**************#
+def test_consecutive_keeps_one_contiguous_window():
+    """What a shorter scan would actually have recorded."""
+    sampler = AverageSampler(n_averages=4, scheme='consecutive', seed=0)
+
+    for _ in range(8):
+        kept = sampler.draw(10)
+        assert len(kept) == 4
+        assert kept == list(range(kept[0], kept[0] + 4)), kept
+
+
+def test_strided_keeps_every_stride_th_transient():
+    """Thinning the scan instead of ending it early."""
+    sampler = AverageSampler(n_averages=3, scheme='strided', stride=3, seed=0)
+
+    for _ in range(8):
+        kept = sampler.draw(10)
+        assert len(kept) == 3
+        assert kept[1] - kept[0] == 3 and kept[2] - kept[1] == 3, kept
+        assert kept[-1] <= 9, "window ran past the last transient"
+
+
+def test_a_stride_too_wide_clamps_the_count():
+    """k + s(K-1) <= T-1: the window must fit, so the count gives way."""
+    kept = AverageSampler(n_averages=8, scheme='strided', stride=4, seed=0).draw(10)
+
+    # over 10 transients with stride 4 at most 3 picks fit (0, 4, 8)
+    assert len(kept) == 3, kept
+
+
+def test_windowed_starts_vary_between_draws():
+    """The start is the randomness — otherwise every draw is the same window."""
+    sampler = AverageSampler(n_averages=4, scheme='consecutive', seed=1)
+    starts = {sampler.draw(32)[0] for _ in range(16)}
+
+    assert len(starts) > 1, "every window started at the same transient"
+
+
+def test_an_unknown_scheme_is_refused():
+    with pytest.raises(ValueError, match="scheme must be"):
+        AverageSampler(scheme='windowed')
+
+
 def test_a_seed_replays_exactly(batch):
     """Reproducible on demand, varying without a seed."""
     first, _ = AverageSampler(n_averages=(1, 9), seed=7).process_tensor(batch, dim_tags=TAGS)

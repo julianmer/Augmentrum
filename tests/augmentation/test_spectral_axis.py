@@ -157,7 +157,12 @@ def test_no_module_acts_on_the_wrong_axis(spec, with_coils):
     if getattr(module, 'DOMAIN', None) is None or module.DOMAIN.spectral is None:
         pytest.skip(f"{spec.label} does not read along the spectral axis")
 
-    change = _values(module(with_coils)[0]) - _values(with_coils)
+    before = _values(with_coils)
+    if spec.adds_dim:
+        # The module appends an acquisition axis; compare against the input
+        # broadcast into it, so the change is still per spectral point.
+        before = before[..., None]
+    change = _values(module(with_coils)[0]) - before
     if np.abs(change).max() == 0:
         pytest.skip(f"{spec.label} left the data untouched")
 

@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 import warnings
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -3447,6 +3447,23 @@ class KspaceUndersampling(BaseModule):
     Leave it None and use "~augmentrum.augmentation.noise.Noise"
     if you want image-domain noise regardless.
 
+    Dual trajectory
+    ---------------
+    "dual_trajectory=True" turns the trajectory geometry into a spatial
+    augmentation. The volume is measured on the affine-transformed trajectory
+    (the Fourier dual "A^T k" of an image-space map "x' = Ax + b") and
+    regridded onto the **untouched reference trajectory** with Pipe density
+    compensation, so the object comes back warped by A — one interpolation
+    in total and no image-domain resampling. "traj_affine" carries the linear
+    part (anisotropic scale, shear, flips; the rotation/scale shortcuts
+    compose into it), "traj_shift" carries translations as a pure phase ramp,
+    and the sampled data are scaled by "|det A|" so amplitudes follow the
+    warp. 'nufft' mode with the gridding engine only.
+
+    With "dual_trajectory=False" (default) the same rotation/scale parameters
+    keep their acquisition meaning instead: they move the sampling pattern,
+    not the object (see "_transform_trajectory").
+
     Examples
     --------
     >>> us = KspaceUndersampling(acceleration_factor=4.0)
@@ -3490,7 +3507,10 @@ class KspaceUndersampling(BaseModule):
                  pixdim: Optional[Tuple[float, ...]] = None,
                  # geometry applied to where the samples are taken
                  traj_rotation_deg: float = 0.0,
-                 traj_scale: float = 1.0):
+                 traj_scale: float = 1.0,
+                 traj_affine=None,
+                 traj_shift: Optional[Sequence[float]] = None,
+                 dual_trajectory: bool = False):
         """
         ksp_mode: 'cartesian', 'gridded', 'nufft' or 'off' (see class docstring).
         nufft_osf: NUFFT grid oversampling, used by ksp_mode='nufft' only.
@@ -3527,6 +3547,15 @@ class KspaceUndersampling(BaseModule):
         pixdim: voxel size in mm per spatial axis. Only used by 'gridded' mode to
                 shape the trajectory. Normally left None — geometry is read off
                 the NIfTI-MRS data by BaseModule and passed in automatically.
+        traj_affine: linear part A of the image-space map the dual trajectory
+                realizes, "(ndim, ndim)" (a 2x2 embeds into 3-D in-plane).
+                None is the identity; the rotation/scale shortcuts compose in.
+                Dual mode only.
+        traj_shift: translation of the object as a fraction of the FOV per
+                axis, applied as a phase ramp on the samples. Dual mode only.
+        dual_trajectory: sample on the transformed trajectory, regrid on the
+                reference (see class docstring). Requires ksp_mode='nufft'
+                with the gridding engine.
         """
         super().__init__()
 
@@ -3568,6 +3597,18 @@ class KspaceUndersampling(BaseModule):
         self.pixdim = tuple(pixdim) if pixdim is not None else None
         self.traj_rotation_deg = float(traj_rotation_deg)
         self.traj_scale = float(traj_scale)
+        self.traj_affine = None if traj_affine is None else np.asarray(traj_affine, np.float64)
+        self.traj_shift = None if traj_shift is None else tuple(float(s) for s in traj_shift)
+        self.dual_trajectory = bool(dual_trajectory)
+
+        if self.dual_trajectory:
+            if ksp_mode != 'nufft':
+                raise ValueError("dual_trajectory requires ksp_mode='nufft' — the "
+                                 "mask modes never leave the grid, so there is no "
+                                 "trajectory pair to split.")
+            if nufft_impl == 'torchkbnufft':
+                raise ValueError("dual_trajectory runs on the gridding engine; "
+                                 "torchkbnufft is the comparison path only.")
 
         # Populated after every call — what was actually applied, for provenance.
         self.last_masks_: Optional[np.ndarray] = None
@@ -3615,13 +3656,56 @@ class KspaceUndersampling(BaseModule):
         # acceleration, so there is no empty case to guard against here.
         keep = np.flatnonzero(self.last_masks_)
         pts = np.concatenate([np.atleast_2d(np.asarray(shots[int(i)])) for i in keep])
-        pts = self._transform_trajectory(pts)
 
         ndim = pts.shape[1]
         kmax = np.asarray(meta['kmax'][:ndim], dtype=np.float64)
+
+        if self.dual_trajectory:
+            # The trajectory pair: measure the warped object on A^T k, put the
+            # samples back on the untouched reference. The geometry shortcuts
+            # feed the object map here, not the sampling pattern.
+            affine = self._object_affine(ndim)
+            return self._nufft_gridding(
+                data_array, matrix, pts @ affine, kmax, ndim,
+                recon_pts=pts, amplitude=float(abs(np.linalg.det(affine))))
+
+        pts = self._transform_trajectory(pts)
         if self.nufft_impl == 'torchkbnufft':
             return self._nufft_torchkbnufft(data_array, matrix, pts, kmax, ndim)
         return self._nufft_gridding(data_array, matrix, pts, kmax, ndim)
+
+    def _object_affine(self, ndim: int) -> np.ndarray:
+        """
+        The linear map A of the image-space transform the dual pair realizes.
+
+        Composed as "Rz(traj_rotation_deg) @ (traj_scale * traj_affine)", so
+        the scalar shortcuts stay usable next to a full matrix: traj_scale is
+        an isotropic zoom (z > 1 zooms in), traj_affine carries anisotropic
+        scaling, shear, and flips.
+        """
+        affine = np.eye(ndim)
+        if self.traj_affine is not None:
+            given = np.asarray(self.traj_affine, dtype=np.float64)
+            if given.shape == (ndim, ndim):
+                affine = given
+            elif given.shape == (2, 2) and ndim == 3:
+                affine = np.eye(3)
+                affine[:2, :2] = given
+            else:
+                raise ValueError(
+                    f"traj_affine must be ({ndim}, {ndim}) for this trajectory, "
+                    f"got {given.shape}.")
+
+        affine = self.traj_scale * affine
+
+        if self.traj_rotation_deg:
+            angle = np.deg2rad(self.traj_rotation_deg)
+            turn = np.eye(ndim)
+            turn[:2, :2] = [[np.cos(angle), -np.sin(angle)],
+                            [np.sin(angle), np.cos(angle)]]
+            affine = turn @ affine
+
+        return affine
 
     def _transform_trajectory(self, pts: np.ndarray) -> np.ndarray:
         """
@@ -3662,18 +3746,28 @@ class KspaceUndersampling(BaseModule):
 
         return pts * self.traj_scale if self.traj_scale != 1.0 else pts
 
-    def _nufft_gridding(self, data_array, matrix, pts, kmax, ndim):
+    def _nufft_gridding(self, data_array, matrix, pts, kmax, ndim,
+                        recon_pts=None, amplitude: float = 1.0):
         """
         Measure and reconstruct with the backend-agnostic gridding NUFFT.
 
         Runs on whatever backend the data is on and keeps its gradients, so a
         non-Cartesian acquisition can sit inside a training loop.
+
+        Args:
+            recon_pts: Reference trajectory to regrid onto, when it differs
+                from the sampled one (the dual pair). None regrids where the
+                samples were taken, which is the plain acquisition model.
+            amplitude: The "|det A|" Jacobian of the dual pair's image map.
         """
         from augmentrum.processing.interpolating import LinearInterpolator
         from augmentrum.sampling.kspace_reconstructor import GriddingNUFFT
 
         # Gridding takes the trajectory in [-0.5, 0.5) per axis
         coords = (pts / (2.0 * kmax[None, :])).astype(np.float32)
+        dual = recon_pts is not None
+        recon_coords = (coords if not dual else
+                        (recon_pts / (2.0 * kmax[None, :])).astype(np.float32))
 
         nx, ny, nz = matrix
         vol = ops.cast(data_array, 'complex64')
@@ -3694,6 +3788,20 @@ class KspaceUndersampling(BaseModule):
         gridder = (GriddingNUFFT(im_size, self.nufft_osf)
                    if interpolator is not None else nufft)
 
+        if dual:
+            # The reference trajectory owns the regridding: the Pipe weights
+            # and the translation ramp are functions of where the samples are
+            # put back, not of where they were read.
+            dcf = gridder.density_weights(recon_coords).astype(np.complex128)
+            weights = amplitude * dcf
+            if self.traj_shift is not None:
+                shift = np.asarray(self.traj_shift, np.float64)[:ndim]
+                lengths = np.asarray(matrix[:ndim], np.float64)
+                phase = -2.0 * np.pi * (recon_coords.astype(np.float64)
+                                        * lengths[None, :]
+                                        * shift[None, :]).sum(axis=1)
+                weights = weights * np.exp(1j * phase)
+
         recon = []
         for b in range(n_batch):
             plane = ops.reshape(ops.take(stack, np.array([b]), axis=0),
@@ -3703,7 +3811,25 @@ class KspaceUndersampling(BaseModule):
             kdata = nufft.forward(plane, coords)
             if self.noise_sigma_k:
                 kdata = self._add_kspace_noise(kdata)
-            recon.append(gridder.adjoint(kdata, coords))
+
+            if not dual:
+                recon.append(gridder.adjoint(kdata, coords))
+                continue
+
+            weighted = kdata * ops.cast_like(
+                ops.match_backend(weights[None, :], kdata), kdata)
+            warped = gridder.adjoint(weighted, recon_coords)
+
+            # The same operator run on the untransformed pair measures the
+            # chain's gain, so dividing by it hands the warp back in the
+            # input's units while |det A| keeps the warp's own amplitude.
+            kid = nufft.forward(plane, recon_coords)
+            rid = gridder.adjoint(kid * ops.cast_like(
+                ops.match_backend(dcf[None, :], kid), kid), recon_coords)
+            num = ops.sqrt(ops.sum(ops.abs(plane) ** 2))
+            den = ops.sqrt(ops.sum(ops.abs(rid) ** 2))
+            gain = num / ops.where(den > 1e-12, den, den * 0 + 1e-12)
+            recon.append(warped * ops.cast_like(gain, warped))
         out = ops.stack(recon, axis=0)
 
         if ndim == 2:
@@ -3712,7 +3838,9 @@ class KspaceUndersampling(BaseModule):
         else:
             out = ops.transpose(out, (0, 2, 3, 4, 1))
 
-        return self._match_scale(out, vol, data_array)
+        # The dual path is already unit-calibrated against the identity pair;
+        # matching the input's global norm again would erase |det A|.
+        return out if dual else self._match_scale(out, vol, data_array)
 
     def _nufft_torchkbnufft(self, data_array, matrix, pts, kmax, ndim):
         """Measure and reconstruct with torchkbnufft, the PyTorch reference."""

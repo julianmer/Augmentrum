@@ -63,6 +63,9 @@ class ModuleSpec:
             "(batch, X, Y, Z, T, C)" with DIM_COIL tagged.
         changes_length: rewrites the spectral length, so shape-preservation
             assertions do not apply — "ZeroFill" and "Apodization[truncate]".
+        adds_dim: appends a new acquisition axis (declared in ADDS_DIM_TAGS),
+            so the sweeps assert growth by one trailing axis instead of shape
+            preservation — "TransientSynthesizer".
         identity: passes data through unchanged by design, so the
             data-was-modified assertion does not apply — "Tap".
         own_provenance: records its own provenance per operation instead of
@@ -82,6 +85,7 @@ class ModuleSpec:
     volume: bool = False
     coiled: bool = False
     changes_length: bool = False
+    adds_dim: bool = False
     identity: bool = False
     own_provenance: bool = False
     nifti_kwargs: Dict[str, Any] = field(default_factory=dict)
@@ -183,6 +187,9 @@ SPECS: List[ModuleSpec] = [
                {"mode": "hybrid",
                 "echoes": [{"tau": 0.01, "alpha": 0.3, "phase_deg": 10.0,
                             "T2": 0.01, "df_hz": 30.0}]}),
+
+    ModuleSpec("TransientSynthesizer", None, {"n_transients": 4, "seed": 0},
+               adds_dim=True),
 
     ModuleSpec("Tap", None, {"name": "tap"}, identity=True),
 
