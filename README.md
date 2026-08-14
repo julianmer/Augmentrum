@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/julianmer/Augmentrum/main/assets/figures/logo.png" alt="Augmentrum Logo" width="100" style="margin-bottom: -10px;"/>
+  <img src="https://raw.githubusercontent.com/julianmer/Augmentrum/main/assets/logo/logo.png" alt="Augmentrum Logo" width="100" style="margin-bottom: -10px;"/>
   <h1 style="margin-top: 5px; margin-bottom: 5px;">Augmentrum</h1>
   <p style="margin-top: 0px;"><em>A Data Augmentation Package for MR Spectroscopy</em></p>
   
@@ -127,7 +127,7 @@ no manual conversion needed.
 | `ResidualWater` | lorentzian                                              |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `SpatialAugmentations` | 2-D / 3-D affine, flip, zoom, shear                     |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `SpuriousEchoes` | replica, hybrid                                         |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `Tap` | identity marker: snapshot a stage for `outputs`         |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `Tap` | marker: snapshot a stage for `outputs`         |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `ZeroFill` | pad FID to target length                                |   ✓   | ✓† | ✓† | ✓† | ✓† | ✓† |
 
 **✓** native — data tensor stays in the target framework throughout.  
