@@ -28,6 +28,8 @@ from augmentrum.augmentation.amplitude_scaling import AmplitudeScaling
 from augmentrum.augmentation.spatial_augmentations import SpatialAugmentations
 from augmentrum.augmentation.transient_synthesis import TransientSynthesizer
 from augmentrum.augmentation.zero_fill import ZeroFill
+from augmentrum.augmentation.field_inhomogeneity import FieldInhomogeneity
+from augmentrum.augmentation.girf_artifacts import GIRFArtifacts
 from augmentrum.augmentation.macromolecules import (
     Macromolecules, MMSource, Parametrized, SemiParametrized, Measured, Supplied,
 )
@@ -53,4 +55,6 @@ __all__ = [
     'SpatialAugmentations',
     'TransientSynthesizer',
     'ZeroFill',
+    'FieldInhomogeneity',
+    'GIRFArtifacts',
 ]

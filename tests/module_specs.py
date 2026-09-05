@@ -135,6 +135,20 @@ SPECS: List[ModuleSpec] = [
 
     ModuleSpec("EddyCurrent[synthetic]", None, {"mode": "synthetic"}),
 
+    # No b1_map/b0_map supplied, so this exercises the identity path only — its
+    # generic sweep fixture has no field map to match shapes against. The B1+/B0
+    # physics have their own suite in tests/augmentation/test_field_inhomogeneity.py.
+    ModuleSpec("FieldInhomogeneity", None, {}, volume=True, identity=True),
+
+    # No real .seq file in the generic sweep fixture and every term disabled,
+    # so this exercises the identity path only - its own suite in
+    # tests/augmentation/test_girf_artifacts.py builds a real tiny .seq file
+    # and covers the actual physics.
+    ModuleSpec("GIRFArtifacts", None,
+               {"seq_file": "unused.seq", "include_trajectory_error": False,
+                "include_girf_phase": False, "include_concomitant": False},
+               volume=True, identity=True),
+
     ModuleSpec("FrequencyShift", None, {"shift_hz": 5.0}),
 
     ModuleSpec("Noise[sigma]", None, {"sigma": 0.01}),

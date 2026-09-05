@@ -54,6 +54,8 @@ from augmentrum.augmentation.phase_frequency import PhaseShift, FrequencyShift
 from augmentrum.augmentation.spatial_augmentations import SpatialAugmentations
 from augmentrum.augmentation.transient_synthesis import TransientSynthesizer
 from augmentrum.augmentation.zero_fill import ZeroFill
+from augmentrum.augmentation.field_inhomogeneity import FieldInhomogeneity
+from augmentrum.augmentation.girf_artifacts import GIRFArtifacts
 from augmentrum.processing.edit_combination import EditCombiner
 
 
@@ -217,6 +219,12 @@ class Augmentrum:
         # k-space
         'undersampling': KspaceUndersampling,
         'kspace_undersampling': KspaceUndersampling,
+
+        # Field effects
+        'field_inhomogeneity': FieldInhomogeneity,
+        'b1_b0': FieldInhomogeneity,
+        'girf_artifacts': GIRFArtifacts,
+        'girf': GIRFArtifacts,
 
         # Pipeline control
         'tap': Tap,
