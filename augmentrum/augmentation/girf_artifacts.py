@@ -7,11 +7,11 @@
 # Created: 2026-09-05                                                                              #
 #                                                                                                  #
 # Purpose: Scanner-hardware artifacts driven by a real Pulseq ".seq" file: GIRF-induced k-space     #
-#          trajectory error and phase (stochastic/synthetic, or a real measured GIRF), and the      #
-#          concomitant (Maxwell) gradient field. Built on GIRF-Sim (github.com/JohnLaMaster/        #
-#          GIRF-Sim) as an installed dependency, lazily imported so a NumPy-only Augmentrum          #
-#          install never needs torch/GIRF-Sim on its account. Gradient-coil nonlinearity is out     #
-#          of scope without vendor calibration data - see GIRFArtifacts' docstring.                 #
+#          trajectory error and phase (stochastic/synthetic, or a real measured GIRF), the          #
+#          concomitant (Maxwell) gradient field, and gradient-coil-nonlinearity spatial              #
+#          displacement (via the optional "gradunwarp" dependency). Built on GIRF-Sim                #
+#          (github.com/JohnLaMaster/GIRF-Sim), lazily imported so a NumPy-only Augmentrum install    #
+#          never needs torch/GIRF-Sim/gradunwarp on its account.                                     #
 #                                                                                                  #
 ####################################################################################################
 
@@ -36,12 +36,14 @@ __all__ = ['GIRFArtifacts']
 #                                       Class GIRFArtifacts                                        #
 #**************************************************************************************************#
 #                                                                                                  #
-# GIRF-induced trajectory/phase error and concomitant-field phase, driven by a real .seq file.      #
+# GIRF-induced trajectory/phase error, concomitant-field phase, and gradient-coil-nonlinearity      #
+# displacement, driven by a real .seq file.                                                         #
 #                                                                                                  #
 #**************************************************************************************************#
 class GIRFArtifacts(BaseModule):
     """
-    GIRF (gradient impulse response function) and concomitant-field artifacts.
+    GIRF (gradient impulse response function), concomitant-field and
+    gradient-nonlinearity artifacts.
 
     Built on `GIRF-Sim <https://github.com/JohnLaMaster/GIRF-Sim>`_
     (`girf_module.GIRFModule`, lazily imported - installing it is only
@@ -96,11 +98,34 @@ class GIRFArtifacts(BaseModule):
         - see that module for the physics and its citations. Also
         position-dependent.
     "include_gradient_nonlinearity"
-        Vendor gradient-coil spherical-harmonic coefficients would be
-        needed to model this (deviation from a linear gradient field) and
-        are not available here - set this to "True" only to get a clear
-        "NotImplementedError" rather than silently doing nothing; leave it
-        "False" (default) to omit the term entirely.
+        The spatial displacement a real gradient coil's deviation from
+        linearity causes, away from isocenter -
+        "augmentrum.physics.gradient_nonlinearity.GradientNonlinearityDisplacement",
+        built on the optional dependency `gradunwarp
+        <https://github.com/Washington-University/gradunwarp>`_ (MIT,
+        `pip install gradunwarp`), which parses vendor spherical-harmonic
+        coefficient files and evaluates the resulting displacement field -
+        reused rather than reimplemented, since neither the exact vendor
+        file format nor real coil coefficients are something to
+        reconstruct from a paper or from memory. Purely spatial (no
+        trajectory/spectral-time dependence), so it is applied once, to the
+        whole volume, by resampling - independent of, and before, the
+        ".seq"-file-driven terms above.
+
+        "gradient_nonlinearity_coeffs_file" supplies a real vendor file
+        (Siemens ".grad"/".coef" - GE and Philips are not supported by
+        gradunwarp itself). Left "None" (the default), this uses
+        gradunwarp's own bundled test fixture instead - a **fabricated
+        dummy coil**, not any real scanner (a `UserWarning` is raised every
+        time this happens) - so the term is usable out of the box for
+        development/testing, but never silently mistaken for real hardware
+        behavior. "gradient_nonlinearity_stochasticity" (a fractional
+        std, e.g. "0.05" = 5%) multiplicatively perturbs every already-
+        nonzero coefficient - real or default - independently each call
+        (seeded via "gradient_nonlinearity_seed"), the same "sample a
+        plausible instance of this class of hardware" idea GIRF-Sim's own
+        synthetic kernel bank uses, rather than a single fixed distortion
+        every time.
 
     Why position-dependent terms need an approximation
     -----------------------------------------------------
@@ -148,6 +173,15 @@ class GIRFArtifacts(BaseModule):
         >>> # a real measured GIRF for a specific scanner
         >>> girf = GIRFArtifacts(seq_file="...", girf_mode='measured',
         ...                      bacon_data_dir="/path/to/zenodo/GIRFs")
+
+        >>> # gradient-nonlinearity only, a real vendor file, stochastically
+        >>> # perturbed 5% per call - no .seq-driven term is touched
+        >>> girf = GIRFArtifacts(
+        ...     seq_file="press_mrsi2d_spiral.seq",
+        ...     include_trajectory_error=False, include_girf_phase=False,
+        ...     include_concomitant=False, include_gradient_nonlinearity=True,
+        ...     gradient_nonlinearity_coeffs_file="/site/coeff_AS82.grad",
+        ...     gradient_nonlinearity_stochasticity=0.05)
     """
 
     SUPPORTED_BACKENDS = tuple(b for b in Backend if b is not Backend.NIFTI_LIST)
@@ -168,6 +202,10 @@ class GIRFArtifacts(BaseModule):
                  include_concomitant: bool = True,
                  include_trajectory_error: bool = True,
                  include_gradient_nonlinearity: bool = False,
+                 gradient_nonlinearity_coeffs_file: Optional[str] = None,
+                 gradient_nonlinearity_vendor: str = 'siemens',
+                 gradient_nonlinearity_stochasticity: float = 0.0,
+                 gradient_nonlinearity_seed: Optional[int] = None,
                  n_severity_segments: int = 16,
                  nufft_osf: float = 2.0,
                  nufft_impl: str = 'gridding',
@@ -204,10 +242,21 @@ class GIRFArtifacts(BaseModule):
                 reconstruct on the commanded one. See the ablation warning
                 in the class docstring before turning this off for a
                 "concomitant only" condition.
-        include_gradient_nonlinearity: If "True", raises
-                "NotImplementedError" - no vendor gradient-coil calibration
-                data is available to model this. Leave "False" to omit the
-                term.
+        include_gradient_nonlinearity: The gradient-coil-nonlinearity
+                spatial displacement (see class docstring). Needs the
+                optional dependency "gradunwarp".
+        gradient_nonlinearity_coeffs_file: A real vendor ".grad"/".coef"
+                file. "None" (default) uses gradunwarp's own bundled
+                fabricated test coil and warns every time - see class
+                docstring.
+        gradient_nonlinearity_vendor: Passed through to gradunwarp; only
+                "'siemens'" is functional there today.
+        gradient_nonlinearity_stochasticity: Fractional std (e.g. "0.05")
+                of multiplicative noise applied to every already-nonzero
+                coefficient, independently each call. "0.0" (default) uses
+                the coefficients exactly as loaded.
+        gradient_nonlinearity_seed: Seeds the perturbation above. "None"
+                draws a fresh one every call; a fixed seed reproduces it.
         n_severity_segments: Trajectory samples sharing similar order>=2
                 GIRF/concomitant phase are grouped into this many clusters
                 (see class docstring); increase to converge toward the
@@ -231,6 +280,11 @@ class GIRFArtifacts(BaseModule):
             raise ValueError(f"nufft_impl must be 'gridding' or 'interp', got {nufft_impl!r}.")
         if int(n_severity_segments) < 1:
             raise ValueError(f"n_severity_segments must be >= 1, got {n_severity_segments}.")
+        if gradient_nonlinearity_stochasticity < 0:
+            raise ValueError(
+                f"gradient_nonlinearity_stochasticity must be >= 0, got "
+                f"{gradient_nonlinearity_stochasticity}."
+            )
 
         self.seq_file = seq_file
         self.girf_mode = girf_mode
@@ -245,23 +299,14 @@ class GIRFArtifacts(BaseModule):
         self.include_concomitant = bool(include_concomitant)
         self.include_trajectory_error = bool(include_trajectory_error)
         self.include_gradient_nonlinearity = bool(include_gradient_nonlinearity)
+        self.gradient_nonlinearity_coeffs_file = gradient_nonlinearity_coeffs_file
+        self.gradient_nonlinearity_vendor = gradient_nonlinearity_vendor
+        self.gradient_nonlinearity_stochasticity = float(gradient_nonlinearity_stochasticity)
+        self.gradient_nonlinearity_seed = gradient_nonlinearity_seed
         self.n_severity_segments = int(n_severity_segments)
         self.nufft_osf = float(nufft_osf)
         self.nufft_impl = nufft_impl
         self.pixdim = tuple(pixdim) if pixdim is not None else None
-
-        if self.include_gradient_nonlinearity:
-            raise NotImplementedError(
-                "GIRFArtifacts.include_gradient_nonlinearity: gradient-coil "
-                "nonlinearity needs vendor spherical-harmonic gradient-coil "
-                "coefficients (Siemens/GE/Philips coil models), which are "
-                "not available here. GIRF-Sim's own "
-                "'GradientNonlinearityDisplacement' is an unconditional "
-                "placeholder for the same reason - this project does not "
-                "fabricate calibration data. Leave this False to omit the "
-                "term; supply real vendor coefficients and extend this "
-                "class to make it available."
-            )
 
         # Populated after every call that ran - provenance and diagnostics.
         self.last_definitions_: Optional[Dict[str, Any]] = None
@@ -278,7 +323,7 @@ class GIRFArtifacts(BaseModule):
         in which case it is the identity and no domain move is worth forcing.
         """
         if (self.include_trajectory_error or self.include_girf_phase
-                or self.include_concomitant):
+                or self.include_concomitant or self.include_gradient_nonlinearity):
             return Domain(spatial='image')
         return None
 
@@ -303,7 +348,7 @@ class GIRFArtifacts(BaseModule):
             "(artifacted_data, water_unchanged)", same shape and dtype in.
         """
         if not (self.include_trajectory_error or self.include_girf_phase
-                or self.include_concomitant):
+                or self.include_concomitant or self.include_gradient_nonlinearity):
             return data_array, water_array
 
         if data_array.ndim not in (5, 6):
@@ -377,10 +422,94 @@ class GIRFArtifacts(BaseModule):
             bacon=self.measured_girf,
         )
 
+    #****************************#
+    #   gradient nonlinearity    #
+    #****************************#
+    def _apply_gradient_nonlinearity(self, vol, positions, matrix: Tuple[int, int, int],
+                                     geometry: Optional[dict]):
+        """
+        Warp the whole volume by the gradient-coil-nonlinearity displacement
+        field, via image-domain resampling - see the class docstring for
+        where the coefficients come from and the sign convention.
+
+        Unlike the ".seq"-file-driven terms, this never touches k-space or
+        the NUFFT: the displacement is the same for every spectral sample,
+        so "grid_sample" resamples the "(X, Y, Z)" volume once, broadcasting
+        over "T" the same way "SpatialAugmentations" broadcasts its own
+        affine grid over every channel.
+        """
+        from nifti_mrs_plus import resample
+        from augmentrum.physics.gradient_nonlinearity import (
+            gradient_nonlinearity_displacement_m, load_coefficients, perturb_coefficients,
+        )
+
+        coeffs = load_coefficients(self.gradient_nonlinearity_coeffs_file,
+                                   vendor=self.gradient_nonlinearity_vendor)
+        if self.gradient_nonlinearity_stochasticity:
+            rng = np.random.default_rng(self.gradient_nonlinearity_seed)
+            coeffs = perturb_coefficients(coeffs, self.gradient_nonlinearity_stochasticity, rng)
+
+        nx, ny, nz = matrix
+        displacement_m = gradient_nonlinearity_displacement_m(
+            coeffs, positions.numpy(), vendor=self.gradient_nonlinearity_vendor)   # [N_voxels, 3]
+
+        vx, vy, vz = self._voxel_size_m(geometry)
+        fov = np.array([nx * vx, ny * vy, nz * vz], dtype=np.float64)
+        fov = np.where(fov > 0, fov, 1.0)
+        # affine_grid's normalized [-1, 1] spans the full FOV (see its own
+        # docstring/formula), so a physical displacement converts by half-FOV.
+        disp_norm = (displacement_m * (2.0 / fov[None, :])).astype(np.float32)   # (N, 3), x,y,z order
+
+        # positions (and so disp_norm) is flattened (Y, X) [nz=1] or (Z, Y, X)
+        # [nz>1] - see girf_synthetic.make_grid_2d/3d - which is exactly the
+        # (D, H, W, 3) shape affine_grid's own output uses.
+        disp_grid = disp_norm.reshape((1, ny, nx, 3) if nz == 1 else (nz, ny, nx, 3))
+
+        n_batch = int(ops.shape(vol)[0])
+        n_t = int(ops.shape(vol)[4])
+
+        # (batch, X, Y, Z, T) -> (batch, T, Z, Y, X): grid_sample's own layout,
+        # channel first and spatial axes reversed - same convention
+        # SpatialAugmentations uses, just fixed to this module's always-5-D
+        # volumes rather than computed for a variable rank.
+        perm = (0, 4, 3, 2, 1)
+        xg = ops.transpose(vol, perm)
+
+        theta_np = np.tile(np.eye(3, 4, dtype=np.float32)[None], (n_batch, 1, 1))
+        theta = ops.asarray_like(xg, theta_np)
+        identity_grid = resample.affine_grid(theta, (n_batch, n_t, nz, ny, nx))
+
+        disp = ops.cast_like(ops.match_backend(disp_grid[None], identity_grid), identity_grid)
+        # Forward (distorting) direction: see GradientNonlinearityDisplacement's
+        # docstring for why this is a minus sign (gradunwarp's own "warp"
+        # polarity, the reverse of its default correction/unwarp convention).
+        grid = identity_grid - disp
+
+        warped = ops.complex_from(
+            resample.grid_sample(ops.real(xg), grid, padding_mode='zeros'),
+            resample.grid_sample(ops.imag(xg), grid, padding_mode='zeros'),
+        )
+        return ops.transpose(warped, perm)
+
     def _apply_girf(self, vol, matrix: Tuple[int, int, int], geometry: Optional[dict]):
         """Measure `vol` along the .seq file's trajectory, with GIRF/
         concomitant artifacts, and reconstruct assuming the commanded
-        trajectory - see the class docstring for the acquisition model."""
+        trajectory - see the class docstring for the acquisition model.
+
+        Gradient-coil nonlinearity is purely spatial (no trajectory/
+        spectral-time dependence), so it is resolved first, once, by
+        resampling the whole volume - independent of, and unaffected by,
+        whether any ".seq"-file-driven term is enabled at all.
+        """
+        if self.include_gradient_nonlinearity:
+            vol = self._apply_gradient_nonlinearity(
+                vol, self._positions(matrix, geometry), matrix, geometry)
+
+        needs_seq = (self.include_trajectory_error or self.include_girf_phase
+                    or self.include_concomitant)
+        if not needs_seq:
+            return vol
+
         from augmentrum.processing.interpolating import LinearInterpolator
         from augmentrum.sampling.kspace_reconstructor import GriddingNUFFT
 
@@ -411,7 +540,7 @@ class GIRFArtifacts(BaseModule):
         nufft = GriddingNUFFT(im_size, self.nufft_osf, interpolator=interpolator)
         gridder = GriddingNUFFT(im_size, self.nufft_osf) if interpolator is not None else nufft
 
-        positions = self._positions(matrix, geometry, ndim)   # [N_voxels, 3] meters, torch
+        positions = self._positions(matrix, geometry)   # [N_voxels, 3] meters, torch
 
         girf0_phase = None
         if self.include_girf_phase and mod.tier == 'synthetic':
@@ -623,7 +752,7 @@ class GIRFArtifacts(BaseModule):
     #****************#
     #   geometry     #
     #****************#
-    def _positions(self, matrix, geometry, ndim):
+    def _positions(self, matrix, geometry):
         """"[N_voxels, 3]" positions in meters, from the data's own geometry
         - never the .seq file's own declared FOV (see class docstring:
         the two are validated to agree, not silently reconciled)."""

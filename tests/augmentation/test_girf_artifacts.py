@@ -138,11 +138,88 @@ class TestIdentityWhenOff:
 #                                  Class TestGradientNonlinearity                                   #
 #**************************************************************************************************#
 class TestGradientNonlinearity:
-    """Requesting it must raise, never silently do nothing."""
+    """Gradient-coil-nonlinearity displacement (needs gradunwarp)."""
 
-    def test_raises_not_implemented_at_construction(self, tiny_seq_file):
-        with pytest.raises(NotImplementedError, match="vendor"):
-            GIRFArtifacts(seq_file=tiny_seq_file, include_gradient_nonlinearity=True)
+    def test_warns_that_the_default_coefficients_are_synthetic(self, tiny_seq_file):
+        with pytest.warns(UserWarning, match="dummy"):
+            _run(tiny_seq_file, include_trajectory_error=False, include_girf_phase=False,
+                 include_concomitant=False, include_gradient_nonlinearity=True)
+
+    def test_changes_data_without_touching_the_seq_pipeline(self, tiny_seq_file):
+        vol = _phantom()
+        out, girf = _run(tiny_seq_file, include_trajectory_error=False,
+                         include_girf_phase=False, include_concomitant=False,
+                         include_gradient_nonlinearity=True)
+        assert not np.allclose(out, vol)
+        # The .seq/GIRFModule path must never run when it is the only term enabled.
+        assert girf.last_definitions_ is None
+        assert girf.last_severity_segments_ is None
+
+    def test_zero_stochasticity_is_deterministic(self, tiny_seq_file):
+        out1, _ = _run(tiny_seq_file, include_trajectory_error=False, include_girf_phase=False,
+                       include_concomitant=False, include_gradient_nonlinearity=True,
+                       gradient_nonlinearity_stochasticity=0.0)
+        out2, _ = _run(tiny_seq_file, include_trajectory_error=False, include_girf_phase=False,
+                       include_concomitant=False, include_gradient_nonlinearity=True,
+                       gradient_nonlinearity_stochasticity=0.0)
+        np.testing.assert_array_equal(out1, out2)
+
+    def test_stochasticity_with_fixed_seed_is_reproducible(self, tiny_seq_file):
+        out1, _ = _run(tiny_seq_file, include_trajectory_error=False, include_girf_phase=False,
+                       include_concomitant=False, include_gradient_nonlinearity=True,
+                       gradient_nonlinearity_stochasticity=0.1, gradient_nonlinearity_seed=3)
+        out2, _ = _run(tiny_seq_file, include_trajectory_error=False, include_girf_phase=False,
+                       include_concomitant=False, include_gradient_nonlinearity=True,
+                       gradient_nonlinearity_stochasticity=0.1, gradient_nonlinearity_seed=3)
+        np.testing.assert_array_equal(out1, out2)
+
+    def test_stochasticity_without_a_seed_varies(self, tiny_seq_file):
+        out1, _ = _run(tiny_seq_file, include_trajectory_error=False, include_girf_phase=False,
+                       include_concomitant=False, include_gradient_nonlinearity=True,
+                       gradient_nonlinearity_stochasticity=0.1, gradient_nonlinearity_seed=None)
+        out2, _ = _run(tiny_seq_file, include_trajectory_error=False, include_girf_phase=False,
+                       include_concomitant=False, include_gradient_nonlinearity=True,
+                       gradient_nonlinearity_stochasticity=0.1, gradient_nonlinearity_seed=None)
+        assert not np.array_equal(out1, out2)
+
+    def test_matches_a_hand_rolled_resample(self, tiny_seq_file):
+        import girf_synthetic as gsyn
+        from nifti_mrs_plus import resample
+        from augmentrum.physics.gradient_nonlinearity import (
+            load_coefficients, gradient_nonlinearity_displacement_m,
+        )
+
+        out, _ = _run(tiny_seq_file, include_trajectory_error=False, include_girf_phase=False,
+                      include_concomitant=False, include_gradient_nonlinearity=True)
+
+        nx, ny, nz = MATRIX
+        vox_m = PIXDIM_MM[0] / 1000.0
+        positions = gsyn.make_grid_2d(nx, ny, nx * vox_m, ny * vox_m, z=0.0)
+
+        coeffs = load_coefficients()   # warns; fine for this reference computation
+        disp_m = gradient_nonlinearity_displacement_m(coeffs, positions.numpy())
+        disp_norm = (disp_m * (2.0 / (nx * vox_m))).astype(np.float32).reshape(1, ny, nx, 3)
+
+        vol = _phantom()
+        n_batch, n_t = vol.shape[0], vol.shape[-1]
+        xg = vol.transpose(0, 4, 3, 2, 1)   # (B, T, Z, Y, X)
+        theta = np.tile(np.eye(3, 4, dtype=np.float32)[None], (n_batch, 1, 1))
+        identity_grid = resample.affine_grid(theta, (n_batch, n_t, nz, ny, nx))
+        grid = identity_grid - disp_norm[None]
+
+        warped = (resample.grid_sample(xg.real, grid, padding_mode='zeros')
+                 + 1j * resample.grid_sample(xg.imag, grid, padding_mode='zeros'))
+        expected = warped.transpose(0, 4, 3, 2, 1)
+
+        np.testing.assert_allclose(out, expected, atol=1e-5, rtol=1e-5)
+
+    def test_composes_with_trajectory_error(self, tiny_seq_file):
+        """Combined with a .seq-driven term, both still run (the .seq path
+        is not skipped once a real term needs it)."""
+        out, girf = _run(tiny_seq_file, include_trajectory_error=True, include_girf_phase=False,
+                         include_concomitant=False, include_gradient_nonlinearity=True)
+        assert girf.last_definitions_ is not None
+        assert np.all(np.isfinite(out))
 
 
 #**************************************************************************************************#
