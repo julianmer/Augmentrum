@@ -48,21 +48,31 @@ class MRSIChallengeDataModule:
     -----------------
     "xtMeta"       metabolites only, noiseless — the "signal='clean'" default
     "xtNuisance"   residual water + lipid, summed (not separable)
+    "xtMM"         macromolecules only, noiseless — "signal='macromolecules'"
     "xtAll"        the composite: metabolites + macromolecules + baseline
                      + nuisance + noise
 
-    **Macromolecules are not inside** "xtMeta". The release keeps them in a
-    separate "xtMM" array, and that array ships only with the *test* ground-truth
-    files — the 24 training subjects do not carry it at all. For those, the only
-    handle on the macromolecular signal is "xtAll - xtMeta - xtNuisance", which
-    is MM *plus* baseline *plus* noise and cannot be separated further.
+    **Macromolecules are not inside** "xtMeta". Historically the release kept
+    them in a separate "xtMM" array that shipped only with the *test*
+    ground-truth files — the 24 training subjects did not carry it at all, so
+    the only handle on the macromolecular signal there was
+    "xtAll - xtMeta - xtNuisance" (MM *plus* baseline *plus* noise,
+    inseparable). "xtMM" is now being added more broadly, so "read_component"
+    and "read_component_nifti" pick it up per subject wherever it has actually
+    been shipped — see "signal='macromolecules'" below — but it may still be
+    absent for a given subject, in which case loading it raises rather than
+    silently substituting something else.
 
-    So there is no "metabolites + macromolecules, nothing else" option for
-    training. The two usable positions are:
+    Positions for a "metabolites + macromolecules, nothing else" signal:
 
     * "signal='clean'" — metabolites alone, noiseless. Nothing to unpick, and
       the macromolecular baseline and noise come from Augmentrum instead, where
       they are parameterized and reproducible.
+    * "signal='macromolecules'" — "xtMM" alone, noiseless. Only available for
+      subjects that ship it (currently the test ground-truth files, and
+      whichever NIfTI-MRS releases have been updated to include
+      "mrs_fids_macromolecules"); raises "FileNotFoundError"/"KeyError"
+      otherwise.
     * "signal='nuisance_free'" ("xtAll - xtNuisance") — metabolites,
       macromolecules, baseline and the challenge's own noise. This is the input
       the organizers recommend for the quantification-only sub-challenge, but
@@ -129,24 +139,28 @@ class MRSIChallengeDataModule:
     #: signal name -> the .mat variables it is built from. More than one entry
     #: means the first minus the rest.
     SIGNALS = {
-        'clean':         ('xtMeta',),                  # metabolites only, noiseless
-        'metabolites':   ('xtMeta',),
-        'nuisance_free': ('xtAll', 'xtNuisance'),      # metab + MM + baseline + noise
-        'composite':     ('xtAll',),                   # everything, as released
-        'nuisance':      ('xtNuisance',),              # residual water + lipid
+        'clean':          ('xtMeta',),                  # metabolites only, noiseless
+        'metabolites':    ('xtMeta',),
+        'macromolecules': ('xtMM',),                    # MM only, noiseless (where shipped)
+        'nuisance_free':  ('xtAll', 'xtNuisance'),      # metab + MM + baseline + noise
+        'composite':      ('xtAll',),                   # everything, as released
+        'nuisance':       ('xtNuisance',),              # residual water + lipid
     }
 
     #: signal name -> the NIfTI-MRS file suffixes it is built from. Training
     #: subjects ship the components as NIfTI as well as inside the .mat, and
     #: reading those is far cheaper than pulling a variable out of a 2.2 GB
-    #: HDF5 file. Test subjects ship only the composite, so anything else there
-    #: still has to come from the ground-truth .mat.
+    #: HDF5 file. Test subjects have historically shipped only the composite as
+    #: NIfTI, so anything else there falls back to the ground-truth .mat —
+    #: "nifti_paths" checks per subject and returns None when a component (e.g.
+    #: "mrs_fids_macromolecules") is not actually present, rather than assuming.
     NIFTI_SIGNALS = {
-        'clean':         ('mrs_fids_metabolites',),
-        'metabolites':   ('mrs_fids_metabolites',),
-        'nuisance_free': ('mrs_fids_si_data', 'mrs_fids_nuisance'),   # difference
-        'composite':     ('mrs_fids_si_data',),
-        'nuisance':      ('mrs_fids_nuisance',),
+        'clean':          ('mrs_fids_metabolites',),
+        'metabolites':    ('mrs_fids_metabolites',),
+        'macromolecules': ('mrs_fids_macromolecules',),  # MM only (where shipped)
+        'nuisance_free':  ('mrs_fids_si_data', 'mrs_fids_nuisance'),   # difference
+        'composite':      ('mrs_fids_si_data',),
+        'nuisance':       ('mrs_fids_nuisance',),
     }
 
     SPLITS = ('train', 'test_track1', 'test_track2')
@@ -660,10 +674,11 @@ def MRSIChallengeData(data_dir: str,
 
     if pipelines is None:
         # signal='clean' is metabolites alone — no macromolecules, no baseline, no
-        # noise (see MRSIChallengeDataModule for why MM cannot be recovered
-        # separately for the training subjects). Augmentrum supplies the missing
-        # realism, which is the point: it is parameterized and reproducible,
-        # whereas whatever the release happens to contain is fixed.
+        # noise (see MRSIChallengeDataModule for signal='macromolecules', which
+        # loads MM alone where the release ships it separately). Augmentrum
+        # supplies the missing realism, which is the point: it is parameterized
+        # and reproducible, whereas whatever the release happens to contain is
+        # fixed.
         #
         # Measured on one 64x64x32x384 volume, CPU: spatial 4.7 s, undersampling
         # 10.8 s, noise 9.0 s — and baseline ~400 s, because it draws an
