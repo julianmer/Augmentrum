@@ -60,11 +60,12 @@ from augmentrum.sampling import GridMask
 #************#
 DEFAULT_CONFIG = {
     # Data
-    'data_dir':      'data/MRSI_Challenge',   # release root
+    'data_dir':      'data/mrsi_challenge',   # release root; fetched from Zenodo as needed
     'signal':        'clean',                 # xtMeta: metabolites only, noiseless
     'source':        'mat',                   # authoritative, internally consistent
-    'n_train':       8,                       # contest subjects to load (train + val)
-    'n_val':         2,                       # of those, held out for validation
+    'train':         6,                       # contest subjects for training
+    'val':           2,                       # contest subjects for validation
+    'test':          ('track1', 'track2'),    # test sets to load; () for none
 
     # Output
     'save_dir':      'results/mrsi_challenge',
@@ -103,17 +104,22 @@ def run_pipeline(config):
     print("╚══════════════════════════════════════════════════════════════════╝")
     print(f"  data_dir : {config['data_dir']}")
     print(f"  signal   : {config['signal']}  (source={config['source']})")
-    print(f"  subjects : {config['n_train']} contest ({config['n_val']} for val) "
-          f"+ 5 track-1 + 3 track-2")
-    print("  First run extracts each volume from its .mat and caches it as an")
-    print("  uncompressed NIfTI-MRS; later runs memory-map that cache instead.")
+    print(f"  subjects : {config['train']} train, {config['val']} val, "
+          f"tests {', '.join(config['test']) or '-'}")
+    print("  Missing subjects are fetched from Zenodo (4.4 GB each). First use")
+    print("  extracts each volume from its .mat and caches it as an uncompressed")
+    print("  NIfTI-MRS; later runs memory-map that cache instead.")
+
+    splits = {'train': config['train'], 'val': config['val']}
+    for track in config['test']:
+        splits[f'test_{track}'] = len(getattr(MRSIChallengeDataModule,
+                                              f'{track.upper()}_SUBJECTS'))
 
     augmenter = MRSIChallengeData(
         data_dir=config['data_dir'],
         signal=config['signal'],
         source=config['source'],
-        n_train=config['n_train'],
-        n_val=config['n_val'],
+        splits=splits,
         batch_size=config['batch_size'],
         seed=config['seed'],
         with_aux=True,
@@ -144,7 +150,7 @@ def run_pipeline(config):
     print("║  Step 3: One batch from every split                              ║")
     print("╚══════════════════════════════════════════════════════════════════╝")
     batches = {}
-    for split in ('train', 'val', 'test_track1', 'test_track2'):
+    for split in augmenter.splits:
         t0 = time.time()
         batch, _ = next(augmenter.dataloader(split=split))
         batches[split] = batch
@@ -225,13 +231,14 @@ def render_figures(augmenter, module, batches, config, save_dir):
     # The two held-out test sets, both unaugmented. On signal='clean' both are
     # metabolite-only, so this shows the subjects rather than the nuisance
     # difference the tracks are named for — load signal='composite' to see that.
-    t1_spec = module.to_spectrum(batches['test_track1'][0].numpy())
-    t2_spec = module.to_spectrum(batches['test_track2'][0].numpy())
-    figures['track1 vs track2'] = plot_mrsi_voxel_spectra(
-        [t1_spec, t2_spec], ppm, voxel,
-        labels=['track 1', 'track 2'], ppm_lim=ppm_lim, normalize=True,
-        title=f"voxel {voxel} — track-1 vs track-2 test subject",
-        save_path=save_dir, name='track1_vs_track2')
+    if 'test_track1' in batches and 'test_track2' in batches:
+        t1_spec = module.to_spectrum(batches['test_track1'][0].numpy())
+        t2_spec = module.to_spectrum(batches['test_track2'][0].numpy())
+        figures['track1 vs track2'] = plot_mrsi_voxel_spectra(
+            [t1_spec, t2_spec], ppm, voxel,
+            labels=['track 1', 'track 2'], ppm_lim=ppm_lim, normalize=True,
+            title=f"voxel {voxel} — track-1 vs track-2 test subject",
+            save_path=save_dir, name='track1_vs_track2')
 
     return figures
 
@@ -325,16 +332,22 @@ examples:
   python scripts/mrsi_challenge.py --ksp-mode gridded --trajectory spiral_2d
 
   # also run the short training loop
-  python scripts/mrsi_challenge.py --train
+  python scripts/mrsi_challenge.py --demo
         """)
     d = DEFAULT_CONFIG
     parser.add_argument('--data-dir', default=d['data_dir'], help='release root')
     parser.add_argument('--signal', default=d['signal'],
-                        choices=sorted(MRSIChallengeDataModule.SIGNALS),
-                        help="component to load (default: clean = metabolites only)")
+                        help="what to load: a preset "
+                             f"({', '.join(MRSIChallengeDataModule.PRESETS)}) or an "
+                             f"expression over {', '.join(MRSIChallengeDataModule.COMPONENTS)}, "
+                             "e.g. meta+mm (default: clean = metabolites only)")
     parser.add_argument('--source', default=d['source'], choices=['mat', 'nifti', 'auto'])
-    parser.add_argument('--n-train', type=int, default=d['n_train'])
-    parser.add_argument('--n-val', type=int, default=d['n_val'])
+    parser.add_argument('--train', type=int, default=d['train'],
+                        help='contest subjects for training')
+    parser.add_argument('--val', type=int, default=d['val'],
+                        help='contest subjects for validation')
+    parser.add_argument('--test', nargs='*', choices=['track1', 'track2'],
+                        default=list(d['test']), help="test sets to load (none: --test)")
     parser.add_argument('--batch-size', type=int, default=d['batch_size'])
     parser.add_argument('--seed', type=int, default=d['seed'])
     parser.add_argument('--acceleration', type=float, nargs='+', default=None,
@@ -351,7 +364,7 @@ examples:
     parser.add_argument('--baseline', action='store_true',
                         help='add the spectral baseline augmentation; it is per-voxel '
                              'and costs ~400s per volume against ~25s for the rest')
-    parser.add_argument('--train', action='store_true',
+    parser.add_argument('--demo', action='store_true',
                         help='also run a short PyTorch training loop')
     return parser.parse_args()
 
@@ -364,8 +377,9 @@ if __name__ == '__main__':
         'data_dir':   args.data_dir,
         'signal':     args.signal,
         'source':     args.source,
-        'n_train':    args.n_train,
-        'n_val':      args.n_val,
+        'train':      args.train,
+        'val':        args.val,
+        'test':       tuple(args.test),
         'batch_size': args.batch_size,
         'seed':       args.seed,
         'sigma':      args.sigma,
@@ -381,5 +395,5 @@ if __name__ == '__main__':
 
     augmenter, figures = run_pipeline(config)
 
-    if args.train:
+    if args.demo:
         run_training_demo(augmenter)
