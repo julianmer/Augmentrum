@@ -19,8 +19,6 @@ import numpy as np
 
 from datetime import datetime
 
-from fsl_mrs.core.nifti_mrs import NIFTI_MRS
-from fsl_mrs.utils.preproc.nifti_mrs_proc import DimensionsDoNotMatch
 
 from scipy import integrate
 
@@ -94,6 +92,7 @@ def safe_squeeze(mrs_obj, dims=None):
                    or list/tuple of dim tags (e.g. 'DIM_COIL') or indices (4,5,6)
     @returns -- new NIFTI_MRS
     """
+    from fsl_mrs.core.nifti_mrs import NIFTI_MRS
     # get the user facing data (note NIFTI_MRS.__getitem__ applies conjugation)
     data = mrs_obj[:]
 
@@ -157,6 +156,7 @@ def nifti_ecc_smoothed(data, reference, report=None):
 
     @returns -- The corrected MRS data.
     """
+    from fsl_mrs.utils.preproc.nifti_mrs_proc import DimensionsDoNotMatch
     from suspect.processing.denoising import sliding_gaussian
 
     if data.shape != reference.shape \
@@ -313,6 +313,7 @@ def nifti_coil_combination_adaptive(data, reference=None, report=None):
 
     @returns -- The combined MRS data.
     """
+    from fsl_mrs.utils.preproc.nifti_mrs_proc import DimensionsDoNotMatch
     if (reference is not None and data.shape[data.dim_position('DIM_COIL')] !=
             reference.shape[data.dim_position('DIM_COIL')]):
         raise DimensionsDoNotMatch('Reference and data coil dimension does not match.')

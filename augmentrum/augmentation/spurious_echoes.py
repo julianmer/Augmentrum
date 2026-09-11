@@ -40,6 +40,7 @@ class SpuriousEchoes(BaseModule):
     of the FID signal at specified time delays.
 
     Supports two modes:
+
     - 'replica': Simple multiplicative echo — multiplies FID by a decaying
       envelope after a delay (classic replica model).
     - 'hybrid': Physically shifts the FID in time, then shapes with a

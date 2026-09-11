@@ -127,6 +127,7 @@ class TransientSynthesizer(BaseModule):
         self.broaden_hz = broaden_hz
         self.events_per_min = events_per_min
         self.seed = seed
+        self.last_tracks_ = ()
 
     #*****************#
     #   scan draws    #
@@ -167,10 +168,15 @@ class TransientSynthesizer(BaseModule):
             'events_per_min': self._level(self.events_per_min, rng, None),
         }
 
-    def _transient_tracks(self, rng):
+    def tracks(self, rng):
         """
-        The four per-transient tracks: frequency (Hz), phase (rad),
-        amplitude (fraction), extra broadening (Hz FWHM).
+        One scan's four per-transient tracks: frequency (Hz), phase (rad),
+        amplitude (fraction), extra broadening (Hz FWHM), each of length
+        n_transients. Public so a simulator can record the realized tracks
+        as ground truth; process_tensor keeps its own draws in "last_tracks_".
+
+        Args:
+            rng: A numpy Generator, e.g. "self.rng.numpy_rng()".
         """
         n = self.n_transients
         p = self._scan_parameters(rng)
@@ -217,12 +223,13 @@ class TransientSynthesizer(BaseModule):
     #*****************#
     #   synthesis     #
     #*****************#
-    def _train_factor(self, n_pts: int, sw_hz: float, rng) -> np.ndarray:
+    def _train_factor(self, n_pts: int, sw_hz: float, tracks) -> np.ndarray:
         """
         The complex "(n_pts, n_transients)" factor that turns one FID into a
-        train: "a_n * exp(-pi * L_n * t) * exp(i * (2 pi f_n t + phi_n))".
+        train: "a_n * exp(-pi * L_n * t) * exp(i * (2 pi f_n t + phi_n))",
+        from one scan's "tracks".
         """
-        freq, phase, amp, broaden = self._transient_tracks(rng)
+        freq, phase, amp, broaden = tracks
         t = (np.arange(n_pts, dtype=np.float64) / float(sw_hz))[:, None]
 
         return (amp[None, :]
@@ -259,9 +266,11 @@ class TransientSynthesizer(BaseModule):
         n_batch = int(data_array.shape[0])
         rng = self.rng.numpy_rng()
 
-        # One scan realization per batch element: (batch, 1, ..., 1, T, N).
-        factor = np.stack([self._train_factor(n_pts, sw_hz, rng)
-                           for _ in range(n_batch)])
+        # One scan realization per batch element: (batch, 1, ..., 1, T, N); the
+        # realized tracks stay available as last_tracks_ (one tuple per element).
+        tracks = [self.tracks(rng) for _ in range(n_batch)]
+        self.last_tracks_ = tuple(tracks)
+        factor = np.stack([self._train_factor(n_pts, sw_hz, t) for t in tracks])
         factor = factor.reshape((n_batch,) + (1,) * (data_array.ndim - 2)
                                 + factor.shape[1:])
 

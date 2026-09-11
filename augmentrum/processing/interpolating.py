@@ -22,11 +22,14 @@ from __future__ import annotations           # so torch annotations never evalua
 
 import math
 from abc import ABC, abstractmethod
-from typing import Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Optional, Sequence, Tuple
 
 import numpy as np
 
 from nifti_mrs_plus import ops, resample
+
+if TYPE_CHECKING:
+    import torch
 
 
 __all__ = ['Interpolator', 'LinearInterpolator', 'GriddingKernel', 'KaiserBesselInterpolator',

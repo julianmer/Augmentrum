@@ -164,6 +164,7 @@ class Supplied(MMSource):
     A user-provided MM spectrum: array + ppm axis, or a file on disk.
 
     Accepted forms:
+
     - "spectrum" + "ppm": a complex spectrum on its own ppm axis.
     - "path" to a ".npy" holding "[ppm, real, imag]" rows or a complex spectrum
       (then "ppm" must be given), or to a MATLAB ".mat" with an "exptDat"

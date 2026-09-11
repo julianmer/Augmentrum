@@ -16,9 +16,10 @@
 #*************#
 #   imports   #
 #*************#
+from __future__ import annotations
+
 from typing import List, Optional, Union, Tuple
 import numpy as np
-from fsl_mrs.core import NIFTI_MRS
 
 from augmentrum.core.base_module import BaseModule
 from nifti_mrs_plus import Backend
