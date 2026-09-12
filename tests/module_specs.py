@@ -159,6 +159,12 @@ SPECS: List[ModuleSpec] = [
                 "include_trajectory_error": False},
                volume=True, identity=True),
 
+    # No template/bank supplied in the generic sweep fixture, so this exercises
+    # the identity path only - its own suite in
+    # tests/augmentation/test_histogram_contrast_mapping.py builds real
+    # templates and covers the actual quantile-mapping behavior.
+    ModuleSpec("HistogramContrastMapping", None, {}, volume=True, identity=True),
+
     ModuleSpec("FrequencyShift", None, {"shift_hz": 5.0}),
 
     ModuleSpec("Noise[sigma]", None, {"sigma": 0.01}),

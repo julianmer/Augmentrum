@@ -57,6 +57,7 @@ from augmentrum.augmentation.zero_fill import ZeroFill
 from augmentrum.augmentation.field_inhomogeneity import FieldInhomogeneity
 from augmentrum.augmentation.girf_artifacts import GIRFArtifacts
 from augmentrum.augmentation.gnl_encoding_model import GNLEncodingModel
+from augmentrum.augmentation.histogram_contrast_mapping import HistogramContrastMapping
 from augmentrum.processing.edit_combination import EditCombiner
 
 
@@ -228,6 +229,8 @@ class Augmentrum:
         'girf': GIRFArtifacts,
         'gnl_encoding_model': GNLEncodingModel,
         'gnl': GNLEncodingModel,
+        'histogram_contrast_mapping': HistogramContrastMapping,
+        'contrast_mapping': HistogramContrastMapping,
 
         # Pipeline control
         'tap': Tap,

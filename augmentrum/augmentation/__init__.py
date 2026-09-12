@@ -31,6 +31,7 @@ from augmentrum.augmentation.zero_fill import ZeroFill
 from augmentrum.augmentation.field_inhomogeneity import FieldInhomogeneity
 from augmentrum.augmentation.girf_artifacts import GIRFArtifacts
 from augmentrum.augmentation.gnl_encoding_model import GNLEncodingModel
+from augmentrum.augmentation.histogram_contrast_mapping import ContrastTemplate, HistogramContrastMapping
 from augmentrum.augmentation.macromolecules import (
     Macromolecules, MMSource, Parametrized, SemiParametrized, Measured, Supplied,
 )
@@ -59,4 +60,6 @@ __all__ = [
     'FieldInhomogeneity',
     'GIRFArtifacts',
     'GNLEncodingModel',
+    'ContrastTemplate',
+    'HistogramContrastMapping',
 ]
