@@ -56,6 +56,7 @@ from augmentrum.augmentation.transient_synthesis import TransientSynthesizer
 from augmentrum.augmentation.zero_fill import ZeroFill
 from augmentrum.augmentation.field_inhomogeneity import FieldInhomogeneity
 from augmentrum.augmentation.girf_artifacts import GIRFArtifacts
+from augmentrum.augmentation.gnl_encoding_model import GNLEncodingModel
 from augmentrum.processing.edit_combination import EditCombiner
 
 
@@ -225,6 +226,8 @@ class Augmentrum:
         'b1_b0': FieldInhomogeneity,
         'girf_artifacts': GIRFArtifacts,
         'girf': GIRFArtifacts,
+        'gnl_encoding_model': GNLEncodingModel,
+        'gnl': GNLEncodingModel,
 
         # Pipeline control
         'tap': Tap,

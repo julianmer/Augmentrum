@@ -30,6 +30,7 @@ from augmentrum.augmentation.transient_synthesis import TransientSynthesizer
 from augmentrum.augmentation.zero_fill import ZeroFill
 from augmentrum.augmentation.field_inhomogeneity import FieldInhomogeneity
 from augmentrum.augmentation.girf_artifacts import GIRFArtifacts
+from augmentrum.augmentation.gnl_encoding_model import GNLEncodingModel
 from augmentrum.augmentation.macromolecules import (
     Macromolecules, MMSource, Parametrized, SemiParametrized, Measured, Supplied,
 )
@@ -57,4 +58,5 @@ __all__ = [
     'ZeroFill',
     'FieldInhomogeneity',
     'GIRFArtifacts',
+    'GNLEncodingModel',
 ]

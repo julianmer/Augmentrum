@@ -149,6 +149,16 @@ SPECS: List[ModuleSpec] = [
                 "include_girf_phase": False, "include_concomitant": False},
                volume=True, identity=True),
 
+    # No real .seq file / GNL model in the generic sweep fixture and every
+    # term disabled, so this exercises the identity path only - its own
+    # suite in tests/augmentation/test_gnl_encoding_model.py builds a real
+    # tiny .seq file and covers the actual physics.
+    ModuleSpec("GNLEncodingModel", None,
+               {"seq_file": "unused.seq", "include_gnl": False,
+                "include_girf_phase": False, "include_concomitant": False,
+                "include_trajectory_error": False},
+               volume=True, identity=True),
+
     ModuleSpec("FrequencyShift", None, {"shift_hz": 5.0}),
 
     ModuleSpec("Noise[sigma]", None, {"sigma": 0.01}),
