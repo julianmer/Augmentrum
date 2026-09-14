@@ -19,7 +19,6 @@ from typing import Optional, List
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
-from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 from nifti_mrs_plus.ops import match_backend
 
 
@@ -118,6 +117,7 @@ class Apodization(BaseModule):
         Returns:
             Tuple of (processed_data_list, processed_water_list)
         """
+        from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
         processed_data = []
 
         for nifti in data_list:

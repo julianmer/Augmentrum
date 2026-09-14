@@ -78,8 +78,8 @@ class Augmentrum:
     - On-the-fly (random) or fixed (exact) augmentation parameters
     - Multi-backend support (PyTorch, NumPy, TensorFlow, JAX)
 
-    Example 1: On-the-fly augmentation with RANGE sampling
-        "`python
+    Example 1: On-the-fly augmentation with RANGE sampling::
+
         augmenter = Augmentrum(
             data=nifti_list,
             water=water_list,
@@ -98,10 +98,9 @@ class Augmentrum:
         # Each batch will have DIFFERENT random augmentations!
         for batch_data, batch_water in augmenter.dataloader(framework='numpy'):
             train_model(batch_data)
-        "`
 
-    Example 2: Fixed augmentation (exact values)
-        "`python
+    Example 2: Fixed augmentation (exact values)::
+
         augmenter = Augmentrum(
             data=nifti_list,
             water=water_list,
@@ -117,10 +116,9 @@ class Augmentrum:
         # Each batch will have IDENTICAL augmentations
         for batch_data, batch_water in augmenter.dataloader():
             validate_model(batch_data)
-        "`
 
-    Example 3: Gaussian distribution sampling
-        "`python
+    Example 3: Gaussian distribution sampling::
+
         augmenter = Augmentrum(
             data=nifti_list,
             pipeline=['noise', 'line_broadening'],
@@ -131,10 +129,9 @@ class Augmentrum:
         )
         # Samples will be more concentrated around 0.03 (midpoint) for sigma_frac
         # and around 5.0 (midpoint) for lb_hz, with tails at the extremes
-        "`
 
-    Example 3: With train/val/test splitting
-        "`python
+    Example 3: With train/val/test splitting::
+
         augmenter = Augmentrum(
             data=nifti_list,
             water=water_list,
@@ -159,7 +156,6 @@ class Augmentrum:
 
         train_dl = augmenter.train_dataloader()
         val_dl = augmenter.val_dataloader()
-        "`
     """
 
     # Available augmentation modules

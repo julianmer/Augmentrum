@@ -151,6 +151,7 @@ class KspaceGeometry:
               - "pixdim" : array-like, pixdim[1..3] → voxel size [vx, vy, vz] in mm
               - "SpectrometerFrequency" : list[float] → center frequency in Hz
               - "DwellTime"             : float → ADC dwell time in seconds
+
               Fallback keys also accepted: "matrix", "voxel_size_mm",
               "fov_mm", "dwell_time".
 
@@ -385,7 +386,8 @@ class Trajectory(ABC):
         coords : array, shape (N_total_samples, Ndims)
             Continuous coordinate array in cycles/m.
         segmentation : dict
-            Must contain one of:
+            Must contain one of::
+
               'n_shots' : int  — equal-length split into n_shots chunks.
               'shot_lengths' : list[int] — variable lengths per shot.
               'shot_boundaries' : list[int] — start indices for each shot

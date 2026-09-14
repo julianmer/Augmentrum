@@ -18,7 +18,6 @@
 #*************#
 import numpy as np
 
-from fsl_mrs.utils.preproc import nifti_mrs_proc as proc
 
 from nifti_mrs_plus import ops
 
@@ -184,6 +183,7 @@ class RawProcessor(BaseModule):
         Returns:
             Processed metabolite and water MRS data (NiftiMRS objects).
         """
+        from fsl_mrs.utils.preproc import nifti_mrs_proc as proc
         if self.conj: # conjugate if needed
             data_met = proc.conjugate(data_met)
             data_wat = proc.conjugate(data_wat) if data_wat is not None else None
@@ -244,6 +244,7 @@ class RawProcessor(BaseModule):
         Returns:
             Coil combined metabolite and water MRS data (NiftiMRS objects).
         """
+        from fsl_mrs.utils.preproc import nifti_mrs_proc as proc
         if 'DIM_COIL' in getattr(data_met, 'dim_tags', []) and data_met.shape[data_met.dim_position('DIM_COIL')] > 1:
             if method == 'fsl-mrs':
                 if data_wat is not None and 'DIM_DYN' in getattr(data_wat, 'dim_tags', []):
@@ -319,6 +320,7 @@ class RawProcessor(BaseModule):
         Returns:
             Registered metabolite and water MRS data (NiftiMRS objects).
         """
+        from fsl_mrs.utils.preproc import nifti_mrs_proc as proc
         if method == 'fsl-mrs':
             if 'DIM_DYN' in getattr(data_met, 'dim_tags', []) and data_met.shape[data_met.dim_position('DIM_DYN')] > 1:
                 # squeeze coil dim if still present
@@ -346,6 +348,7 @@ class RawProcessor(BaseModule):
         Returns:
             MRS data with outliers removed (NiftiMRS objects).
         """
+        from fsl_mrs.utils.preproc import nifti_mrs_proc as proc
         if 'DIM_DYN' in getattr(data_met, 'dim_tags', []) and data_met.shape[data_met.dim_position('DIM_DYN')] > 1:
             if method == 'fsl-mrs':
                 data_met, _ = proc.remove_unlike(data_met, report=report)  # remove outlier averages
@@ -366,6 +369,7 @@ class RawProcessor(BaseModule):
         Returns:
             Averaged metabolite and water MRS data (NiftiMRS objects).
         """
+        from fsl_mrs.utils.preproc import nifti_mrs_proc as proc
         if 'DIM_DYN' in getattr(data_met, 'dim_tags', []):
             if data_met.shape[data_met.dim_position('DIM_DYN')] > 1:
                 data_met = proc.average(data_met, 'DIM_DYN', report=report)  # combine averages
@@ -387,6 +391,7 @@ class RawProcessor(BaseModule):
         Returns:
             None. The metabolite data is modified in place.
         """
+        from fsl_mrs.utils.preproc import nifti_mrs_proc as proc
         if self.ecc_method == 'fsl-mrs':
             data_met = proc.ecc(data_met, data_wat if data_wat is not None else data_met,
                                 report=report)  # eddy current correction
@@ -412,6 +417,7 @@ class RawProcessor(BaseModule):
         Returns:
             MRS data with water peak removed (NiftiMRS object).
         """
+        from fsl_mrs.utils.preproc import nifti_mrs_proc as proc
         if method == 'fsl-mrs':
             data_met = proc.remove_peaks(data_met, [-0.15, 0.15], limit_units='ppm',
                                          report=report)  # remove residual water
@@ -432,6 +438,7 @@ class RawProcessor(BaseModule):
         Returns:
             Frequency shifted metabolite MRS data (NiftiMRS object).
         """
+        from fsl_mrs.utils.preproc import nifti_mrs_proc as proc
         if method == 'fsl-mrs':
             data_met = proc.shift_to_reference(data_met, 3.027, (2.9, 3.1), report=report)  # shift to ref
         else:
@@ -451,6 +458,7 @@ class RawProcessor(BaseModule):
         Returns:
             Phase corrected metabolite and water MRS data (NiftiMRS objects).
         """
+        from fsl_mrs.utils.preproc import nifti_mrs_proc as proc
         if method == 'fsl-mrs':
             data_met = proc.phase_correct(data_met, (2.9, 3.1), report=report)  # phase corretion
             data_wat = proc.phase_correct(data_wat, (4.55, 4.7), hlsvd=False) if data_wat is not None else None

@@ -303,11 +303,15 @@ def build_data(args):
     outputs = {'train': ('data', 'clean'), 'val': ('data', 'clean'),
                'test_track1': None, 'test_track2': None}
 
+    splits = {'train': args.train, 'val': args.val}
+    for track in args.test:
+        splits[f'test_{track}'] = len(getattr(MRSIChallengeDataModule,
+                                              f'{track.upper()}_SUBJECTS'))
+
     return MRSIChallengeData(
         args.data_dir,
         signal='clean',
-        n_train=args.n_train,
-        n_val=args.n_val,
+        splits=splits,
         batch_size=1,                      # one volume per pull; batching is over timepoints
         pipelines=pipelines,
         outputs=outputs,
@@ -594,7 +598,7 @@ def train(args):
         print("Dry run OK — data, model, loss and gradients are wired.")
         return
 
-    run_name = f"{args.arm}_{args.trajectory}_n{args.n_train or 'all'}"
+    run_name = f"{args.arm}_{args.trajectory}_n{args.train}"
     out_dir = Path(args.out_dir) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -661,7 +665,8 @@ def train(args):
 def main():
     parser = argparse.ArgumentParser(
         description="Train a Deep-ER-style network on MRSI Challenge data with Augmentrum.")
-    parser.add_argument('--data-dir', default='data/MRSI_Challenge')
+    parser.add_argument('--data-dir', default='data/mrsi_challenge',
+                        help="Release root; missing subjects are fetched from Zenodo.")
     parser.add_argument('--out-dir', default='results/deep_er')
     parser.add_argument('--arm', choices=['none', 'native', 'augmentrum'],
                         default='augmentrum')
@@ -669,9 +674,12 @@ def main():
                         default='eccentric-stack')
     parser.add_argument('--ksp-mode', choices=['nufft', 'gridded'], default='nufft',
                         help="Faithful NUFFT round trip, or cheaper gridded rasterization.")
-    parser.add_argument('--n-train', type=int, default=None,
-                        help="Contest subjects for train+val — the ablation axis.")
-    parser.add_argument('--n-val', type=int, default=5)
+    parser.add_argument('--train', type=int, default=19,
+                        help="Contest subjects for training — the ablation axis.")
+    parser.add_argument('--val', type=int, default=5)
+    parser.add_argument('--test', nargs='*', choices=['track1', 'track2'],
+                        default=['track1', 'track2'],
+                        help="Test sets to load; pass --test alone for none.")
     parser.add_argument('--n-coils', type=int, default=32)
     parser.add_argument('--n-layers', type=int, default=10,
                         help="Interlacer layers (paper: 10).")

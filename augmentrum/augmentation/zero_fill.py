@@ -21,7 +21,6 @@ from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend
 from nifti_mrs_plus.ops import is_torch, is_jax, is_tf
-from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 
 
 #**************************************************************************************************#
@@ -74,6 +73,7 @@ class ZeroFill(BaseModule):
 
     def process_nifti_list(self, data_list: List, water_list: Optional[List] = None, **kwargs):
         """Apply zero-fill to each NIFTI_MRS object in the list."""
+        from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
         processed_data = []
         for nifti in data_list:
             fid = nifti[:]

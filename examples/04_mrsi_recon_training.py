@@ -9,7 +9,7 @@
 # Purpose: Compact MRSI reconstruction training demo: a pipeline with a supervised tap turns       #
 #          clean volumes into (undersampled input, clean target) pairs, and a toy network          #
 #          takes a few gradient steps. Uses the real MRSI Challenge data when it is present        #
-#          under data/MRSI_Challenge, and falls back to synthetic volumes otherwise.               #
+#          under data/mrsi_challenge, and falls back to synthetic volumes otherwise.               #
 #                                                                                                  #
 # The real thing lives in scripts/train_deep_er.py: a Deep-ER-style joint-domain network           #
 # (Weiser et al., NeuroImage 2025) with 32 synthesized coils and faithful ECCENTRIC sampling.      #
@@ -26,10 +26,13 @@ import torch
 import torch.nn as nn
 
 from augmentrum import Augmentrum
+from augmentrum.dataset.mrsi_challenge import MRSIChallengeData, MRSIChallengeDataModule
 
-# The challenge release is headed for Zenodo; once the record is live, this
-# example will fetch it automatically through augmentrum.utils.download.
-DATA_DIR = Path(__file__).resolve().parents[1] / 'data' / 'MRSI_Challenge'
+# The release lives on Zenodo, one 4.4 GB zip per subject. This example uses
+# it when the subjects it needs are already on disk and otherwise builds
+# synthetic volumes, so that running an example never starts a download.
+DATA_DIR = Path(__file__).resolve().parents[1] / 'data' / 'mrsi_challenge'
+SPLITS = {'train': 6, 'val': 1}
 
 
 #******************#
@@ -43,25 +46,24 @@ DATA_DIR = Path(__file__).resolve().parents[1] / 'data' / 'MRSI_Challenge'
 PIPELINE = ['spatial', 'tap:clean', 'undersampling', 'noise']
 RANGES = dict(acceleration_factor=(2.0, 4.0), sigma=(0.5e-3, 1.5e-3))
 
-if DATA_DIR.exists():
-    print(f"Loading the MRSI Challenge from {DATA_DIR} ...")
-    from augmentrum.dataset.mrsi_challenge import MRSIChallengeData
+module = MRSIChallengeDataModule(DATA_DIR, download=False)
+subjects = [s for members in module.resolve(SPLITS).values() for s in members]
 
+if all(map(module.available, subjects)):
+    print(f"Loading the MRSI Challenge from {DATA_DIR} ...")
     aug = MRSIChallengeData(
-        str(DATA_DIR),
+        DATA_DIR,
         signal='clean',                     # metabolites only — Augmentrum adds the rest
-        n_train=6,
-        n_val=1,
-        pipelines={'train': PIPELINE, 'val': [],
-                   'test_track1': [], 'test_track2': []},
-        outputs={'train': ('data', 'clean'), 'val': None,
-                 'test_track1': None, 'test_track2': None},
+        splits=SPLITS,
+        pipelines={'train': PIPELINE, 'val': []},
+        outputs={'train': ('data', 'clean'), 'val': None},
         batch_size=1,
         **RANGES,
     )
 else:
     print("MRSI Challenge data not found — building synthetic volumes instead.")
-    print("(The release is headed for Zenodo; automatic download lands with it.)\n")
+    print(f"To use the real thing, fetch {len(subjects)} subjects once with\n"
+          f"  MRSIChallengeDataModule.fetch({subjects}, {str(DATA_DIR)!r})\n")
     from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
 
     rng = np.random.default_rng(0)
