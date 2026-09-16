@@ -24,7 +24,7 @@ Here the *discovery* is automatic and only the per-variant detail is written by
 hand. "uncovered_classes" is what closes the gap: a class in the registry
 with no spec is a test failure, not silence.
 
-A module may need several specs — "Noise" has three ways of stating a
+A module may need several specs — "Noise" has four ways of stating a
 noise level, "BaselineAugmentation" three baseline models — so specs are a flat
 list of variants, not one per class.
 """
@@ -138,6 +138,7 @@ SPECS: List[ModuleSpec] = [
     ModuleSpec("FrequencyShift", None, {"shift_hz": 5.0}),
 
     ModuleSpec("Noise[sigma]", None, {"sigma": 0.01}),
+    ModuleSpec("Noise[snr]", None, {"snr": 20.0}),
     ModuleSpec("Noise[snr_db]", None, {"snr_db": 20.0}),
     ModuleSpec("Noise[sigma_frac]", None, {"sigma_frac": 0.02}),
 

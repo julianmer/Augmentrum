@@ -336,3 +336,88 @@ class TestGaussianNoiseIntegration:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+#**************************************************************************************************#
+#                                  Class TestGaussianNoiseLevel                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test that the level parameters mean what they say, on the list path.                             #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestGaussianNoiseLevel:
+    """Test that the level parameters mean what they say, on the list path."""
+
+    @staticmethod
+    def _clean_nifti(n=4096, sw=4000.0):
+        """A noise-free Lorentzian, so what is added is all there is to measure."""
+        from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+        t = np.arange(n) / sw
+        fid = np.exp(-t / 0.05) * np.exp(2j * np.pi * -300.0 * t)
+        return gen_nifti_mrs(fid.astype(np.complex64).reshape(1, 1, 1, n), 1 / sw, 123.2)
+
+    @staticmethod
+    def _spectrum(fid):
+        return np.fft.fftshift(np.fft.fft(fid, axis=-1, norm='ortho'), axes=-1)
+
+    def test_create_with_snr(self):
+        """Test creating with the peak-SNR parameter."""
+        noise = Noise(snr=20.0)
+        assert noise.snr == 20.0
+        assert noise.snr_db is None and noise.sigma is None and noise.sigma_frac is None
+
+    def test_global_scale_is_automatic_by_default(self):
+        """Per trace on a single spectrum, per batch element on anything larger."""
+        assert Noise(snr=20.0).global_scale is None
+
+    def test_snr_is_relative_to_the_spectrum_peak(self):
+        """Peak height over the real-part noise SD, as MRS reports it."""
+        nifti = self._clean_nifti()
+        clean = nifti[:].copy()
+        nifti_plus = NIfTI_MRS_Plus(nifti_list=[nifti], backend=Backend.NIFTI_LIST)
+
+        result, _ = Noise(snr=20.0, seed=0)(nifti_plus, None)
+
+        peak = np.abs(self._spectrum(clean)).max()
+        added = self._spectrum(result[0][:] - clean).real
+        assert np.isclose(peak / added.std(), 20.0, rtol=0.05)
+
+    def test_sigma_frac_is_a_fraction_of_the_spectrum_peak(self):
+        """sigma_frac=0.05 adds noise whose SD is 5 % of the peak."""
+        nifti = self._clean_nifti()
+        clean = nifti[:].copy()
+        nifti_plus = NIfTI_MRS_Plus(nifti_list=[nifti], backend=Backend.NIFTI_LIST)
+
+        result, _ = Noise(sigma_frac=0.05, seed=0)(nifti_plus, None)
+
+        peak = np.abs(self._spectrum(clean)).max()
+        added = self._spectrum(result[0][:] - clean).real
+        assert np.isclose(added.std() / peak, 0.05, rtol=0.05)
+
+    def test_sigma_is_the_time_domain_sd(self):
+        """sigma is absolute: the per-channel SD of the noise on the FID."""
+        nifti = self._clean_nifti()
+        clean = nifti[:].copy()
+        nifti_plus = NIfTI_MRS_Plus(nifti_list=[nifti], backend=Backend.NIFTI_LIST)
+
+        result, _ = Noise(sigma=0.02, seed=0)(nifti_plus, None)
+
+        added = result[0][:] - clean
+        assert np.isclose(added.real.std(), 0.02, rtol=0.05)
+        assert np.isclose(added.imag.std(), 0.02, rtol=0.05)
+
+    def test_per_sample_levels_are_read_per_subject(self):
+        """A per-sample vector gives each subject its own level."""
+        niftis = [self._clean_nifti(), self._clean_nifti()]
+        clean = niftis[0][:].copy()
+        nifti_plus = NIfTI_MRS_Plus(nifti_list=niftis, backend=Backend.NIFTI_LIST)
+
+        noise = Noise(snr=20.0, seed=0)
+        noise.snr = np.array([20.0, 5.0])
+        result, _ = noise(nifti_plus, None)
+
+        peak = np.abs(self._spectrum(clean)).max()
+        loud = self._spectrum(result[0][:] - clean).real.std()
+        louder = self._spectrum(result[1][:] - clean).real.std()
+        assert np.isclose(peak / loud, 20.0, rtol=0.05)
+        assert np.isclose(peak / louder, 5.0, rtol=0.05)

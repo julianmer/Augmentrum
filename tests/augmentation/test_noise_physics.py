@@ -260,3 +260,300 @@ def test_a_spectrum_with_no_extent_is_left_alone():
                      seed=0).process_tensor(signal)
 
     assert np.asarray(noisy).shape == signal.shape
+
+
+#*****************#
+#   the level     #
+#*****************#
+# A level is defined in the unitary spectrum: sigma is the per-channel SD of the
+# time-domain noise, snr the spectrum peak over that SD, sigma_frac its inverse.
+# None of them may depend on where in the pipeline the module sits, or on
+# whether it meets the data per coil, per voxel or combined.
+
+def _lorentzian(n=4096, sw=4000.0, batch=4, amp=1.0):
+    """A clean FID, so everything added to it is the noise under test."""
+    t = np.arange(n) / sw
+    fid = amp * np.exp(-t / 0.05) * np.exp(2j * np.pi * -300.0 * t)
+    return np.tile(fid.astype(np.complex64), (batch, 1, 1, 1, 1))
+
+
+def _spectrum(fid):
+    """The unitary spectrum the level is defined in."""
+    return np.fft.fftshift(np.fft.fft(fid, axis=-1, norm='ortho'), axes=-1)
+
+
+def _to_frequency(fid):
+    """What a DomainTransform hands a module placed in the frequency domain."""
+    return np.fft.fftshift(np.fft.ifft(fid, axis=-1), axes=-1)
+
+
+def _to_time(spec):
+    return np.fft.fft(np.fft.ifftshift(spec, axes=-1), axis=-1)
+
+
+def test_snr_is_the_spectrum_peak_over_the_noise_sd():
+    """
+    The definition, on a clean signal.
+
+    Peak height over the real-part noise SD is how MRS reports SNR, and it is
+    what index files and QC tables hold - so it is what the parameter must
+    mean, or a training set labelled "SNR 20" is not.
+    """
+    signal = _lorentzian()
+    noisy, _ = Noise(snr=10.0, seed=0).process_tensor(signal)
+
+    added = _spectrum(np.asarray(noisy) - signal).real
+    peak = np.abs(_spectrum(signal[0])).max()
+
+    assert np.isclose(peak / added.std(), 10.0, rtol=0.03)
+
+
+def test_sigma_is_the_time_domain_sd_per_channel():
+    """Absolute, and the same on the real and imaginary channel."""
+    signal = _lorentzian()
+    noisy, _ = Noise(sigma=0.3, seed=0).process_tensor(signal)
+
+    added = np.asarray(noisy) - signal
+    assert np.isclose(added.real.std(), 0.3, rtol=0.03)
+    assert np.isclose(added.imag.std(), 0.3, rtol=0.03)
+
+
+def test_sigma_frac_is_one_over_snr():
+    """Two spellings of one quantity draw the same noise."""
+    signal = _lorentzian()
+    a, _ = Noise(sigma_frac=0.1, seed=0).process_tensor(signal)
+    b, _ = Noise(snr=10.0, seed=0).process_tensor(signal)
+
+    assert np.allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6)
+
+
+def test_snr_db_is_twenty_log_ten():
+    """A peak over a SD is an amplitude ratio, so its decibels are 20 log10."""
+    signal = _lorentzian()
+    a, _ = Noise(snr_db=20.0, seed=0).process_tensor(signal)
+    b, _ = Noise(snr=10.0, seed=0).process_tensor(signal)
+
+    assert np.allclose(np.asarray(a), np.asarray(b), rtol=1e-5, atol=1e-6)
+
+
+def test_the_noise_already_there_is_not_subtracted():
+    """
+    The parameter describes what is added.
+
+    Real data always carries noise of its own, and taking it out of the
+    request would make the result depend on how well it could be measured.
+    Variances add, so the outcome is predictable instead.
+    """
+    signal = _lorentzian()
+    # Not seed 1: a SeedGenerator seeded 0 keys its first draw with exactly
+    # that, and the "existing" noise would be the module's own.
+    rng = np.random.default_rng(12345)
+    already = 0.2 * (rng.standard_normal(signal.shape) + 1j * rng.standard_normal(signal.shape))
+    noisy, _ = Noise(sigma=0.3, seed=0).process_tensor((signal + already).astype(np.complex64))
+
+    total = (np.asarray(noisy) - signal).real.std()
+    assert np.isclose(total, np.sqrt(0.2 ** 2 + 0.3 ** 2), rtol=0.03)
+
+
+#****************************#
+#   placement in a pipeline  #
+#****************************#
+@pytest.mark.parametrize("level", [dict(sigma=0.3), dict(snr=10.0),
+                                   dict(sigma_frac=0.1), dict(snr_db=20.0)])
+def test_the_level_means_the_same_in_either_domain(level):
+    """
+    The reason the module reads the spectral state.
+
+    The pipeline's spectral transform is not unitary, so the same numbers
+    added on either side of it are different noise on the FID. Every level
+    has to come out identical once the data is back in the time domain.
+    """
+    signal = _lorentzian()
+
+    in_time, _ = Noise(seed=0, **level).process_tensor(
+        signal, state=DataState(spectral='time'))
+    in_frequency, _ = Noise(seed=0, **level).process_tensor(
+        _to_frequency(signal), state=DataState(spectral='frequency'))
+
+    added_time = np.asarray(in_time) - signal
+    added_frequency = _to_time(np.asarray(in_frequency)) - signal
+
+    assert np.isclose(added_frequency.real.std(), added_time.real.std(), rtol=0.03)
+
+
+def test_a_pipeline_placement_in_the_frequency_domain_adds_the_same_noise():
+    """
+    End to end, so the state actually reaches the module.
+
+    A DomainTransform on either side is exactly what a pipeline inserts for a
+    frequency-domain neighbour; the noise module in between must not notice.
+    """
+    from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+    from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
+
+    from augmentrum.core.pipeline import AugmentationPipeline
+    from augmentrum.processing.domain import DomainTransform
+
+    signal = _lorentzian(batch=1)[0]
+    niftis = [gen_nifti_mrs(signal.copy(), 1 / 4000.0, 123.2) for _ in range(4)]
+
+    def run(steps):
+        data = NIfTI_MRS_Plus([n.copy() for n in niftis], backend=Backend.NUMPY, volatile=True)
+        out, _ = AugmentationPipeline(steps)(data, None)
+        return np.asarray(out.get_data(Backend.NUMPY)) - signal[None]
+
+    direct = run([Noise(snr=10.0, seed=0)])
+    moved = run([DomainTransform(spectral='frequency'), Noise(snr=10.0, seed=0),
+                 DomainTransform(spectral='time')])
+
+    assert np.isclose(moved.real.std(), direct.real.std(), rtol=0.03)
+    assert np.isclose(np.abs(_spectrum(signal)).max() / direct.real.std(), 10.0, rtol=0.05)
+
+
+def test_kspace_placement_references_the_image():
+    """
+    A spectrum peak is an image-domain quantity.
+
+    The spatial transform is orthonormal, so the noise level carries over to
+    k-space unchanged - but the peak of a k-space trace is a sum over voxels
+    and means nothing. Placed in k-space, the module must still add what the
+    image asked for.
+    """
+    volume = np.zeros((1, 8, 8, 1, 256), np.complex64)
+    volume[0, 2:6, 2:6, 0, :] = _lorentzian(n=256, batch=1)[0, 0, 0, 0]
+    axes = (1, 2, 3)
+    kspace = np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(volume, axes=axes), axes=axes,
+                                         norm='ortho'), axes=axes)
+
+    in_image, _ = Noise(snr=10.0, seed=0).process_tensor(
+        volume, state=DataState(spatial='image'))
+    in_kspace, _ = Noise(snr=10.0, seed=0).process_tensor(
+        kspace, state=DataState(spatial='kspace'))
+    back = np.fft.fftshift(np.fft.ifftn(np.fft.ifftshift(np.asarray(in_kspace), axes=axes),
+                                        axes=axes, norm='ortho'), axes=axes)
+
+    assert np.isclose((back - volume).real.std(), (np.asarray(in_image) - volume).real.std(),
+                      rtol=0.03)
+
+
+def test_undersampled_data_gets_one_level_from_its_image():
+    """The k-space path, with a relative level: referenced to the image, once."""
+    volume = np.zeros((1, 8, 8, 1, 256), np.complex64)
+    volume[0, 2:6, 2:6, 0, :] = _lorentzian(n=256, batch=1)[0, 0, 0, 0]
+
+    routed, _ = Noise(snr=10.0, seed=0).process_tensor(
+        volume, state=DataState(spatial='image', sampling='undersampled'))
+
+    peak = np.abs(_spectrum(volume)).max()
+    added = _spectrum(np.asarray(routed) - volume).real
+    assert np.isclose(peak / added.std(), 10.0, rtol=0.05)
+
+
+def test_a_profile_is_not_applied_in_kspace():
+    """Position means nothing in k-space, and saying so beats a silent no-op."""
+    from augmentrum.augmentation.noise import SuppliedProfile
+
+    ramp = np.linspace(0.5, 1.5, 8)[:, None, None] * np.ones((8, 8, 4))
+    signal = np.ones((1, 8, 8, 4, 64), np.complex64)
+
+    with pytest.warns(RuntimeWarning, match="k-space"):
+        Noise(profile=SuppliedProfile(ramp), sigma=0.2, seed=0).process_tensor(
+            signal, state=DataState(spatial='kspace'))
+
+
+#****************************#
+#   coils, voxels, batches   #
+#****************************#
+def test_a_coil_array_shares_one_level():
+    """
+    The noise level is a property of the receiver, not of what a coil sees.
+
+    A far element sees a weak signal at the same noise as a near one. A
+    per-coil reference would give it almost no noise, which makes the array
+    look far better than it is once combined.
+    """
+    amplitudes = np.array([1.0, 0.5, 0.1, 0.01], np.float32)
+    signal = (_lorentzian(n=1024, batch=1)[..., None] * amplitudes).astype(np.complex64)
+
+    noisy, _ = Noise(snr=10.0, seed=0).process_tensor(signal, dim_tags=COILS)
+    per_coil = (np.asarray(noisy) - signal).real.std(axis=(0, 1, 2, 3, 4))
+
+    peak = np.abs(_spectrum(signal[..., 0])).max()
+    assert np.allclose(per_coil, peak / 10.0, rtol=0.1)
+
+
+def test_per_trace_is_still_there_on_request():
+    """Explicitly per trace, each coil gets its own reference."""
+    amplitudes = np.array([1.0, 0.5, 0.1, 0.01], np.float32)
+    signal = (_lorentzian(n=1024, batch=1)[..., None] * amplitudes).astype(np.complex64)
+
+    noisy, _ = Noise(snr=10.0, seed=0, global_scale=False).process_tensor(
+        signal, dim_tags=COILS)
+    per_coil = (np.asarray(noisy) - signal).real.std(axis=(0, 1, 2, 3, 4))
+
+    assert np.allclose(per_coil / per_coil[0], amplitudes, rtol=0.1)
+
+
+def test_a_volume_gives_the_background_no_free_mask():
+    """
+    Every voxel of an MRSI grid sits in the same receiver noise.
+
+    A per-voxel reference would leave the background nearly silent, tracing
+    the anatomy and handing a network a brain mask it never had to learn.
+    """
+    volume = np.zeros((1, 4, 4, 1, 1024), np.complex64)
+    volume[0, 1:3, 1:3, 0, :] = _lorentzian(n=1024, batch=1)[0, 0, 0, 0]
+
+    noisy, _ = Noise(snr=10.0, seed=0).process_tensor(volume)
+    added = (np.asarray(noisy) - volume).real.std(axis=-1)[0, :, :, 0]
+
+    assert np.isclose(added[0, 0], added[1, 1], rtol=0.1)
+
+
+def test_each_batch_element_gets_its_own_reference():
+    """One level per subject, never one per batch: a weak subject is not drowned."""
+    signal = np.concatenate([_lorentzian(n=1024, batch=1, amp=1.0),
+                             _lorentzian(n=1024, batch=1, amp=0.1)])
+
+    noisy, _ = Noise(snr=10.0, seed=0).process_tensor(signal)
+    per_subject = (np.asarray(noisy) - signal).real.std(axis=-1).ravel()
+
+    assert np.isclose(per_subject[1] / per_subject[0], 0.1, rtol=0.1)
+
+
+def test_the_list_engine_agrees_with_the_tensor_engine():
+    """One subject is one batch element, whichever engine handles it."""
+    from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+
+    signal = _lorentzian(n=1024, batch=1)[0]
+    nifti = gen_nifti_mrs(signal.copy(), 1 / 4000.0, 123.2)
+
+    listed, _ = Noise(snr=10.0, seed=0).process_nifti_list([nifti])
+    tensored, _ = Noise(snr=10.0, seed=0).process_tensor(signal[None])
+
+    assert np.allclose(np.asarray(listed[0][:]), np.asarray(tensored)[0], rtol=1e-5, atol=1e-6)
+
+
+#**************#
+#   backends   #
+#**************#
+def test_numpy_and_torch_agree_on_the_level():
+    """
+    The level is a deterministic function of the data, on any backend.
+
+    The samples themselves come from each framework's own generator, so a
+    seed reproduces a run on a backend rather than across backends; what must
+    agree is how loud it is.
+    """
+    torch = pytest.importorskip("torch")
+    signal = _lorentzian()
+
+    with_numpy, _ = Noise(snr=10.0, seed=0).process_tensor(signal)
+    with_torch, _ = Noise(snr=10.0, seed=0).process_tensor(torch.as_tensor(signal))
+    again, _ = Noise(snr=10.0, seed=0).process_tensor(torch.as_tensor(signal))
+
+    added_numpy = (np.asarray(with_numpy) - signal).real.std()
+    added_torch = (with_torch.numpy() - signal).real.std()
+
+    assert np.isclose(added_torch, added_numpy, rtol=0.03)
+    assert torch.equal(with_torch, again)
