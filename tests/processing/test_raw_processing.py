@@ -11,6 +11,7 @@ Tests cover:
 
 import pytest
 import numpy as np
+import warnings
 from copy import deepcopy
 
 from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
@@ -32,7 +33,8 @@ class TestRawProcessorInitialization:
         """Test processor initializes with default parameters."""
         processor = RawProcessor()
 
-        assert processor.conj == True
+        # Loaders deliver standard NIfTI-MRS, so no conjugation by default.
+        assert processor.conj == False
         assert processor.coil == True
         assert processor.align == True
         assert processor.remove_outliers == True
@@ -539,7 +541,7 @@ TAGS = ['DIM_COIL', 'DIM_DYN', None]
 
 
 def _synth_subject(rng):
-    """One subject (met, wat) shaped (1, 1, 1, T, C, D), peaks upright after conj."""
+    """One subject (met, wat) shaped (1, 1, 1, T, C, D), peaks upright as stored (no conj)."""
     t = np.arange(N_T) / SW
 
     def lorentz(ppm, amp, damp):
@@ -565,20 +567,83 @@ def _synth_subject(rng):
     return met, wat
 
 
-def _synth_batch(seed=7):
-    """NIfTI objects plus their tensor-layout batches (met T-last, wat untransposed)."""
+def _synth_niftis(n_subjects=N_B, seed=7):
+    """NIfTI objects (met, wat) for *n_subjects* synthetic subjects, both (1, 1, 1, T, C, D)."""
     rng = np.random.default_rng(seed)
     mets, wats = [], []
-    for _ in range(N_B):
+    for _ in range(n_subjects):
         m, w = _synth_subject(rng)
         for arr, out in ((m, mets), (w, wats)):
             nifti = gen_nifti_mrs(arr, 1 / SW, SF)
             nifti.set_dim_tag(4, 'DIM_COIL')
             nifti.set_dim_tag(5, 'DIM_DYN')
             out.append(nifti)
+    return mets, wats
+
+
+def _synth_batch(seed=7):
+    """NIfTI objects plus their tensor-layout batches (met T-last, wat untransposed)."""
+    mets, wats = _synth_niftis(N_B, seed)
     met_t = np.moveaxis(np.stack([n[:] for n in mets]), 4, -1)      # (B, 1, 1, 1, C, D, T)
     wat_t = np.stack([n[:] for n in wats])                          # (B, 1, 1, 1, T, C, D)
     return mets, wats, met_t, wat_t
+
+
+def _water_with(nifti, n_transients, keep_dyn=False):
+    """
+    The synthetic water cut to *n_transients*, in the layout a water reference
+    actually comes in: (1, 1, 1, T, C) with DIM_COIL only for a single one (as
+    the COWS water does), otherwise with a DIM_DYN of that size — kept as a
+    singleton axis for one transient when *keep_dyn*.
+    """
+    arr = nifti[:][..., :n_transients]
+    if n_transients == 1 and not keep_dyn:
+        arr = arr[..., 0]
+    out = gen_nifti_mrs(arr, 1 / SW, SF)
+    out.set_dim_tag(4, 'DIM_COIL')
+    if arr.ndim > 5:
+        out.set_dim_tag(5, 'DIM_DYN')
+    return out
+
+
+def _few_averages(mets, wats, n_pts=200):
+    """
+    Subjects cut to one transient and *n_pts* points, so that the FID tails
+    hold fewer than the ten noise samples per coil FSL-MRS needs for its
+    covariance — the regime where prewhitening has to be dropped.
+    """
+    few_m, few_w = [], []
+    for m, w in zip(mets, wats):
+        nifti = gen_nifti_mrs(m[:][:, :, :, :n_pts, :, :1], 1 / SW, SF)
+        nifti.set_dim_tag(4, 'DIM_COIL')
+        nifti.set_dim_tag(5, 'DIM_DYN')
+        few_m.append(nifti)
+        water = gen_nifti_mrs(w[:][:, :, :, :n_pts, :, 0], 1 / SW, SF)
+        water.set_dim_tag(4, 'DIM_COIL')
+        few_w.append(water)
+    return few_m, few_w
+
+
+def _engines(mets, wats, backend=Backend.NUMPY, **kwargs):
+    """
+    Both engines through the NIfTI_MRS_Plus dispatch on the same subjects.
+
+    Returns ((ref, ref_water), (got, got_water)): the list engine's outputs
+    first, the tensor engine's on *backend* second.
+    """
+    outs = []
+    for engine in (Backend.NIFTI_LIST, backend):
+        data = NIfTI_MRS_Plus(nifti_list=[m.copy() for m in mets], backend=engine)
+        water = (NIfTI_MRS_Plus(nifti_list=[w.copy() for w in wats], backend=engine)
+                 if wats is not None else None)
+        outs.append(RawProcessor(**kwargs)(data, water))
+    return outs
+
+
+def _rel(got, ref):
+    """Max-abs difference relative to the reference's maximum."""
+    got, ref = np.asarray(got), np.asarray(ref)
+    return np.abs(got - ref).max() / np.abs(ref).max()
 
 
 ALL_OFF = dict(conj=False, coil=False, align=False, remove_outliers=False, average=False,
@@ -653,7 +718,7 @@ class TestTensorParity:
 
     def test_full_default_pipeline(self):
         """The full pipeline (Powell alignment) tracks the NIfTI path."""
-        flags = dict(conj=True, coil=True, align=True, remove_outliers=True, average=True,
+        flags = dict(conj=False, coil=True, align=True, remove_outliers=True, average=True,
                      ecc=True, truncate=False, remove_water=True, shift_ref=True,
                      phase_correct=True)
         assert _parity_error(flags) < 1e-5
@@ -663,7 +728,7 @@ class TestTensorParity:
         from augmentrum.processing.utils import fid_to_spec, ppm_window
         align_params = RawProcessor._align_params
         mets, wats, met_t, wat_t = _synth_batch()
-        pre = dict(ALL_OFF, conj=True, coil=True)
+        pre = dict(ALL_OFF, coil=True)
         ref_list, _ = RawProcessor(volatile=True, **pre).process_nifti_list(mets, wats)
         fids = np.stack([np.squeeze(n[:]).T for n in ref_list])     # (B, D, T)
 
@@ -725,6 +790,223 @@ class TestTensorWrapper:
         out = np.squeeze(np.asarray(out))                       # (B, D, T)
         assert np.abs(out[~mask]).max() == 0, "outliers must be zeroed"
         assert np.abs(out[mask]).max() > 0, "survivors must pass through"
+
+
+#**************************************************************************************************#
+#                                   Class TestWaterLayout                                          #
+#**************************************************************************************************#
+#                                                                                                  #
+# The water reference keeps its own layout: one transient next to many metabolite averages.        #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestWaterLayout:
+    """The water reference keeps its own layout: one transient next to many averages."""
+
+    WATER_TAGS = ['DIM_COIL', None, None]
+
+    @pytest.mark.parametrize('batch', [1, 4])
+    def test_single_transient_water_through_the_full_pipeline(self, batch):
+        """
+        A (1, 1, 1, T, C) water next to (1, 1, 1, T, C, D) data, as COWS
+        delivers it: the tensor engine used to index the water with the
+        data's axes — a crash in the combination, a B-by-B broadcast for a
+        batch, a silently wrong water for a batch of one.
+        """
+        mets, wats = _synth_niftis(batch)
+        wats = [_water_with(w, 1) for w in wats]
+        (ref, ref_w), (got, got_w) = _engines(mets, wats)
+
+        assert got.get_data(Backend.NUMPY).shape == (batch, 1, 1, 1, N_T)
+        assert got_w.get_data(Backend.NUMPY).shape == (batch, 1, 1, 1, N_T)
+        assert got.dim_tags == [None, None, None]
+        assert got_w.dim_tags == [None, None, None]
+        assert _rel(got.get_data(Backend.NUMPY), ref.get_data(Backend.NUMPY)) < 1e-5
+        assert _rel(got_w.get_data(Backend.NUMPY), ref_w.get_data(Backend.NUMPY)) < 1e-5
+
+    def test_two_transient_water_through_the_full_pipeline(self):
+        """A water with two transients aligns and averages along its own DIM_DYN."""
+        mets, wats = _synth_niftis(2)
+        wats = [_water_with(w, 2) for w in wats]
+        (ref, ref_w), (got, got_w) = _engines(mets, wats)
+
+        assert got_w.get_data(Backend.NUMPY).shape == (2, 1, 1, 1, N_T)
+        assert got_w.dim_tags == [None, None, None]
+        assert _rel(got.get_data(Backend.NUMPY), ref.get_data(Backend.NUMPY)) < 1e-5
+        assert _rel(got_w.get_data(Backend.NUMPY), ref_w.get_data(Backend.NUMPY)) < 1e-5
+
+    def test_no_water_through_the_full_pipeline(self):
+        """Without a reference the data combines and corrects against itself."""
+        mets, _ = _synth_niftis(2)
+        (ref, ref_w), (got, got_w) = _engines(mets, None)
+
+        assert ref_w is None and got_w is None
+        assert got.get_data(Backend.NUMPY).shape == (2, 1, 1, 1, N_T)
+        assert _rel(got.get_data(Backend.NUMPY), ref.get_data(Backend.NUMPY)) < 1e-5
+
+    def test_singleton_water_dynamic_dimension(self):
+        """
+        A one-transient water still tagged DIM_DYN: FSL-MRS align cannot
+        take a single FID, so neither engine aligns it, and both squeeze the
+        axis away.
+        """
+        mets, wats = _synth_niftis(2)
+        wats = [_water_with(w, 1, keep_dyn=True) for w in wats]
+        (ref, ref_w), (got, got_w) = _engines(mets, wats)
+
+        assert got_w.get_data(Backend.NUMPY).shape == (2, 1, 1, 1, N_T)
+        assert _rel(got.get_data(Backend.NUMPY), ref.get_data(Backend.NUMPY)) < 1e-5
+        assert _rel(got_w.get_data(Backend.NUMPY), ref_w.get_data(Backend.NUMPY)) < 1e-5
+
+    def test_water_tags_are_tracked_apart_from_the_data(self):
+        """
+        With averaging off the data keeps its DIM_DYN, while a water's lone
+        transient is squeezed away: the two collapse different dimensions,
+        so the water's tags cannot be the data's minus what the data lost.
+        """
+        mets, wats = _synth_niftis(2)
+        wats = [_water_with(w, 1, keep_dyn=True) for w in wats]
+        flags = {**ALL_OFF, 'coil': True}
+        (ref, ref_w), (got, got_w) = _engines(mets, wats, **flags)
+
+        assert got.get_data(Backend.NUMPY).shape == (2, 1, 1, 1, N_T, N_D)
+        assert got.dim_tags == ['DIM_DYN', None, None]
+        assert got_w.get_data(Backend.NUMPY).shape == (2, 1, 1, 1, N_T)
+        assert got_w.dim_tags == [None, None, None]
+        assert _rel(got.get_data(Backend.NUMPY), ref.get_data(Backend.NUMPY)) < 1e-10
+        assert _rel(got_w.get_data(Backend.NUMPY), ref_w.get_data(Backend.NUMPY)) < 1e-10
+
+    def test_each_subject_combines_with_its_own_water(self):
+        """
+        In a batch, subject b must get weights from water b — the same result
+        as processing it alone — rather than a broadcast across the batch.
+        """
+        mets, wats = _synth_niftis(2)
+        wats = [_water_with(w, 1) for w in wats]
+        met_t = np.moveaxis(np.stack([n[:] for n in mets]), 4, -1)
+        wat_t = np.stack([n[:] for n in wats])                      # (B, 1, 1, 1, T, C)
+        flags = {**ALL_OFF, 'coil': True}
+        kw = dict(sw_hz=SW, sf_mhz=SF, dim_tags=TAGS, water_dim_tags=self.WATER_TAGS)
+
+        both, both_w = RawProcessor(volatile=True, **flags).process_tensor(met_t, wat_t, **kw)
+        for b in range(2):
+            one, one_w = RawProcessor(volatile=True, **flags).process_tensor(
+                met_t[b:b + 1], wat_t[b:b + 1], **kw)
+            assert np.abs(both[b] - one[0]).max() < 1e-12 * np.abs(one).max()
+            assert np.abs(both_w[b] - one_w[0]).max() < 1e-12 * np.abs(one_w).max()
+
+    def test_tags_past_the_tensor_rank_are_squeezed_axes(self):
+        """
+        The tensor conversion takes nifti[:], and nibabel drops a trailing
+        singleton axis while the header keeps its tag: a water stored as
+        (1, 1, 1, T, C, 1) arrives as (B, 1, 1, 1, T, C) with DIM_DYN still
+        named. A tag past the rank is such a squeezed axis - not a reason to
+        address the spectral axis as dynamics - and the output must not
+        carry it either. The data can come the same way.
+        """
+        mets, wats = _synth_niftis(2)
+        wats = [_water_with(w, 1) for w in wats]
+        met_t = np.moveaxis(np.stack([n[:] for n in mets]), 4, -1)
+        wat_t = np.stack([n[:] for n in wats])                      # (B, 1, 1, 1, T, C)
+        kw = dict(sw_hz=SW, sf_mhz=SF, dim_tags=TAGS)
+
+        plain = RawProcessor(volatile=True)
+        ref, ref_w = plain.process_tensor(met_t, wat_t, **kw, water_dim_tags=self.WATER_TAGS)
+        named = RawProcessor(volatile=True)
+        got, got_w = named.process_tensor(met_t, wat_t, **kw, water_dim_tags=TAGS)
+
+        assert np.array_equal(got, ref) and np.array_equal(got_w, ref_w)
+        assert named._dropped_water_tags == {'DIM_COIL', 'DIM_DYN'}
+
+        # The data with one transient squeezed away: (B, 1, 1, 1, C, T) tagged as if not.
+        one = RawProcessor(volatile=True)
+        out, _ = one.process_tensor(met_t[:, :, :, :, :, 0], **kw)
+        assert out.shape == (2, 1, 1, 1, N_T)
+        assert 'DIM_DYN' in one._dropped_tags
+
+    @pytest.mark.parametrize('method', ['fsl-mrs', 'adaptive'])
+    def test_water_coils_must_match_the_data(self, method):
+        """The weights are per receive element, so a water with other coils is refused."""
+        _, _, met_t, wat_t = _synth_batch()
+        processor = RawProcessor(volatile=True, coil_method=method, **{**ALL_OFF, 'coil': True})
+        kw = dict(sw_hz=SW, sf_mhz=SF, dim_tags=TAGS)
+
+        with pytest.raises(ValueError, match='coil dimension'):
+            processor.process_tensor(met_t, wat_t[:, :, :, :, :, :2, 0], **kw,
+                                     water_dim_tags=self.WATER_TAGS)
+        with pytest.raises(ValueError, match='coil dimension'):
+            processor.process_tensor(met_t, wat_t[:, :, :, :, :, 0, 0], **kw,
+                                     water_dim_tags=[None, None, None])
+
+    def test_adaptive_combination_with_a_single_transient_water(self):
+        """The adaptive method takes the same water layout on both engines."""
+        mets, wats = _synth_niftis(2)
+        wats = [_water_with(w, 1) for w in wats]
+        (ref, ref_w), (got, got_w) = _engines(mets, wats, coil_method='adaptive',
+                                              **{**ALL_OFF, 'coil': True, 'average': True})
+
+        assert _rel(got.get_data(Backend.NUMPY), ref.get_data(Backend.NUMPY)) < 1e-10
+        assert _rel(got_w.get_data(Backend.NUMPY), ref_w.get_data(Backend.NUMPY)) < 1e-10
+
+    def test_conftest_fixtures_agree(self, dummy_nifti_mrs, dummy_nifti_water):
+        """
+        The shared fixtures (8 coils, 16 averages on both) through both engines.
+
+        Without the alignment: the fixtures are unseeded noise, on which the
+        Powell search's rugged objective now and then lets the two engines
+        part ways at the 1e-5 level - the seeded synthetic subjects cover it.
+        """
+        (ref, ref_w), (got, got_w) = _engines([dummy_nifti_mrs], [dummy_nifti_water],
+                                              align=False)
+
+        assert got.get_data(Backend.NUMPY).shape == (1, 1, 1, 1, 2048)
+        assert got_w.get_data(Backend.NUMPY).shape == (1, 1, 1, 1, 2048)
+        assert _rel(got.get_data(Backend.NUMPY), ref.get_data(Backend.NUMPY)) < 1e-10
+        assert _rel(got_w.get_data(Backend.NUMPY), ref_w.get_data(Backend.NUMPY)) < 1e-10
+
+
+#**************************************************************************************************#
+#                                   Class TestFewAverages                                          #
+#**************************************************************************************************#
+#                                                                                                  #
+# Too few noise samples for a coil covariance: both engines drop prewhitening, and say so once.    #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestFewAverages:
+    """Too few noise samples for a coil covariance: prewhitening is dropped, once said."""
+
+    def test_list_engine_falls_back_and_matches(self):
+        """
+        FSL-MRS's coilcombine raises CovarianceEstimationError for a single
+        transient; the list engine now hands it the identity instead, which
+        is what the tensor engine has done per subject all along.
+        """
+        mets, wats = _few_averages(*_synth_niftis(2))
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            ref, ref_w = RawProcessor(volatile=True).process_nifti_list(mets, wats)
+        ours = [w for w in caught if 'prewhitening' in str(w.message)]
+        assert len(ours) == 1, "one warning per run, not one per subject"
+
+        met_t = np.moveaxis(np.stack([n[:] for n in mets]), 4, -1)
+        wat_t = np.stack([n[:] for n in wats])
+        got, got_w = RawProcessor(volatile=True).process_tensor(
+            met_t, wat_t, sw_hz=SW, sf_mhz=SF, dim_tags=TAGS,
+            water_dim_tags=['DIM_COIL', None, None])
+
+        ref = np.stack([np.squeeze(n[:]) for n in ref])
+        ref_w = np.stack([np.squeeze(n[:]) for n in ref_w])
+        assert _rel(np.squeeze(got), ref) < 1e-10
+        assert _rel(np.squeeze(got_w), ref_w) < 1e-10
+
+    def test_through_the_dispatch(self):
+        """The same regime through NIfTI_MRS_Plus, on both engines."""
+        mets, wats = _few_averages(*_synth_niftis(2))
+        (ref, ref_w), (got, got_w) = _engines(mets, wats)
+
+        assert got.get_data(Backend.NUMPY).shape == (2, 1, 1, 1, 200)
+        assert _rel(got.get_data(Backend.NUMPY), ref.get_data(Backend.NUMPY)) < 1e-10
+        assert _rel(got_w.get_data(Backend.NUMPY), ref_w.get_data(Backend.NUMPY)) < 1e-10
 
 
 #**************************************************************************************************#

@@ -325,14 +325,22 @@ def nifti_coil_combination_adaptive(data, reference=None, report=None):
     for main, idx in data.iterate_over_spatial():
         main = np.reshape(main, data.shape[3:])   # prevent loosing dim when avg is 1
 
+        # The water is its own acquisition: a single transient has no
+        # dynamic axis at all, so it is given one to average over.
+        wref = None
+        if reference is not None:
+            wref = np.reshape(reference[idx], reference.shape[3:])
+            if wref.ndim == 2:
+                wref = wref[..., None]
+
         # coil combination
-        data_metab, data_wref = coil_combination_adaptive(main, reference[idx] if reference is not None else None)
+        data_metab, data_wref = coil_combination_adaptive(main, wref)
         data_metab = np.reshape(data_metab, combined_data[idx].shape)   # adjust to lost dim when avg is 1
 
         # update data
         combined_data[idx] = data_metab
         if combined_wat is not None:
-            combined_wat[idx] = data_wref
+            combined_wat[idx] = np.reshape(data_wref, combined_wat[idx].shape)
 
     # plot
     if report is not None:

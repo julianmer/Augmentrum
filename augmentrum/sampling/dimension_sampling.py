@@ -69,6 +69,12 @@ class DimensionSampler(BaseModule):
     #: How the provenance record names what was done.
     OPERATION: str = 'Dimension Sampling'
 
+    #: Whether the water reference shares this axis, so a draw applies to it
+    #: too. Receive elements are the same hardware for both acquisitions, so
+    #: a coil subset must be kept on the water as well; transients are not -
+    #: the water has its own one or two - so an average draw leaves it alone.
+    WATER_SHARES_DIM: bool = False
+
     SUPPORTED_BACKENDS = tuple(Backend)
 
     SCHEMES = ('random', 'consecutive', 'strided')
@@ -160,14 +166,17 @@ class DimensionSampler(BaseModule):
         Args:
             data_array: Batch carrying this sampler's dimension. Left untouched
                 when it does not - there is nothing to draw from.
-            water_array: Passed through unchanged.
+            water_array: Passed through unchanged, unless the water shares
+                this dimension ("WATER_SHARES_DIM") - then the same indices
+                are kept along the water's own axis of it.
             backend: Backend enum (unused; kept for the BaseModule signature).
             **kwargs: Absorbs what BaseModule injects, and reads "dim_tags"
-                from it to find the axis. A bare tensor names no axes, so
-                without them there is nothing to act on.
+                from it to find the axis ("water_dim_tags" for the water's).
+                A bare tensor names no axes, so without them there is
+                nothing to act on.
 
         Returns:
-            "(data, water_unchanged)".
+            "(data, water)".
         """
         tags = list(kwargs.get('dim_tags') or ())
         if self.DIM_TAG not in tags:
@@ -182,7 +191,30 @@ class DimensionSampler(BaseModule):
         if keep is None:
             return data_array, water_array
 
-        return ops.take(data_array, np.asarray(keep), axis=axis), water_array
+        data_array = ops.take(data_array, np.asarray(keep), axis=axis)
+        if water_array is not None and self.WATER_SHARES_DIM:
+            water_array = self._take_from_water(water_array, keep, kwargs)
+        return data_array, water_array
+
+    def _take_from_water(self, water_array, keep, kwargs):
+        """
+        Keep *keep* along the water's own axis of this dimension.
+
+        The water's layout is its own ("water_dim_tags"); without it, the
+        data's tags stand in for the axes the water has. A water that does
+        not carry the dimension is returned as it is.
+        """
+        wtags = kwargs.get('water_dim_tags')
+        if wtags is None:
+            wtags = kwargs.get('dim_tags')
+        wtags = list(wtags or ())
+        if self.DIM_TAG not in wtags:
+            return water_array
+
+        axis = 5 + wtags.index(self.DIM_TAG)
+        if axis >= len(ops.shape(water_array)):
+            return water_array
+        return ops.take(water_array, np.asarray(keep), axis=axis)
 
     def process_nifti_list(self, data_list, water_list=None, indices=None, **kwargs):
         """
@@ -190,7 +222,8 @@ class DimensionSampler(BaseModule):
 
         Args:
             data_list: Metabolite MRS data.
-            water_list: Water reference data, optional.
+            water_list: Water reference data, optional; drawn from along a
+                shared dimension only (see "WATER_SHARES_DIM").
             indices: Exactly what to keep, instead of drawing.
 
         Returns:
@@ -224,12 +257,14 @@ class DimensionSampler(BaseModule):
             return data_met, data_wat
 
         _, data_met = split(data_met, tag, indices)
-        if data_wat is not None and tag in getattr(data_wat, 'dim_tags', []):
-            _, data_wat = split(data_wat, tag, indices)
-
         details = f'{__name__}.process_nifti_list, {tag} indices={indices}.'
         update_processing_prov(data_met, self.OPERATION, details)
-        if data_wat is not None:
+
+        # The water is drawn from only along a dimension it shares with the
+        # data; its own transients stay, and so does its provenance then.
+        if (data_wat is not None and self.WATER_SHARES_DIM
+                and tag in getattr(data_wat, 'dim_tags', [])):
+            _, data_wat = split(data_wat, tag, indices)
             update_processing_prov(data_wat, self.OPERATION, details)
 
         return data_met, data_wat
@@ -253,7 +288,8 @@ class AverageSampler(DimensionSampler):
     training against.
 
     There is nothing to it beyond naming the dimension, because drawing along
-    an axis is all this needs.
+    an axis is all this needs. The water reference is left alone: it has its
+    own one or two transients, which are not the data's to draw from.
 
     Args:
         mode: "random" to draw a subset, "deterministic" to keep everything or

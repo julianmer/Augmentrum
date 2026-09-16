@@ -17,6 +17,7 @@
 #   imports   #
 #*************#
 import numpy as np
+import warnings
 
 
 from nifti_mrs_plus import ops
@@ -66,16 +67,19 @@ class RawProcessor(BaseModule):
         decomposition, so it matches to floating-point tolerance rather than
         bit-exactly.
 
-    On tensors, the water reference is assumed to share the metabolite data's
-    dimension layout, and ppm referencing assumes 1H data.
+    On tensors, the water reference keeps its own dimension layout (read off
+    the injected 'water_dim_tags': one transient next to thirty-two
+    metabolite averages is the common case), and ppm referencing assumes 1H
+    data.
     """
 
     SUPPORTED_BACKENDS = tuple(Backend)
     DOMAIN = Domain(spectral='time')
 
     _dropped_tags = frozenset()
+    _dropped_water_tags = frozenset()
 
-    def __init__(self, conj=True, coil=True, align=True, remove_outliers=True, average=True,
+    def __init__(self, conj=False, coil=True, align=True, remove_outliers=True, average=True,
                  ecc=True, truncate=False, remove_water=False, shift_ref=True, phase_correct=True,
                  coil_method='fsl-mrs', registration_method='fsl-mrs', remove_method='fsl-mrs',
                  average_method='fsl-mrs', ecc_method='smoothed', water_removal_method='fsl-mrs',
@@ -84,7 +88,10 @@ class RawProcessor(BaseModule):
         Initializes the processor; one set of flags and defaults for both engines.
 
         Args:
-            conj (bool): Whether to conjugate the data.
+            conj (bool): Whether to conjugate the data. Off by default: the
+                loaders deliver standard NIfTI-MRS, which FSL-MRS reads in
+                the right orientation; True mirrors legacy data stored with
+                the opposite time-domain convention.
             coil (bool): Whether to perform coil combination.
             align (bool): Whether to align dynamics.
             remove_outliers (bool): Whether to remove/mask outlier averages.
@@ -157,6 +164,7 @@ class RawProcessor(BaseModule):
         """
         processed_data = []
         processed_water = []
+        self._warned_no_prewhiten = False
 
         for i, data_met in enumerate(data_list):
             data_wat = water_list[i] if water_list is not None else None
@@ -184,6 +192,16 @@ class RawProcessor(BaseModule):
             Processed metabolite and water MRS data (NiftiMRS objects).
         """
         from fsl_mrs.utils.preproc import nifti_mrs_proc as proc
+
+        # A water reference tagged with a single transient loses that axis
+        # here rather than at the squeeze below: nibabel drops a trailing
+        # singleton from the array while the header keeps it, and FSL-MRS's
+        # average and align index the array by the header. The values are
+        # untouched, and every later stage sees what it would have anyway.
+        if (data_wat is not None and 'DIM_DYN' in getattr(data_wat, 'dim_tags', [])
+                and data_wat.shape[data_wat.dim_position('DIM_DYN')] == 1):
+            data_wat = safe_squeeze(data_wat, dims=['DIM_DYN'])
+
         if self.conj: # conjugate if needed
             data_met = proc.conjugate(data_met)
             data_wat = proc.conjugate(data_wat) if data_wat is not None else None
@@ -327,8 +345,13 @@ class RawProcessor(BaseModule):
                 if 'DIM_COIL' in data_met.dim_tags:
                     data_met = data_met.copy(remove_dim='DIM_COIL')
                 data_met = proc.align(data_met, 'DIM_DYN', ppmlim=(0.2, 4.2), report=report)
-            if data_wat is not None and 'DIM_DYN' in getattr(data_wat, 'dim_tags', []):
-                if data_wat is not None and 'DIM_COIL' in data_wat.dim_tags:
+            # The water aligns along its own transients, and only when there
+            # is more than one: FSL-MRS align indexes a list of MRS objects
+            # that is not a list for a single FID, and a lone transient has
+            # nothing to align to anyway — the squeeze takes the axis later.
+            if (data_wat is not None and 'DIM_DYN' in getattr(data_wat, 'dim_tags', [])
+                    and data_wat.shape[data_wat.dim_position('DIM_DYN')] > 1):
+                if 'DIM_COIL' in data_wat.dim_tags:
                     data_wat = data_wat.copy(remove_dim='DIM_COIL')
                 data_wat = proc.align(data_wat, 'DIM_DYN', ppmlim=(0, 8))
         else:
@@ -468,7 +491,22 @@ class RawProcessor(BaseModule):
 
     def _estimate_noise_cov(self, data, noise=None, no_prewhiten=False):
         """
-        Estimates noise covariance matrix for coil combination.
+        Estimates the noise covariance for coil combination from the FID tails.
+
+        Below FSL-MRS's threshold of ten noise samples per coil (a single
+        transient of 2048 points leaves 205 for 32 coils) the covariance
+        cannot be estimated, so prewhitening is switched off instead, as the
+        tensor engine does per subject. The identity is handed on explicitly:
+        given no covariance, proc.coilcombine repeats the estimate itself and
+        raises the very error caught here.
+
+        Args:
+            data: Metabolite NIfTI-MRS object carrying DIM_COIL.
+            noise: Passed through to proc.coilcombine.
+            no_prewhiten: Whether prewhitening is already off.
+
+        Returns:
+            Tuple of (noise, covariance, no_prewhiten) for proc.coilcombine.
         """
         from fsl_mrs.utils.preproc.combine import estimate_noise_cov, CovarianceEstimationError
 
@@ -477,9 +515,23 @@ class RawProcessor(BaseModule):
         try:
             covariance = estimate_noise_cov(np.asarray(stacked_data))
         except CovarianceEstimationError:
+            self._warn_no_prewhiten()
             no_prewhiten = True
-            covariance = None
+            covariance = np.eye(data.shape[data.dim_position('DIM_COIL')])
         return noise, covariance, no_prewhiten
+
+    def _warn_no_prewhiten(self):
+        """
+        Warns once per run that coil combination goes without prewhitening.
+
+        Once, because a batch of single-transient scans would otherwise say
+        the same thing for every subject.
+        """
+        if not getattr(self, '_warned_no_prewhiten', False):
+            self._warned_no_prewhiten = True
+            warnings.warn('Too few noise samples to estimate the coil covariance (FSL-MRS '
+                          'needs ten per coil); combining coils without prewhitening.',
+                          RuntimeWarning)
 
     def process_tensor(self, data_array, water_array=None, backend=Backend.NUMPY, **kwargs):
         """
@@ -488,9 +540,14 @@ class RawProcessor(BaseModule):
         Args:
             data_array: Metabolite data, (batch, X, Y, Z, higher dims..., T).
             water_array: Water reference in the untransposed NIfTI layout
-                (batch, X, Y, Z, T, higher dims...), optional.
+                (batch, X, Y, Z, T, higher dims...), optional. It is a
+                separate acquisition with its own layout — one transient
+                next to thirty-two metabolite averages, say — so its axes are
+                read off 'water_dim_tags', never off the data's.
             backend: The array backend the tensors live on.
-            **kwargs: Injected metadata; sw_hz, sf_mhz and dim_tags are used.
+            **kwargs: Injected metadata; sw_hz, sf_mhz, dim_tags and
+                water_dim_tags are used. Without water_dim_tags the water is
+                taken to share the data's layout for the axes it has.
 
         Returns:
             Tuple of processed (data_array, water_array), collapsed dimensions
@@ -503,22 +560,34 @@ class RawProcessor(BaseModule):
                              "data with header metadata attached.")
 
         met, wat = data_array, water_array
-        rank = len(ops.shape(met))
-        tags = [t for t in (kwargs.get('dim_tags') or []) if t][:max(0, rank - 5)]
-        self._dropped_tags = set()
+        self._warned_no_prewhiten = False
 
-        if wat is not None and len(ops.shape(wat)) > 5:
-            wat = move_axis(wat, self.SPECTRAL_AXIS, -1)
+        # Tags past the array's rank name trailing singleton axes that
+        # nibabel already squeezed away (a lone transient, say): they are
+        # gone from the tensor, so they are gone from the output's tags too.
+        given = [t for t in (kwargs.get('dim_tags') or []) if t]
+        tags = given[:max(0, len(ops.shape(met)) - 5)]
+        self._dropped_tags = set(given[len(tags):])
+        self._dropped_water_tags = set()
+
+        wtags = []
+        if wat is not None:
+            given_w = kwargs.get('water_dim_tags')
+            given_w = [t for t in (given if given_w is None else given_w) if t]
+            wtags = self._water_tags(wat, given_w)
+            self._dropped_water_tags = set(given_w[len(wtags):])
+            if len(ops.shape(wat)) > 5:
+                wat = move_axis(wat, self.SPECTRAL_AXIS, -1)
 
         if self.conj:
             met = ops.complex_from(ops.real(met), -ops.imag(met))
             wat = ops.complex_from(ops.real(wat), -ops.imag(wat)) if wat is not None else None
 
         if self.coil:
-            met, wat, tags = self.coil_combine(met, wat, tags)
+            met, wat, tags, wtags = self.coil_combine(met, wat, tags, wtags)
 
         if self.align:
-            met, wat, tags = self.registration(met, wat, tags, sw_hz, sf_mhz)
+            met, wat, tags, wtags = self.registration(met, wat, tags, wtags, sw_hz, sf_mhz)
 
         mask = self.outlier_mask(met, tags) if self.remove_outliers else None
 
@@ -529,10 +598,9 @@ class RawProcessor(BaseModule):
             met = met * ops.match_backend(mask[..., None].astype(np.float64), met)
 
         if self.average:
-            met, wat, tags = self.combine_averages(met, wat, tags, mask)
+            met, wat, tags, wtags = self.combine_averages(met, wat, tags, wtags, mask)
 
-        if 'DIM_DYN' in tags or 'DIM_COIL' in tags:
-            met, wat, tags = self._squeeze_singletons(met, wat, tags)
+        met, wat, tags, wtags = self._squeeze_singletons(met, wat, tags, wtags)
 
         if self.ecc:
             met, wat = self.eddy_current_correction(met, wat)
@@ -554,41 +622,81 @@ class RawProcessor(BaseModule):
             wat = move_axis(wat, -1, self.SPECTRAL_AXIS)
         return met, wat
 
-    def coil_combine(self, met, wat, tags):
+    def coil_combine(self, met, wat, tags, wtags=None):
         """
         Coil combination on the tensor engine; weights from the water when present.
 
         'fsl-mrs' estimates per-subject noise covariance from the last tenth
-        of every FID (prewhitening is silently disabled per subject when there
-        are too few samples, as in FSL-MRS) and derives wSVD weights;
-        'adaptive' mirrors nifti_coil_combination_adaptive, dephasing with the
-        reference and combining with its phase-only eigenvector. Either way
-        the combination is a differentiable weighted sum over the coil axis.
+        of every FID (prewhitening is disabled per subject when there are too
+        few samples, as in FSL-MRS) and derives wSVD weights; 'adaptive'
+        mirrors nifti_coil_combination_adaptive, dephasing with the reference
+        and combining with its phase-only eigenvector. Either way the
+        combination is a differentiable weighted sum over the coil axis.
+
+        The reference is the water averaged over its own transients, so one
+        set of weights per voxel serves every metabolite average: the water
+        keeps its own layout throughout and the weights are broadcast onto
+        the data's.
 
         Args:
             met: Metabolite tensor, spectral axis last.
-            wat: Water tensor in the same layout, or None.
-            tags: Higher-dimension tags, mutated in place.
+            wat: Water tensor, spectral axis last, or None.
+            tags: Higher-dimension tags of the data, mutated in place.
+            wtags: Higher-dimension tags of the water, mutated in place
+                (None: the data's, for the axes the water has).
 
         Returns:
-            Tuple of (met, wat, tags) with the coil dimension collapsed.
+            Tuple of (met, wat, tags, wtags) with the coil dimensions collapsed.
         """
+        wtags = self._water_tags(wat, tags if wtags is None else wtags)
         if 'DIM_COIL' not in tags:
-            return met, wat, tags
+            return met, wat, tags, wtags
         coil_axis = 4 + tags.index('DIM_COIL')
         n_coil = ops.shape(met)[coil_axis]
         if n_coil <= 1:
-            return met, wat, tags
+            return met, wat, tags, wtags
         if self.coil_method not in ('fsl-mrs', 'adaptive'):
             raise ValueError(f"Unknown tensor coil combination method: {self.coil_method}")
-        if self.coil_method == 'adaptive':
-            met, wat = self._coil_combine_adaptive(met, wat, tags, coil_axis)
-            tags.remove('DIM_COIL')
-            self._dropped_tags.add('DIM_COIL')
-            return met, wat, tags
 
+        wcoil_axis = None
+        if wat is not None:
+            # Same receive array or nothing: the weights are per element.
+            if 'DIM_COIL' not in wtags:
+                raise ValueError('The water reference has no coil dimension to combine '
+                                 'alongside the data.')
+            wcoil_axis = 4 + wtags.index('DIM_COIL')
+            if ops.shape(wat)[wcoil_axis] != n_coil:
+                raise ValueError('Reference and data coil dimension does not match.')
+
+        combine = (self._coil_combine_adaptive if self.coil_method == 'adaptive'
+                   else self._coil_combine_wsvd)
+        met, wat = combine(met, wat, tags, wtags, coil_axis, wcoil_axis)
+
+        tags.remove('DIM_COIL')
+        self._dropped_tags.add('DIM_COIL')
+        if wat is not None:
+            wtags.remove('DIM_COIL')
+            self._dropped_water_tags.add('DIM_COIL')
+        return met, wat, tags, wtags
+
+    def _coil_combine_wsvd(self, met, wat, tags, wtags, coil_axis, wcoil_axis):
+        """
+        The wSVD combination, batched: FSL-MRS coilcombine on tensors.
+
+        Args:
+            met: Metabolite tensor, spectral axis last.
+            wat: Water tensor, spectral axis last, or None.
+            tags: Higher-dimension tags of the data (still carrying DIM_COIL).
+            wtags: Higher-dimension tags of the water.
+            coil_axis: Where the data's coil dimension sits.
+            wcoil_axis: Where the water's coil dimension sits, or None.
+
+        Returns:
+            Combined (met, wat), the coil axes summed away.
+        """
         n_time = ops.shape(met)[-1]
         n_batch = ops.shape(met)[0]
+        n_coil = ops.shape(met)[coil_axis]
 
         # per-subject noise covariance and whitening, from the FID tails
         noise = ops.to_numpy(met[..., int(0.9 * n_time):])
@@ -599,6 +707,7 @@ class RawProcessor(BaseModule):
         white_inv = np.empty_like(cov)
         for b, samples in enumerate(noise):
             if samples.shape[0] < 10 * n_coil:
+                self._warn_no_prewhiten()
                 cov[b], white[b], white_inv[b] = eye, eye, eye      # prewhitening disabled
             else:
                 cov[b] = np.cov(samples, rowvar=False)
@@ -607,14 +716,10 @@ class RawProcessor(BaseModule):
                 white_inv[b] = np.linalg.inv(white[b])
 
         met_tc = move_axis(met, coil_axis, -1)                     # (..., T, C)
-        wat_tc = move_axis(wat, coil_axis, -1) if wat is not None else None
-        others = [t for t in tags if t != 'DIM_COIL']
+        wat_tc = move_axis(wat, wcoil_axis, -1) if wat is not None else None
 
         if wat_tc is not None:
-            ref_tc = wat_tc
-            if 'DIM_DYN' in others:
-                ref_tc = ops.mean(ref_tc, axis=4 + others.index('DIM_DYN'), keepdims=True)
-            source_tc, with_reference = ref_tc, True
+            source_tc, with_reference = self._transient_mean(wat_tc, wtags), True
         else:
             source_tc, with_reference = met_tc, False
 
@@ -624,56 +729,162 @@ class RawProcessor(BaseModule):
         _, _, vh = np.linalg.svd(source @ white.reshape(shape), full_matrices=False)
         weights = self._wsvd_weights(vh[..., 0, :], white.reshape(shape),
                                      white_inv.reshape(shape), cov.reshape(shape),
-                                     with_reference)
+                                     with_reference)[..., None, :]          # (..., 1, C)
 
-        met = ops.sum(met_tc * ops.match_backend(weights[..., None, :], met_tc), axis=-1)
         if wat_tc is not None:
-            wat = ops.sum(wat_tc * ops.match_backend(weights[..., None, :], wat_tc), axis=-1)
+            wat = ops.sum(wat_tc * ops.match_backend(weights, wat_tc), axis=-1)
+            weights = self._onto_data(weights, len(ops.shape(met_tc)))
+        met = ops.sum(met_tc * ops.match_backend(weights, met_tc), axis=-1)
+        return met, wat
 
-        tags.remove('DIM_COIL')
-        self._dropped_tags.add('DIM_COIL')
-        return met, wat, tags
+    def _coil_combine_adaptive(self, met, wat, tags, wtags, coil_axis, wcoil_axis):
+        """
+        The adaptive combination, batched: dephase with the reference,
+        combine with its phase-only eigenvector.
 
-    def registration(self, met, wat, tags, sw_hz, sf_mhz):
+        Mirrors nifti_coil_combination_adaptive: the reference (water, or the
+        data itself) is averaged over its transients, its phase removed point
+        by point, and the FID-A eigenvector estimate combines the dephased
+        channels. Estimate detached, combination differentiable.
+
+        Args:
+            met: Metabolite tensor, spectral axis last.
+            wat: Water tensor, spectral axis last, or None.
+            tags: Higher-dimension tags of the data (still carrying DIM_COIL).
+            wtags: Higher-dimension tags of the water.
+            coil_axis: Where the data's coil dimension sits.
+            wcoil_axis: Where the water's coil dimension sits, or None.
+
+        Returns:
+            Combined (met, wat), the coil axes summed away.
+        """
+        from augmentrum.processing.utils import estimate_csm
+
+        met_tc = move_axis(met, coil_axis, -1)                      # (..., T, C)
+        wat_tc = move_axis(wat, wcoil_axis, -1) if wat is not None else None
+
+        ref_tc = (self._transient_mean(wat_tc, wtags) if wat_tc is not None
+                  else self._transient_mean(met_tc, tags))
+
+        ref = ops.to_numpy(ref_tc).astype(np.complex128)
+        phase = np.exp(-1j * np.angle(ref))
+        lead = ref.shape[:-2]
+        flat = (ref * phase).reshape((-1,) + ref.shape[-2:])
+        csm = np.stack([estimate_csm(voxel)[:, 0] for voxel in flat])
+        csm = csm.reshape(lead + (ref.shape[-1],))
+        csmsq = np.real((csm * np.conj(csm)).sum(-1, keepdims=True))
+
+        weights = (np.conj(csm)[..., None, :] * phase
+                   / (csmsq[..., None] + np.finfo(float).eps))     # (..., T, C)
+        if wat_tc is not None:
+            wat = ops.sum(wat_tc * ops.match_backend(weights, wat_tc), axis=-1)
+            weights = self._onto_data(weights, len(ops.shape(met_tc)))
+        met = ops.sum(met_tc * ops.match_backend(weights, met_tc), axis=-1)
+        return met, wat
+
+    @staticmethod
+    def _water_tags(wat, tags):
+        """
+        The water's higher-dimension tags, as a fresh list cut to its rank.
+
+        Callers without tags for the water pass the data's: the water is then
+        taken to share the data's layout for as many higher axes as it has —
+        the bare-tensor convention from before water tags were injected.
+        """
+        if wat is None:
+            return []
+        return [t for t in tags if t][:max(0, len(ops.shape(wat)) - 5)]
+
+    @staticmethod
+    def _transient_mean(data_tc, tags):
+        """
+        Averages over the DIM_DYN of *tags* (kept as a singleton), coil axis last.
+
+        The coil axis was moved behind the spectral one, so a dynamic axis
+        that followed it has stepped down by one — hence the index among the
+        tags without DIM_COIL.
+        """
+        others = [t for t in tags if t != 'DIM_COIL']
+        if 'DIM_DYN' not in others:
+            return data_tc
+        return ops.mean(data_tc, axis=4 + others.index('DIM_DYN'), keepdims=True)
+
+    @staticmethod
+    def _onto_data(weights, rank):
+        """
+        Reshapes water-derived weights to broadcast over the data's layout.
+
+        Weights come as "(B, X, Y, Z, <water dims>, T', C)" and the data is
+        "(B, X, Y, Z, <data dims>, T, C)" with *rank* axes; the water's own
+        higher dims are singletons by now (its transients went into the
+        reference), so they fold away and the data's take their place. Left
+        to broadcasting, a batch axis would be paired with a data dimension
+        instead — a B-by-B product for a batch of more than one, and a
+        silently wrong combination for a batch of one.
+
+        Args:
+            weights: Per-coil weights in the water's layout.
+            rank: Number of axes of the data (spectral, then coil, last).
+
+        Returns:
+            The weights reshaped for the data.
+        """
+        lead, tail = weights.shape[:4], weights.shape[-2:]
+        if int(np.prod(weights.shape[4:-2])) != 1:
+            raise ValueError('The water reference must carry no higher dimension besides '
+                             'coils and transients to serve as a per-voxel reference.')
+        return weights.reshape(lead + (1,) * (rank - 6) + tail)
+
+    def registration(self, met, wat, tags, wtags, sw_hz, sf_mhz):
         """
         Aligns dynamics in phase and frequency (spectral registration).
 
         A leftover coil dimension is reduced to its first element the way the
         FSL-MRS path's copy(remove_dim='DIM_COIL') does. The metabolite data
-        aligns within (0.2, 4.2) ppm, the water within (0, 8) ppm. Method
-        'fsl-mrs' reproduces the FSL-MRS Powell search per transient; 'pattern'
-        is the vectorized pattern search (much faster, results equal in
-        objective value but not identical on noisy data).
+        aligns within (0.2, 4.2) ppm, the water within (0, 8) ppm — each along
+        its own dynamic dimension, and only where there is more than one
+        transient to align. Method 'fsl-mrs' reproduces the FSL-MRS Powell
+        search per transient; 'pattern' is the vectorized pattern search
+        (much faster, results equal in objective value but not identical on
+        noisy data).
 
         Args:
             met: Metabolite tensor, spectral axis last.
-            wat: Water tensor in the same layout, or None.
-            tags: Higher-dimension tags, mutated in place.
+            wat: Water tensor, spectral axis last, or None.
+            tags: Higher-dimension tags of the data, mutated in place.
+            wtags: Higher-dimension tags of the water, mutated in place.
             sw_hz: Spectral width in Hz.
             sf_mhz: Spectrometer frequency in MHz.
 
         Returns:
-            Tuple of (met, wat, tags).
+            Tuple of (met, wat, tags, wtags).
         """
         if self.registration_method not in ('fsl-mrs', 'pattern'):
             raise ValueError(f"Unknown tensor registration method: {self.registration_method}")
-        if 'DIM_DYN' not in tags:
-            return met, wat, tags
-        if ops.shape(met)[4 + tags.index('DIM_DYN')] <= 1:
-            return met, wat, tags
+        met, tags = self._align_transients(met, tags, self._dropped_tags,
+                                           sw_hz, sf_mhz, (0.2, 4.2))
+        if wat is not None:
+            wat, wtags = self._align_transients(wat, wtags, self._dropped_water_tags,
+                                                sw_hz, sf_mhz, (0, 8))
+        return met, wat, tags, wtags
 
+    def _align_transients(self, data, tags, dropped, sw_hz, sf_mhz, ppmlim):
+        """
+        Aligns *data* along its DIM_DYN when there is more than one transient.
+
+        A coil dimension still present is cut to its first element first, as
+        the list path does — and recorded in *dropped*, with the tags kept in
+        step.
+        """
+        if 'DIM_DYN' not in tags or ops.shape(data)[4 + tags.index('DIM_DYN')] <= 1:
+            return data, tags
         if 'DIM_COIL' in tags:
             coil_axis = 4 + tags.index('DIM_COIL')
-            met = met[(slice(None),) * coil_axis + (0,)]
-            wat = wat[(slice(None),) * coil_axis + (0,)] if wat is not None else None
+            data = data[(slice(None),) * coil_axis + (0,)]
             tags.remove('DIM_COIL')
-            self._dropped_tags.add('DIM_COIL')
-
+            dropped.add('DIM_COIL')
         dyn_axis = 4 + tags.index('DIM_DYN')
-        met = self._apply_alignment(met, dyn_axis, sw_hz, sf_mhz, (0.2, 4.2))
-        if wat is not None and ops.shape(wat)[dyn_axis] > 1:
-            wat = self._apply_alignment(wat, dyn_axis, sw_hz, sf_mhz, (0, 8))
-        return met, wat, tags
+        return self._apply_alignment(data, dyn_axis, sw_hz, sf_mhz, ppmlim), tags
 
     def _apply_alignment(self, data, dyn_axis, sw_hz, sf_mhz, ppmlim):
         """
@@ -719,54 +930,67 @@ class RawProcessor(BaseModule):
         self.last_keep_mask_ = mask
         return mask
 
-    def combine_averages(self, met, wat, tags, mask=None):
+    def combine_averages(self, met, wat, tags, wtags, mask=None):
         """
         Averages dynamics; a keep-mask turns this into a weighted mean.
 
+        The water averages over its own transients when it has more than
+        one; a lone transient is left to the squeeze, its values untouched.
+
         Args:
             met: Metabolite tensor, spectral axis last.
-            wat: Water tensor in the same layout, or None.
-            tags: Higher-dimension tags, mutated in place.
-            mask: Optional boolean keep mask over the dynamic axis.
+            wat: Water tensor, spectral axis last, or None.
+            tags: Higher-dimension tags of the data, mutated in place.
+            wtags: Higher-dimension tags of the water, mutated in place.
+            mask: Optional boolean keep mask over the data's dynamic axis.
 
         Returns:
-            Tuple of (met, wat, tags) with the dynamic dimension collapsed.
+            Tuple of (met, wat, tags, wtags) with the dynamic dimensions collapsed.
         """
         if self.average_method != 'fsl-mrs':
             raise ValueError(f"Unknown tensor averaging method: {self.average_method}")
-        if 'DIM_DYN' not in tags:
-            return met, wat, tags
-        dyn_axis = 4 + tags.index('DIM_DYN')
-        if ops.shape(met)[dyn_axis] <= 1:
-            return met, wat, tags
 
-        if mask is None:
-            combined = ops.mean(met, axis=dyn_axis)
-        else:
-            weights = mask.astype(np.float64) / mask.sum(axis=-1, keepdims=True)
-            combined = ops.sum(met * ops.match_backend(weights[..., None], met), axis=dyn_axis)
-        if wat is not None and ops.shape(wat)[dyn_axis] > 1:
-            wat = ops.mean(wat, axis=dyn_axis)
-        elif wat is not None:
-            wat = wat[(slice(None),) * dyn_axis + (0,)]
+        if 'DIM_DYN' in tags and ops.shape(met)[4 + tags.index('DIM_DYN')] > 1:
+            dyn_axis = 4 + tags.index('DIM_DYN')
+            if mask is None:
+                met = ops.mean(met, axis=dyn_axis)
+            else:
+                weights = mask.astype(np.float64) / mask.sum(axis=-1, keepdims=True)
+                met = ops.sum(met * ops.match_backend(weights[..., None], met), axis=dyn_axis)
+            tags.remove('DIM_DYN')
+            self._dropped_tags.add('DIM_DYN')
 
-        tags.remove('DIM_DYN')
-        self._dropped_tags.add('DIM_DYN')
-        return combined, wat, tags
+        if wat is not None and 'DIM_DYN' in wtags \
+                and ops.shape(wat)[4 + wtags.index('DIM_DYN')] > 1:
+            wat = ops.mean(wat, axis=4 + wtags.index('DIM_DYN'))
+            wtags.remove('DIM_DYN')
+            self._dropped_water_tags.add('DIM_DYN')
+        return met, wat, tags, wtags
 
-    def _squeeze_singletons(self, met, wat, tags):
+    def _squeeze_singletons(self, met, wat, tags, wtags):
         """
         Drops singleton higher dimensions, the tensor form of safe_squeeze.
+
+        Data and water are squeezed each on their own layout, and only while
+        an acquisition dimension (coils or transients) is still tagged, as the
+        list path does.
         """
+        if 'DIM_DYN' in tags or 'DIM_COIL' in tags:
+            met, tags = self._squeeze(met, tags, self._dropped_tags)
+        if wat is not None and ('DIM_DYN' in wtags or 'DIM_COIL' in wtags):
+            wat, wtags = self._squeeze(wat, wtags, self._dropped_water_tags)
+        return met, wat, tags, wtags
+
+    @staticmethod
+    def _squeeze(data, tags, dropped):
+        """Drops the singleton axes among *tags*, recording them in *dropped*."""
         for i in reversed(range(len(tags))):
             axis = 4 + i
-            if ops.shape(met)[axis] == 1:
-                met = met[(slice(None),) * axis + (0,)]
-                if wat is not None and ops.shape(wat)[axis] == 1:
-                    wat = wat[(slice(None),) * axis + (0,)]
-                self._dropped_tags.add(tags[i])
+            if ops.shape(data)[axis] == 1:
+                data = data[(slice(None),) * axis + (0,)]
+                dropped.add(tags[i])
                 tags.pop(i)
-        return met, wat, tags
+        return data, tags
 
     def eddy_current_correction(self, met, wat):
         """
@@ -778,11 +1002,16 @@ class RawProcessor(BaseModule):
 
         Args:
             met: Metabolite tensor, spectral axis last.
-            wat: Water tensor in the same layout, or None.
+            wat: Water tensor, one FID per voxel by now (or the data's own
+                layout), or None.
 
         Returns:
             Tuple of corrected (met, wat).
         """
+        if wat is not None and len(ops.shape(wat)) > 5 \
+                and tuple(ops.shape(wat)) != tuple(ops.shape(met)):
+            raise ValueError('Reference and data shape must match or the reference must be '
+                             'a single FID per voxel (as in eddy current correction).')
         ref = ops.to_numpy(wat if wat is not None else met)
         if self.ecc_method == 'smoothed':
             phasor = np.exp(-1j * self._ecc_phase(ref))
@@ -1167,7 +1396,21 @@ class RawProcessor(BaseModule):
 
     def _output_dim_tags(self, source):
         """
-        The source's tags minus the dimensions this run collapsed.
+        The data's tags minus the dimensions this run collapsed on the data.
         """
-        tags = [t for t in (source.dim_tags or []) if t and t not in self._dropped_tags]
+        return self._remaining_tags(source, self._dropped_tags)
+
+    def _output_water_dim_tags(self, source):
+        """
+        The water's tags minus the dimensions this run collapsed on the water.
+
+        Tracked apart from the data's: the water keeps a transient the data
+        averages away, or has its lone one squeezed while the data's stay.
+        """
+        return self._remaining_tags(source, self._dropped_water_tags)
+
+    @staticmethod
+    def _remaining_tags(source, dropped):
+        """The source's tags without *dropped*, padded to the three NIfTI-MRS slots."""
+        tags = [t for t in (source.dim_tags or []) if t and t not in dropped]
         return (tags + [None, None, None])[:3]
