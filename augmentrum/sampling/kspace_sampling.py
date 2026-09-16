@@ -3842,7 +3842,13 @@ class KspaceUndersampling(BaseModule):
 
         # The dual path is already unit-calibrated against the identity pair;
         # matching the input's global norm again would erase |det A|.
-        return out if dual else self._match_scale(out, vol, data_array)
+        out = out if dual else self._match_scale(out, vol, data_array)
+
+        # NumPy's FFT computes in double whatever it is handed, so on that
+        # backend the reconstruction comes back complex128. A pipeline stage
+        # hands data back in the dtype it was given, as the torchkbnufft path
+        # already does; the cast is the only thing that touches the values.
+        return ops.cast_like(out, data_array)
 
     def _nufft_torchkbnufft(self, data_array, matrix, pts, kmax, ndim):
         """Measure and reconstruct with torchkbnufft, the PyTorch reference."""

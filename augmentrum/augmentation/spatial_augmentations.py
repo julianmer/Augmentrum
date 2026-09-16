@@ -703,8 +703,7 @@ class SpatialAugmentations(BaseModule):
         # this keeps "no augmentation" bit-exact: grid_sample through an identity
         # affine still blends neighbors at the 1e-6 level because the normalized
         # sampling coordinates are not exactly on voxel centers in float32.
-        identity = np.eye(self.dim, self.dim + 1,
-                             dtype=theta.dtype, device=theta.device)
+        identity = np.eye(self.dim, self.dim + 1, dtype=theta.dtype)
         if np.allclose(theta, identity[None], atol=1e-7, rtol=0.0):
             x_aug = x
         else:
