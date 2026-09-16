@@ -148,7 +148,7 @@ no manual conversion needed.
 | `AverageSampler` | random, consecutive, strided, deterministic             |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `BaselineAugmentation` | random_walk, bspline, polynomial                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `CoilSampler` | draw random, reweight, grow from CSMs |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `EddyCurrent` | synthetic, water                                        |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `EddyCurrent` | synthetic, water (call-time reference or source library) |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `EditCombiner` | diff, sum along DIM_EDIT            |   ~   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `FrequencyShift` | shift_hz                                                |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `Noise` | sigma, sigma_frac, snr, snr_db                          |   ✓   | ✓ | ✓ | ✓ | ✓ | ✓ |

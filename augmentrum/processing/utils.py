@@ -435,76 +435,141 @@ def fid_to_spec(fids):
     return np.fft.fftshift(np.fft.fft(fids, axis=-1, norm='ortho'), axes=-1)
 
 
-def ppm_shift_axis(n, sw_hz, sf_mhz, shift=4.65):
-    """The shifted ppm axis FSL-MRS builds for an n-point spectrum.
+#: fsl_mrs.utils.constants.PPM_SHIFT, copied so the axis helpers work without FSL-MRS.
+_PPM_SHIFT = {'1H': 4.65, '2H': 4.65, '13C': 0.0, '31P': 0.0}
 
-    This is the axis of an FSL-MRS spectrum, "fftshift(fft(fid))", ascending
-    and spaced "linspace"-style over the full width (sw / (n - 1) per bin,
-    where the bins themselves sit sw / n apart). For the package's own
-    spectra, "fftshift(ifft(fid))", use :func:"ppm_axis".
 
-    The default *shift* is FSL-MRS's proton referencing constant
-    (PPM_SHIFT['1H']); :func:"ppm_reference" looks it up by nucleus.
+def ppm_reference(nucleus='1H'):
     """
+    The ppm at which FSL-MRS / NIfTI-MRS place the carrier (0 Hz) for *nucleus*.
+
+    Protons are referenced to water at 4.65 ppm; 13C and 31P to 0 ppm. Every
+    module that places a feature at a ppm uses this, so a user's ppm values mean
+    the same thing here as on an FSL-MRS plot.
+
+    Args:
+        nucleus: NIfTI-MRS nucleus string, e.g. '1H'. None means 1H.
+
+    Returns:
+        The reference shift in ppm. An unknown nucleus gives 0.0 with a warning,
+        which is the right answer for most X-nuclei and loud for the rest.
+    """
+    if nucleus is None:
+        nucleus = '1H'
+    try:
+        from fsl_mrs.utils.constants import PPM_SHIFT
+    except ImportError:                                   # pragma: no cover
+        PPM_SHIFT = _PPM_SHIFT
+
+    key = str(nucleus).strip().upper()
+    for name, shift in PPM_SHIFT.items():
+        if name.upper() == key:
+            return float(shift)
+
+    import warnings
+    warnings.warn(f"No ppm reference known for nucleus {nucleus!r}; using 0.0 ppm.")
+    return 0.0
+
+
+def ppm_axis(n, sw_hz, sf_mhz, nucleus='1H'):
+    """
+    The FSL-MRS ppm of every bin of the spectrum "fftshift(ifft(fid))".
+
+    That is the spectrum the spectral modules work on (see "DomainTransform").
+    FSL-MRS displays "fftshift(fft(fid))" instead and labels its bins with
+    "linspace(-sw/2, sw/2, n) / sf + reference" ("MRS.getAxes"), a grid whose
+    step is sw/(n-1) rather than sw/n - up to one bin off the fftfreq grid at the
+    edges. Since "ifft" mirrors "fft", bin j here is bin (-j) mod n there, so this
+    axis is FSL's read backwards: it descends in ppm. The Nyquist bin (j = 0) is
+    given its +sw/2 alias instead of FSL's -sw/2 label, which keeps the axis
+    monotonic; every other bin carries exactly the ppm FSL-MRS would print for
+    it. A feature built at a ppm on this axis therefore lands at that ppm on an
+    FSL-MRS plot, which is what users' ppm values refer to.
+
+    Args:
+        n: Number of spectral points.
+        sw_hz: Spectral width (bandwidth) in Hz.
+        sf_mhz: Spectrometer frequency in MHz.
+        nucleus: NIfTI-MRS nucleus string; sets the reference via "ppm_reference".
+
+    Returns:
+        A "(n,)" float array, descending in ppm.
+    """
+    ref = ppm_reference(nucleus)
+    if n < 2:
+        return np.full(int(n), ref)
+    j = np.arange(n, dtype=np.float64)
+    return ref + (sw_hz / 2.0 - (j - 1.0) * sw_hz / (n - 1.0)) / float(sf_mhz)
+
+
+def ppm_shift_axis(n, sw_hz, sf_mhz, shift=None):
+    """
+    The shifted ppm axis FSL-MRS builds for an n-point "fftshift(fft(fid))" spectrum.
+
+    Identical to "MRS.getAxes()" ("linspace(-sw/2, sw/2, n) / sf + shift"), so it
+    goes with "fid_to_spec". "ppm_axis" is the same labelling for the mirrored
+    "fftshift(ifft(fid))" spectrum the modules use.
+
+    Args:
+        n: Number of spectral points.
+        sw_hz: Spectral width in Hz.
+        sf_mhz: Spectrometer frequency in MHz.
+        shift: Reference ppm; None is the proton reference (4.65 ppm).
+    """
+    if shift is None:
+        shift = ppm_reference('1H')
     return np.linspace(-sw_hz / 2, sw_hz / 2, n) / sf_mhz + shift
 
 
-def ppm_window(n, sw_hz, sf_mhz, lim, shift=4.65):
-    """First and last index of the ppm window *lim* (FSL-MRS limit_to_range)."""
+def ppm_window(n, sw_hz, sf_mhz, lim, shift=None):
+    """First and last index of the ppm window *lim* on "ppm_shift_axis" (FSL-MRS limit_to_range)."""
     axis = ppm_shift_axis(n, sw_hz, sf_mhz, shift)
     first = int(np.argmin(np.abs(axis - lim[0])))
     last = int(np.argmin(np.abs(axis - lim[1])))
     return (first, last) if first <= last else (last, first)
 
 
-def ppm_reference(nucleus='1H'):
-    """The chemical shift at the carrier for a nucleus, as FSL-MRS defines it.
+#***********************#
+#   per-sample values   #
+#***********************#
+def batch_profile(profile, ndim):
+    """
+    A "(batch, N)" profile shaped to broadcast over a rank-*ndim* "(batch, ..., N)" array.
 
-    FSL-MRS references its ppm axis so that zero frequency offset sits at
-    "PPM_SHIFT[nucleus]": 4.65 ppm for 1H and 2H (water on resonance), 0.0 for
-    13C and 31P. A nucleus it does not know gets 0.0 with a warning rather
-    than an error, so an unusual acquisition still runs while making it plain
-    that its axis is unreferenced.
+    Profiles are built one per sample and must reach every coil and transient
+    of that sample alike, so the sample axis stays in front and everything in
+    between is a singleton.
 
     Args:
-        nucleus: NIfTI-MRS nucleus string, e.g. "'1H'".
+        profile: "(batch, N)" array.
+        ndim: Rank of the array it will be added to or multiplied with.
 
     Returns:
-        The ppm at zero frequency offset.
+        The profile reshaped to "(batch, 1, ..., 1, N)"; for a 1-D target, its
+        single row.
     """
-    from fsl_mrs.utils.constants import PPM_SHIFT
-
-    shift = PPM_SHIFT.get(str(nucleus))
-    if shift is None:
-        warnings.warn(f"No ppm reference is known for nucleus {nucleus!r}; "
-                      f"using 0.0 ppm at the carrier.")
-        return 0.0
-    return float(shift)
+    profile = np.asarray(profile)
+    if ndim <= 1:
+        return profile[0]
+    return profile.reshape((profile.shape[0],) + (1,) * (ndim - 2) + (profile.shape[-1],))
 
 
-def ppm_axis(n, sw_hz, sf_mhz, nucleus='1H'):
-    """The ppm of every bin of an fftshifted spectrum, bin for bin as FSL-MRS has it.
+def per_sample_factor(value, ndim, like):
+    """
+    A scalar as a float, or a per-sample vector as "(batch, 1, ..., 1)" on *like*'s backend.
 
-    The package's spectrum is "fftshift(ifft(fid))" (see DomainTransform) where
-    FSL-MRS's is "fftshift(fft(fid))". The two hold the same bins in reverse
-    order with the Nyquist bin fixed at index 0: bin j here is FSL-MRS bin
-    (n - j) mod n. So this is :func:"ppm_shift_axis" reversed and rolled by
-    one, and a feature placed at some ppm on it shows at that same ppm on
-    "MRS.getAxes()" - FSL-MRS's "linspace" spacing included, which is what
-    makes the match exact rather than off by up to a bin.
+    The pipeline hands a module either one value for the batch or one per
+    sample; this makes the two cases one multiply at the call site.
 
     Args:
-        n: Number of spectral points.
-        sw_hz: Spectral width in Hz.
-        sf_mhz: Spectrometer frequency in MHz.
-        nucleus: NIfTI-MRS nucleus string, which fixes the reference shift.
-
-    Returns:
-        A "(n,)" array, descending from index 1 on; index 0 is the Nyquist bin
-        and carries the low end of the axis, as it does in FSL-MRS.
+        value: Scalar, or a "(batch,)" vector of per-sample values.
+        ndim: Rank of the tensor the factor multiplies.
+        like: Tensor whose backend and dtype the vector adopts.
     """
-    axis = ppm_shift_axis(n, sw_hz, sf_mhz, ppm_reference(nucleus))
-    return np.roll(axis[::-1], 1)
+    arr = np.asarray(value, dtype=np.float64)
+    if arr.ndim == 0:
+        return float(arr)
+    return ops.match_backend(arr.reshape((-1,) + (1,) * (ndim - 1)), like)
 
 
 #********************#

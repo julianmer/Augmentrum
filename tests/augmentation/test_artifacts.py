@@ -23,7 +23,7 @@ class TestResidualWaterCreation:
     def test_create_default(self):
         """Test creating with default parameters."""
         water = ResidualWater()
-        assert water.center_ppm == 4.7
+        assert water.center_ppm is None, "None means the nucleus' reference (4.65 ppm for 1H)"
         assert water.phase_deg == 0.0
         assert water.amplitude_scale == 0.1
 
@@ -133,7 +133,7 @@ class TestArtificialPeaksCreation:
         """Test creating with default parameters."""
         peaks = ArtificialPeaks()
         assert len(peaks.peaks) == 1
-        assert peaks.ref_ppm == 4.7
+        assert peaks.ref_ppm is None, "None means the nucleus' reference (4.65 ppm for 1H)"
         assert peaks.amp_mode == 'real'
 
     def test_create_multiple_peaks(self):
@@ -271,3 +271,382 @@ class TestTurcoWater:
         inside = (ppm > 4.3) & (ppm < 5.1)
         assert magnitude[inside].max() == pytest.approx(1.0, abs=1e-9)
         assert magnitude[~inside].max() < 0.2
+
+
+#*************#
+#   helpers   #
+#*************#
+from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+from fsl_mrs.core import MRS
+from augmentrum.core.pipeline import AugmentationPipeline
+from augmentrum.processing.utils import ppm_axis, ppm_reference
+
+N_PTS, SW_HZ, SF_MHZ = 2048, 4000.0, 123.26
+
+
+def _lorentzian_fid(ppm=2.01, lb_hz=6.0, nucleus='1H', n=N_PTS, sw=SW_HZ, sf=SF_MHZ):
+    """A single resonance at *ppm* on the FSL-MRS axis, so there is a peak to scale by."""
+    t = np.arange(n) / sw
+    f0 = (ppm - ppm_reference(nucleus)) * sf
+    return (np.exp(2j * np.pi * f0 * t) * np.exp(-np.pi * lb_hz * t)).astype(np.complex64)
+
+
+def _batch(fid, n_subjects, backend=Backend.NUMPY, nucleus='1H', sw=SW_HZ, sf=SF_MHZ):
+    """*n_subjects* copies of one FID, so any difference between samples is the module's."""
+    niftis = [gen_nifti_mrs(fid.reshape(1, 1, 1, -1).copy(), 1 / sw, sf, nucleus=nucleus)
+              for _ in range(n_subjects)]
+    return NIfTI_MRS_Plus(niftis, backend=backend, volatile=True)
+
+
+def _values(plus):
+    return np.asarray(plus.get_data(Backend.NUMPY))
+
+
+def _fsl_spectrum(fid, nucleus='1H', sw=SW_HZ, sf=SF_MHZ):
+    """The spectrum and ppm axis exactly as FSL-MRS shows them."""
+    mrs = MRS(FID=np.asarray(fid).squeeze(), cf=sf, bw=sw, nucleus=nucleus)
+    return mrs.getAxes(), mrs.get_spec()
+
+
+def _fsl_bin(sw=SW_HZ, sf=SF_MHZ, n=N_PTS):
+    return sw / (n - 1) / sf
+
+
+#**************************************************************************************************#
+#                                     Class TestPpmReference                                       #
+#**************************************************************************************************#
+#                                                                                                  #
+# One ppm axis, the FSL-MRS / NIfTI-MRS one, for every module that places a feature.               #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestPpmReference:
+    """User ppm values mean what an FSL-MRS plot shows."""
+
+    def test_reference_follows_the_nucleus(self):
+        assert ppm_reference('1H') == 4.65
+        assert ppm_reference('2H') == 4.65
+        assert ppm_reference('31P') == 0.0
+        assert ppm_reference('13C') == 0.0
+        assert ppm_reference(None) == 4.65
+
+    def test_unknown_nucleus_warns_and_uses_zero(self):
+        with pytest.warns(UserWarning, match="19F"):
+            assert ppm_reference('19F') == 0.0
+
+    def test_ppm_axis_labels_every_bin_as_fsl_mrs_does(self):
+        """
+        The modules work on fftshift(ifft(fid)), FSL-MRS shows fftshift(fft(fid)):
+        bin j of one is bin (-j) mod n of the other. Every bin but the Nyquist
+        one must carry exactly the ppm FSL-MRS prints for it.
+        """
+        fsl = MRS(FID=np.ones(N_PTS, complex), cf=SF_MHZ, bw=SW_HZ, nucleus='1H').getAxes()
+        axis = ppm_axis(N_PTS, SW_HZ, SF_MHZ, '1H')
+
+        j = np.arange(1, N_PTS)
+        assert np.allclose(axis[j], fsl[(-j) % N_PTS], atol=1e-9)
+        assert np.all(np.diff(axis) < 0), "descending, with the Nyquist alias on top"
+        assert np.isclose(axis[0], axis[1] + _fsl_bin()), "Nyquist bin carries its +sw/2 alias"
+
+    def test_ppm_axis_is_referenced_per_nucleus(self):
+        proton = ppm_axis(N_PTS, SW_HZ, SF_MHZ, '1H')
+        phosphorus = ppm_axis(N_PTS, SW_HZ, 51.7, '31P')
+        assert np.isclose(proton[N_PTS // 2] - 4.65, (phosphorus[N_PTS // 2]) * 51.7 / SF_MHZ)
+
+    def test_a_peak_requested_at_1_30_ppm_lands_there_on_the_fsl_axis(self):
+        """The symptom: with a 4.7 ppm reference the peak landed at 1.25 ppm."""
+        peaks = ArtificialPeaks(peaks=[{'ppm': 1.30, 'amp': 0.5, 'lb_hz': 3.0}])
+        data = _batch(_lorentzian_fid(), 1)
+        added = _values(peaks(data)[0])[0, 0, 0, 0] - _values(data)[0, 0, 0, 0]
+
+        axis, spectrum = _fsl_spectrum(added)
+        assert abs(axis[np.argmax(np.real(spectrum))] - 1.30) <= _fsl_bin()
+
+    def test_31p_places_peaks_from_a_zero_reference(self):
+        """On 31P the carrier is 0 ppm, so 1.30 ppm is 1.30 ppm above it."""
+        sf = 51.7
+        fid = _lorentzian_fid(ppm=-2.5, nucleus='31P', sf=sf)
+        peaks = ArtificialPeaks(peaks=[{'ppm': 1.30, 'amp': 0.5, 'lb_hz': 3.0}])
+        data = _batch(fid, 1, nucleus='31P', sf=sf)
+        added = _values(peaks(data)[0])[0, 0, 0, 0] - _values(data)[0, 0, 0, 0]
+
+        axis, spectrum = _fsl_spectrum(added, nucleus='31P', sf=sf)
+        assert abs(axis[np.argmax(np.real(spectrum))] - 1.30) <= _fsl_bin(sf=sf)
+
+    def test_an_explicit_ref_ppm_still_overrides(self):
+        """ref_ppm=4.7 is the legacy convention: the peak then sits 0.05 ppm low on FSL's axis."""
+        peaks = ArtificialPeaks(peaks=[{'ppm': 1.30, 'amp': 0.5, 'lb_hz': 3.0}], ref_ppm=4.7)
+        data = _batch(_lorentzian_fid(), 1)
+        added = _values(peaks(data)[0])[0, 0, 0, 0] - _values(data)[0, 0, 0, 0]
+
+        axis, spectrum = _fsl_spectrum(added)
+        assert abs(axis[np.argmax(np.real(spectrum))] - 1.25) <= _fsl_bin()
+
+    def test_residual_water_sits_on_the_water(self):
+        """The default water is at 4.65 ppm on the FSL axis, not 0.05 ppm off it."""
+        data = _batch(_lorentzian_fid(), 1)
+        added = _values(ResidualWater(amplitude_scale=0.5)(data)[0])[0, 0, 0, 0] \
+            - _values(data)[0, 0, 0, 0]
+
+        axis, spectrum = _fsl_spectrum(added)
+        assert abs(axis[np.argmax(np.abs(spectrum))] - 4.65) <= _fsl_bin()
+
+
+#**************************************************************************************************#
+#                                   Class TestPerSampleProfiles                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# A batch carries a spread of artefacts, not one artefact copied onto every sample.                #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestPerSampleProfiles:
+    """Ranged parameters are drawn per sample; fixed ones give identical samples."""
+
+    @staticmethod
+    def _added(module, n_subjects=4, backend=Backend.NUMPY, **user_kwargs):
+        data = _batch(_lorentzian_fid(), n_subjects, backend=backend)
+        pipe = AugmentationPipeline([module], user_kwargs=user_kwargs)
+        out, _ = pipe(data, None, batch_params=pipe.sample_batch_parameters(n_subjects))
+        return (_values(out) - _values(data))[:, 0, 0, 0, :]
+
+    @staticmethod
+    def _all_differ(added):
+        return all(not np.allclose(added[i], added[j], atol=1e-6)
+                   for i in range(len(added)) for j in range(i + 1, len(added)))
+
+    def test_residual_water_varies_per_sample_in_a_pipeline(self):
+        added = self._added(ResidualWater(), amplitude_scale=(0.05, 0.3),
+                            center_ppm=(4.55, 4.75), phase_deg=(-30, 30))
+        assert self._all_differ(added)
+
+    def test_residual_water_declares_its_per_sample_parameters(self):
+        assert set(ResidualWater.PER_SAMPLE_PARAMS) == {'amplitude_scale', 'phase_deg',
+                                                        'center_ppm'}
+
+    def test_fixed_residual_water_is_the_same_on_every_sample(self):
+        added = self._added(ResidualWater(amplitude_scale=0.2))
+        assert all(np.allclose(added[0], row, atol=1e-6) for row in added)
+
+    def test_artificial_peaks_draw_a_peak_per_sample(self):
+        """The default is a random lipid-like peak: every sample gets its own."""
+        added = self._added(ArtificialPeaks(seed=0))
+        assert self._all_differ(added)
+
+    def test_fixed_artificial_peaks_are_the_same_on_every_sample(self):
+        peaks = [{'ppm': 3.0, 'amp': 0.1, 'lb_hz': 5.0}]
+        added = self._added(ArtificialPeaks(peaks=peaks, seed=0))
+        assert all(np.allclose(added[0], row, atol=1e-6) for row in added)
+
+    def test_the_default_peak_is_a_random_lipid(self):
+        default = ArtificialPeaks().peaks[0]
+        assert default['ppm'] == (0.9, 1.6)
+        assert default['amp'] == (0.05, 0.3)
+        assert default['lb_hz'] == (5.0, 20.0)
+
+    def test_ranges_stay_inside_their_bounds_and_scalars_repeat(self):
+        module = ArtificialPeaks(peaks=[{'ppm': (0.8, 1.6), 'amp': (0.05, 0.3), 'lb_hz': 7.0,
+                                         'gb_hz': (0.0, 4.0), 'phase_deg': (-30, 30)}], seed=1)
+        (drawn,) = module._draw(256)
+        assert drawn['ppm'].min() >= 0.8 and drawn['ppm'].max() <= 1.6
+        assert drawn['amp'].min() >= 0.05 and drawn['amp'].max() <= 0.3
+        assert drawn['phase_deg'].min() >= -30 and drawn['phase_deg'].max() <= 30
+        assert np.all(drawn['lb_hz'] == 7.0)
+        assert len(np.unique(drawn['ppm'])) == 256, "a range is drawn, not repeated"
+
+    def test_the_amplitude_alias_is_accepted(self):
+        module = ArtificialPeaks(peaks=[{'ppm': 3.0, 'amplitude': 0.2, 'lb_hz': 5.0}])
+        assert module.peaks[0]['amp'] == 0.2
+
+    def test_spurious_echoes_draw_an_echo_per_sample(self):
+        echoes = [{'delay_s': (0.02, 0.2), 'amp': (0.1, 0.3), 'phase_deg': (-90, 90)}]
+        added = self._added(SpuriousEchoes(echoes=echoes, seed=0))
+        assert self._all_differ(added)
+
+    def test_a_sample_shares_its_profile_across_coils(self):
+        """Per sample, not per trace: every coil of a sample sees the same peak."""
+        fid = _lorentzian_fid()
+        volume = np.repeat(fid.reshape(1, 1, 1, -1)[..., None], 3, axis=-1)
+        niftis = []
+        for _ in range(2):
+            nifti = gen_nifti_mrs(volume.copy(), 1 / SW_HZ, SF_MHZ)
+            nifti.set_dim_tag(4, 'DIM_COIL')
+            niftis.append(nifti)
+        data = NIfTI_MRS_Plus(niftis, backend=Backend.NUMPY, volatile=True)
+
+        added = _values(ArtificialPeaks(seed=0)(data)[0]) - _values(data)
+        assert np.allclose(added[..., 0], added[..., 2], atol=1e-6)
+        assert not np.allclose(added[0], added[1], atol=1e-6)
+
+
+#**************************************************************************************************#
+#                                   Class TestListEqualsTensor                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# The NIfTI-list path and the tensor path are one computation written twice.                       #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestListEqualsTensor:
+    """Same seed, same numbers, whichever path and backend runs it."""
+
+    @staticmethod
+    def _spectra(data):
+        return np.fft.fftshift(np.fft.ifft(_values(data), axis=-1), axes=-1)
+
+    @pytest.mark.parametrize("make", [
+        lambda: ArtificialPeaks(seed=5),
+        lambda: ResidualWater(amplitude_scale=0.2, phase_deg=20.0),
+    ], ids=['ArtificialPeaks', 'ResidualWater'])
+    def test_frequency_modules_agree_on_both_paths(self, make):
+        data = _batch(_lorentzian_fid(), 3, backend=Backend.NIFTI_LIST)
+        listed, _ = make().process_nifti_list([n.copy() for n in data.list()])
+        from_list = np.stack([n[:] for n in listed])
+
+        spectra, _ = make().process_tensor(self._spectra(data), sw_hz=SW_HZ, sf_mhz=SF_MHZ,
+                                           nucleus='1H')
+        from_tensor = np.fft.fft(np.fft.ifftshift(spectra, axes=-1), axis=-1)
+
+        assert np.allclose(from_list, from_tensor, atol=1e-5)
+
+    def test_per_sample_vectors_reach_the_list_path(self):
+        module = ResidualWater()
+        module.amplitude_scale = np.array([0.1, 0.2, 0.3])
+        data = _batch(_lorentzian_fid(), 3, backend=Backend.NIFTI_LIST)
+        listed, _ = module.process_nifti_list([n.copy() for n in data.list()])
+        added = np.stack([n[:] for n in listed]) - _values(data)
+        peak = np.abs(np.fft.ifft(added, axis=-1)).max(axis=-1).ravel()
+
+        assert np.allclose(peak / peak[0], [1.0, 2.0, 3.0], rtol=1e-3)
+
+    @pytest.mark.parametrize("make", [
+        lambda: SpuriousEchoes(echoes=[{'delay_s': (0.02, 0.2), 'amp': (0.1, 0.3),
+                                        'phase_deg': (-90, 90), 'freq_hz': (-20, 20)}], seed=2),
+        lambda: SpuriousEchoes(mode='hybrid', echoes=[{'tau': (0.01, 0.05), 'alpha': 0.3,
+                                                       'T2': 0.01, 'df_hz': 30.0}], seed=2),
+        lambda: SpuriousEchoes(mode='echo', echoes=[{'alpha': 0.3, 't_echo': (0.05, 0.2),
+                                                     'T2': 0.03}], seed=2),
+        lambda: ArtificialPeaks(seed=2),
+        lambda: ResidualWater(model='turco', amplitude_scale=0.3),
+    ], ids=['replica', 'hybrid', 'echo', 'ArtificialPeaks', 'ResidualWater'])
+    def test_nifti_list_numpy_and_torch_give_the_same_batch(self, make):
+        pytest.importorskip('torch')
+        outputs = [_values(make()(_batch(_lorentzian_fid(), 3, backend=backend))[0])
+                   for backend in (Backend.NIFTI_LIST, Backend.NUMPY, Backend.PYTORCH)]
+        assert np.allclose(outputs[0], outputs[1], atol=1e-5)
+        assert np.allclose(outputs[1], outputs[2], atol=1e-5)
+
+
+#**************************************************************************************************#
+#                                       Class TestReplica                                          #
+#**************************************************************************************************#
+#                                                                                                  #
+# 'replica' is a delayed copy of the FID - a ghost - not a rescaled copy of the spectrum.          #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestReplica:
+    """A replica at tau modulates the spectrum with period 1/tau Hz."""
+
+    TAU, AMP = 0.05, 0.3
+
+    @staticmethod
+    def _fid(n=2048, sw=2000.0):
+        t = np.arange(n) / sw
+        return np.exp(-t * 15.0).astype(np.complex128)[None, :]
+
+    def _spectra(self, sw=2000.0):
+        fid = self._fid(sw=sw)
+        out, _ = SpuriousEchoes(echoes=[{'delay_s': self.TAU, 'amp': self.AMP,
+                                         'decay_hz': 0.0}]).process_tensor(fid, sw_hz=sw)
+        freq = np.fft.fftshift(np.fft.fftfreq(fid.shape[-1], 1 / sw))
+        return freq, np.fft.fftshift(np.fft.fft(fid[0])), np.fft.fftshift(np.fft.fft(out[0]))
+
+    def test_replica_modulates_the_spectrum_with_period_one_over_tau(self):
+        freq, before, after = self._spectra()
+        ratio = np.abs(after) / np.abs(before)
+        for f_hz in (0.0, 10.0, 20.0, 30.0, 40.0):
+            expected = abs(1 + self.AMP * np.exp(-2j * np.pi * f_hz * self.TAU))
+            assert np.isclose(ratio[np.argmin(np.abs(freq - f_hz))], expected, atol=0.02), \
+                f"ratio at {f_hz} Hz should be {expected:.3f}"
+
+    def test_the_difference_is_not_the_spectrum(self):
+        """The old model gave "fid + fid * envelope": a phased copy of the whole spectrum."""
+        _, before, after = self._spectra()
+        corr = abs(np.corrcoef(np.real(after - before), np.real(before))[0, 1])
+        assert corr < 0.6, f"the replica's delta correlates {corr:.3f} with the spectrum"
+
+    def test_the_ghost_starts_at_the_delay_with_the_fid_s_first_point(self):
+        sw, n = 2000.0, 1024
+        fid = self._fid(n=n, sw=sw)
+        out, _ = SpuriousEchoes(echoes=[{'delay_s': 0.1, 'amp': 0.3, 'phase_deg': 90.0,
+                                         'decay_hz': 0.0}]).process_tensor(fid, sw_hz=sw)
+        ghost = np.asarray(out)[0] - fid[0]
+        shift = int(round(0.1 * sw))
+
+        assert np.allclose(ghost[:shift], 0.0)
+        assert np.isclose(ghost[shift], 0.3 * np.exp(1j * np.pi / 2) * fid[0, 0])
+        assert np.allclose(ghost[shift:], 0.3j * fid[0, :n - shift])
+
+    def test_the_default_replica_is_a_real_echo(self):
+        """The default echo (0.1 s) must be a shifted copy, not a step envelope."""
+        sw = 2000.0
+        fid = self._fid(n=1024, sw=sw)
+        out, _ = SpuriousEchoes().process_tensor(fid, sw_hz=sw)
+        ghost = np.asarray(out)[0] - fid[0]
+        assert np.allclose(ghost[:200], 0.0)
+        assert not np.allclose(ghost[200:], 0.0)
+
+    def test_hybrid_is_unchanged_and_matches_its_numpy_path(self):
+        fid = self._fid(n=1024, sw=2000.0)
+        echo = [{'tau': 0.02, 'alpha': 0.3, 'phase_deg': 25.0, 't_echo': 0.05, 'T2': 0.03,
+                 'df_hz': 35.0}]
+        module = SpuriousEchoes(mode='hybrid', echoes=echo)
+        tensor_out, _ = module.process_tensor(fid, sw_hz=2000.0)
+
+        t = np.arange(1024) / 2000.0
+        delayed = np.zeros(1024, complex)
+        delayed[40:] = fid[0, :-40]
+        mod = np.exp(1j * (2 * np.pi * 35.0 * (t - 0.02) + np.deg2rad(25.0)))
+        ghost = 0.3 * np.max(np.abs(fid)) * (delayed / np.max(np.abs(fid))) \
+            * np.exp(-np.abs(t - 0.05) / 0.03) * mod
+        assert np.allclose(np.asarray(tensor_out)[0], fid[0] + ghost, atol=1e-6)
+        assert np.allclose(module._add_echoes(fid[0], 2000.0), fid[0] + ghost, atol=1e-6)
+
+    def test_echo_ranges_stay_inside_their_bounds(self):
+        module = SpuriousEchoes(echoes=[{'delay_s': (0.05, 0.1), 'amp': (0.1, 0.2),
+                                         'decay_hz': 4.0}], seed=3)
+        (drawn,) = module._draw(128, 2000.0)
+        assert drawn['delay_s'].min() >= 0.05 - 1e-9 and drawn['delay_s'].max() <= 0.1 + 1e-9
+        assert drawn['amp'].min() >= 0.1 and drawn['amp'].max() <= 0.2
+        assert np.all(drawn['decay_hz'] == 4.0)
+        assert np.all(drawn['shift'] == np.round(drawn['delay_s'] * 2000.0))
+
+
+#**************************************************************************************************#
+#                                 Class TestSeededReproducibility                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# A seed reproduces the batch on every backend, and the backends agree.                            #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestSeededReproducibility:
+    """The per-sample draws come from one NumPy generator per call, whatever the backend."""
+
+    @pytest.mark.parametrize("make", [
+        lambda seed: ArtificialPeaks(seed=seed),
+        lambda seed: SpuriousEchoes(echoes=[{'delay_s': (0.02, 0.2), 'amp': (0.1, 0.3),
+                                             'phase_deg': (-90, 90)}], seed=seed),
+    ], ids=['ArtificialPeaks', 'SpuriousEchoes'])
+    def test_seeded_runs_reproduce_on_numpy_and_torch(self, make):
+        pytest.importorskip('torch')
+        first = _values(make(11)(_batch(_lorentzian_fid(), 3, backend=Backend.NUMPY))[0])
+        again = _values(make(11)(_batch(_lorentzian_fid(), 3, backend=Backend.NUMPY))[0])
+        torch_out = _values(make(11)(_batch(_lorentzian_fid(), 3, backend=Backend.PYTORCH))[0])
+        other = _values(make(12)(_batch(_lorentzian_fid(), 3, backend=Backend.NUMPY))[0])
+
+        assert np.allclose(first, again)
+        assert np.allclose(first, torch_out, atol=1e-5)
+        assert not np.allclose(first, other, atol=1e-6)
+
+    def test_consecutive_batches_differ_under_a_seed(self):
+        module = ArtificialPeaks(seed=11)
+        first = _values(module(_batch(_lorentzian_fid(), 2))[0])
+        second = _values(module(_batch(_lorentzian_fid(), 2))[0])
+        assert not np.allclose(first, second, atol=1e-6)

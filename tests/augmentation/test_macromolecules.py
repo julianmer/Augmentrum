@@ -155,3 +155,89 @@ def test_semi_parametrized_broadens_and_reproduces():
     assert fwhm(broad) > 2 * fwhm(sharp)
     again = source.profile(ppm, np.random.default_rng(0))
     assert np.allclose(broad, again)
+
+
+#**************************************************************************************************#
+#                                        per-sample draws                                          #
+#**************************************************************************************************#
+def _batch_of(fid, n_subjects, backend=Backend.NUMPY):
+    niftis = [gen_nifti_mrs(fid.reshape(1, 1, 1, -1).astype(np.complex64), 1 / SW_HZ, SF_MHZ)
+              for _ in range(n_subjects)]
+    return NIfTI_MRS_Plus(niftis, backend=backend, volatile=True)
+
+
+def _naa_fid():
+    t = np.arange(N_PTS) / SW_HZ
+    return np.exp(2j * np.pi * ((2.01 - 4.65) * SF_MHZ) * t) * np.exp(-t * 8 * np.pi)
+
+
+def _added(module, data):
+    before = np.asarray(data.get_data(Backend.NUMPY))
+    after = np.asarray(module(data)[0].get_data(Backend.NUMPY))
+    return (after - before)[:, 0, 0, 0, :]
+
+
+def test_a_randomized_source_is_drawn_per_sample():
+    added = _added(Macromolecules(mm_source='semi_parametrized', seed=0), _batch_of(_naa_fid(), 4))
+    for i in range(4):
+        for j in range(i + 1, 4):
+            assert not np.allclose(added[i], added[j], atol=1e-6)
+
+
+def test_a_fixed_source_is_shared_by_the_batch():
+    assert not Parametrized().varies
+    assert Parametrized(amp_jitter=0.1).varies
+    assert SemiParametrized().varies
+    added = _added(Macromolecules(seed=0), _batch_of(_naa_fid(), 3))
+    assert np.allclose(added[0], added[1]) and np.allclose(added[0], added[2])
+
+
+def test_mm_scale_is_drawn_per_sample_in_a_pipeline():
+    from augmentrum.core.pipeline import AugmentationPipeline
+
+    assert 'mm_scale' in Macromolecules.PER_SAMPLE_PARAMS
+    data = _batch_of(_naa_fid(), 4)
+    pipe = AugmentationPipeline([Macromolecules(seed=0)], user_kwargs={'mm_scale': (0.05, 0.3)})
+    params = pipe.sample_batch_parameters(4)
+    out, _ = pipe(data, None, batch_params=params)
+
+    to_spec = lambda x: np.fft.fftshift(np.fft.ifft(x, axis=-1), axes=-1)
+    before = to_spec(np.asarray(data.get_data(Backend.NUMPY)))[:, 0, 0, 0, :]
+    added = to_spec(np.asarray(out.get_data(Backend.NUMPY)))[:, 0, 0, 0, :] - before
+    ratio = np.max(np.abs(np.real(added)), axis=-1) / np.max(np.abs(np.real(before)), axis=-1)
+    assert np.allclose(ratio, params[0]['mm_scale'], rtol=1e-3)
+    assert len(np.unique(np.round(ratio, 6))) == 4
+
+
+def test_components_land_on_the_fsl_axis():
+    """A component at 2.04 ppm shows at 2.04 ppm on an FSL-MRS plot."""
+    from fsl_mrs.core import MRS
+
+    source = Parametrized(components=((2.04, 0.08, 1.0),))
+    added = _added(Macromolecules(mm_source=source, mm_scale=0.5), _batch_of(_naa_fid(), 1))[0]
+    mrs = MRS(FID=added, cf=SF_MHZ, bw=SW_HZ, nucleus='1H')
+    axis, spectrum = mrs.getAxes(), mrs.get_spec()
+    assert abs(axis[np.argmax(np.real(spectrum))] - 2.04) <= SW_HZ / (N_PTS - 1) / SF_MHZ
+
+
+def test_seeded_numpy_and_torch_agree():
+    pytest.importorskip('torch')
+    first = _added(Macromolecules(mm_source='semi_parametrized', seed=9), _batch_of(_naa_fid(), 3))
+    torch_out = _added(Macromolecules(mm_source='semi_parametrized', seed=9),
+                       _batch_of(_naa_fid(), 3, backend=Backend.PYTORCH))
+    other = _added(Macromolecules(mm_source='semi_parametrized', seed=10), _batch_of(_naa_fid(), 3))
+    assert np.allclose(first, torch_out, atol=1e-5)
+    assert not np.allclose(first, other, atol=1e-6)
+
+
+def test_semi_parametrized_copes_with_the_nyquist_alias():
+    """The FSL-referenced axis puts the Nyquist alias first; the bin width must not read it."""
+    from augmentrum.processing.utils import ppm_axis
+
+    ppm = ppm_axis(N_PTS, SW_HZ, SF_MHZ)
+    source = SemiParametrized(base=Parametrized(components=((2.0, 0.05, 1.0),)),
+                              broaden_ppm=(0.2, 0.2), amp_mod=0.0)
+    profile = source.profile(ppm, np.random.default_rng(0))
+    real = np.real(profile)
+    above = np.flatnonzero(real >= 0.5 * real.max())
+    assert 0.15 < abs(ppm[above[-1]] - ppm[above[0]]) < 0.3

@@ -401,3 +401,197 @@ class TestEchoMode:
         numpy_out = module._add_echoes(fid[0], 2000.0)
 
         assert np.allclose(np.asarray(tensor_out)[0], numpy_out, atol=1e-5)
+
+
+#*************#
+#   helpers   #
+#*************#
+from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+
+N_PTS, SW_HZ, SF_MHZ = 2048, 4000.0, 123.26
+
+
+def _water(coefficient, n=N_PTS, sw=SW_HZ, t2=0.06, tau=0.03, offset_hz=5.0):
+    """
+    An uncorrected water: a decaying eddy-current phase on top of a frequency
+    offset and a constant phase, decaying into a noise floor like a real one.
+    """
+    t = np.arange(n) / sw
+    rng = np.random.default_rng(int(abs(coefficient) * 1000))
+    phase = coefficient * np.exp(-t / tau) + 2 * np.pi * offset_hz * t + 0.4
+    fid = np.exp(-t / t2) * np.exp(1j * phase)
+    return fid + 1e-4 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+
+
+LIBRARY = [_water(c) for c in (0.6, -0.9, 1.3, -0.4)]
+
+
+def _ones(n_subjects, backend=Backend.NUMPY, n=N_PTS, sw=SW_HZ):
+    """Constant FIDs: whatever phase comes out is the trajectory that was applied."""
+    niftis = [gen_nifti_mrs(np.ones((1, 1, 1, n), np.complex64), 1 / sw, SF_MHZ)
+              for _ in range(n_subjects)]
+    return NIfTI_MRS_Plus(niftis, backend=backend, volatile=True)
+
+
+def _phases(plus):
+    values = np.asarray(plus.get_data(Backend.NUMPY))
+    return np.unwrap(np.angle(values), axis=-1)[:, 0, 0, 0, :]
+
+
+#**************************************************************************************************#
+#                                     Class TestEddySource                                         #
+#**************************************************************************************************#
+#                                                                                                  #
+# A library of uncorrected waters, one trajectory drawn per sample.                                #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestEddySource:
+    """mode='water' with a source library."""
+
+    def test_a_source_implies_water_mode_and_refuses_synthetic(self):
+        assert EddyCurrent(source=LIBRARY).mode == 'water'
+        assert EddyCurrent().mode == 'synthetic'
+        with pytest.raises(ValueError, match="source"):
+            EddyCurrent(mode='synthetic', source=LIBRARY)
+        with pytest.raises(ValueError, match="empty"):
+            EddyCurrent(source=[])
+
+    def test_draws_differ_within_a_batch(self):
+        module = EddyCurrent(source=LIBRARY, seed=0)
+        phases = _phases(module(_ones(8))[0])
+        distinct = {tuple(np.round(row[::64], 4)) for row in phases}
+        assert len(distinct) >= 2, "every sample got the same trajectory"
+        assert len(distinct) <= len(LIBRARY)
+
+    def test_the_library_is_what_is_drawn(self):
+        module = EddyCurrent(source=LIBRARY, seed=0)
+        library = module._trajectories(N_PTS, SW_HZ)
+        for row in _phases(module(_ones(6))[0]):
+            assert any(np.allclose(row, entry, atol=1e-5) for entry in library)
+
+    def test_same_seed_reproduces_and_seeds_differ(self):
+        first = _phases(EddyCurrent(source=LIBRARY, seed=4)(_ones(6))[0])
+        again = _phases(EddyCurrent(source=LIBRARY, seed=4)(_ones(6))[0])
+        other = _phases(EddyCurrent(source=LIBRARY, seed=5)(_ones(6))[0])
+        assert np.allclose(first, again)
+        assert not np.allclose(first, other, atol=1e-6)
+
+    def test_numpy_torch_and_nifti_list_agree(self):
+        pytest.importorskip('torch')
+        outputs = [_phases(EddyCurrent(source=LIBRARY, seed=4)(_ones(5, backend=backend))[0])
+                   for backend in (Backend.NUMPY, Backend.PYTORCH, Backend.NIFTI_LIST)]
+        assert np.allclose(outputs[0], outputs[1], atol=1e-5)
+        assert np.allclose(outputs[0], outputs[2], atol=1e-5)
+
+    def test_without_a_source_the_call_time_water_is_used(self):
+        module = EddyCurrent(mode='water')
+        water = NIfTI_MRS_Plus(
+            [gen_nifti_mrs(LIBRARY[2].reshape(1, 1, 1, -1).astype(np.complex64), 1 / SW_HZ,
+                           SF_MHZ)], backend=Backend.NUMPY, volatile=True)
+        phase = _phases(module(_ones(1), water)[0])[0]
+        expected = module._ec_phase_from_water(LIBRARY[2].astype(np.complex64), SW_HZ)
+        assert np.allclose(phase, expected, atol=1e-5)
+        assert np.abs(phase).max() > 0.1, "an uncorrected water must leave a trajectory"
+
+    def test_a_library_of_one_equals_the_call_time_water(self):
+        water = NIfTI_MRS_Plus(
+            [gen_nifti_mrs(LIBRARY[0].reshape(1, 1, 1, -1).astype(np.complex64), 1 / SW_HZ,
+                           SF_MHZ)], backend=Backend.NUMPY, volatile=True)
+        at_call = _phases(EddyCurrent(mode='water')(_ones(2), water)[0])
+        from_source = _phases(EddyCurrent(source=[LIBRARY[0].astype(np.complex64)])(_ones(2))[0])
+        assert np.allclose(at_call, from_source, atol=1e-5)
+
+    def test_water_mode_without_source_still_needs_water(self):
+        with pytest.raises(ValueError, match="Water reference required"):
+            EddyCurrent(mode='water')(_ones(1), None)
+
+    def test_trajectories_start_at_zero_and_hold_after_the_water_decays(self):
+        """
+        Unwrapping a decayed water random-walks through noise; the phase is
+        read while the water is above the floor and held from there.
+        """
+        module = EddyCurrent(source=LIBRARY)
+        (phase,) = module._trajectories(N_PTS, SW_HZ)[:1]
+        magnitude = np.abs(LIBRARY[0])
+        last = int(np.flatnonzero(magnitude < module.WATER_FLOOR * magnitude.max())[0])
+
+        assert phase[0] == 0.0
+        assert np.allclose(phase[last + 200:], phase[-1], atol=1e-3)
+        assert np.abs(phase[:last]).max() > 0.1
+
+    def test_a_corrected_water_leaves_almost_nothing(self):
+        """The symptom: after ECC the water's phase is flat, so 'water' mode did nothing."""
+        t = np.arange(N_PTS) / SW_HZ
+        corrected = np.exp(-t / 0.06) * np.exp(1j * (2 * np.pi * 5.0 * t + 0.4))
+        phase = EddyCurrent(source=[corrected])._trajectories(N_PTS, SW_HZ)[0]
+        assert np.abs(phase).max() < 1e-3
+
+    def test_sources_are_resampled_to_the_data_grid(self):
+        short = [_water(0.6, n=1024, sw=2000.0)]
+        nifti_source = [gen_nifti_mrs(short[0].reshape(1, 1, 1, -1), 1 / 2000.0, SF_MHZ)]
+
+        module = EddyCurrent(source=nifti_source)
+        (resampled,) = module._trajectories(N_PTS, SW_HZ)
+        (own_grid,) = module._trajectories(1024, 2000.0)
+        assert resampled.shape == (N_PTS,)
+        assert np.allclose(resampled, np.interp(np.arange(N_PTS) / SW_HZ,
+                                                np.arange(1024) / 2000.0, own_grid,
+                                                right=own_grid[-1]))
+
+        # a bare array is taken to share the data's dwell time
+        bare = EddyCurrent(source=short)._trajectories(1024, 2000.0)[0]
+        assert np.allclose(bare, own_grid)
+
+    def test_strength_is_read_per_sample(self):
+        module = EddyCurrent(source=[LIBRARY[0]], seed=0)
+        module.strength = np.array([0.5, 1.0, 2.0])
+        phases = _phases(module(_ones(3))[0])
+        assert np.allclose(phases[1], 2 * phases[0], atol=1e-5)
+        assert np.allclose(phases[2], 4 * phases[0], atol=1e-5)
+        assert 'strength' in EddyCurrent.PER_SAMPLE_PARAMS
+
+    def test_a_multicoil_data_batch_gets_one_trajectory_per_sample(self):
+        volume = np.ones((1, 1, 1, 512, 3), np.complex64)
+        niftis = []
+        for _ in range(2):
+            nifti = gen_nifti_mrs(volume.copy(), 1 / SW_HZ, SF_MHZ)
+            nifti.set_dim_tag(4, 'DIM_COIL')
+            niftis.append(nifti)
+        data = NIfTI_MRS_Plus(niftis, backend=Backend.NUMPY, volatile=True)
+        out = np.asarray(EddyCurrent(source=LIBRARY, seed=0)(data)[0].get_data(Backend.NUMPY))
+        assert out.shape == (2, 1, 1, 1, 512, 3)
+        assert np.allclose(out[..., 0], out[..., 2])
+
+
+#**************************************************************************************************#
+#                                Class TestSyntheticTrajectory                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# The synthetic trajectory is a stationary low-passed process anchored at zero.                    #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestSyntheticTrajectory:
+    """mode='synthetic' after the fix."""
+
+    def test_phase_starts_at_zero(self):
+        phases = _phases(EddyCurrent(seed=0)(_ones(4))[0])
+        assert np.allclose(phases[:, 0], 0.0, atol=1e-6)
+
+    def test_no_startup_transient(self):
+        """
+        Filtering exactly N points let filtfilt start from the first raw noise
+        sample, a 0.6 rad transient decaying over the first 100 ms; the
+        trajectory's early excursion must be of the low-passed process' size.
+        """
+        module = EddyCurrent(seed=0)
+        rows = np.stack([module._synth_ec_phase(N_PTS, SW_HZ, np.random.default_rng(k))
+                         for k in range(40)])
+        early = np.abs(rows[:, :400]).max(axis=1).mean()
+        assert early < 0.3, f"{early:.2f} rad within 100 ms is a filter transient"
+        assert rows.std(axis=1).mean() < 0.15
+
+    def test_list_and_tensor_paths_agree(self):
+        first = _phases(EddyCurrent(seed=3)(_ones(3, backend=Backend.NUMPY))[0])
+        listed = _phases(EddyCurrent(seed=3)(_ones(3, backend=Backend.NIFTI_LIST))[0])
+        assert np.allclose(first, listed, atol=1e-5)
+        assert not np.allclose(first[0], first[1], atol=1e-6), "one trajectory per sample"

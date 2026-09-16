@@ -664,9 +664,9 @@ class TestPpmAxis:
         from augmentrum.processing.utils import ppm_axis, ppm_shift_axis
         fsl = ppm_shift_axis(64, SW_HZ, SF_MHZ)
         ours = ppm_axis(64, SW_HZ, SF_MHZ)
-        assert np.allclose(np.sort(ours), np.sort(fsl))
-        assert ours[0] == fsl[0]                      # Nyquist stays put
-        assert np.all(np.diff(ours[1:]) < 0)          # then descending
+        assert np.allclose(ours[1:], fsl[::-1][:-1])   # bin j here is FSL bin (-j) mod n
+        assert np.isclose(ours[0], fsl[-1] + (fsl[1] - fsl[0]))   # Nyquist: its +sw/2 alias
+        assert np.all(np.diff(ours) < 0)              # so the axis stays monotonic
 
     def test_ref_ppm_override_equals_the_nucleus_reference(self):
         """Saying 4.65 explicitly is the same as letting 1H imply it."""
