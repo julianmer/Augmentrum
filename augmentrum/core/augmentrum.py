@@ -806,6 +806,45 @@ class Augmentrum:
             return module_class, dict(fixed_kwargs)
         return entry, {}
 
+    @classmethod
+    def accepted_parameters(cls, pipelines) -> set:
+        """
+        The kwargs the modules of a pipeline spec accept, before it is built.
+
+        A dataset factory carries defaults that only mean something with a
+        certain module present - a voxel size for the spatial augmentation,
+        an absolute sigma for the noise - and a user who hands the factory an
+        empty or different pipeline must not be refused for defaults they
+        never asked for. This answers "would this kwarg reach anything" from
+        the spec alone, so a factory can drop the defaults that would not.
+
+        Args:
+            pipelines: A pipeline spec as "Augmentrum" takes it: None, a list
+                of entries, an "AugmentationPipeline", or a dict of those per
+                split.
+
+        Returns:
+            The union of the constructor parameter names of every module named
+            or instantiated in the spec, plus the sampling controls.
+        """
+        accepted = set(AugmentationPipeline.GLOBAL_KEYS)
+        specs = list(pipelines.values()) if isinstance(pipelines, dict) else [pipelines]
+        for spec in specs:
+            if spec is None:
+                accepted.update(constructor_params(RawProcessor))
+            elif isinstance(spec, AugmentationPipeline):
+                for step in spec.steps:
+                    accepted.update(constructor_params(step))
+            else:
+                for entry in spec:
+                    name, module, _ = cls._parse_pipeline_entry(entry)
+                    if name == 'tap' or (name and name.startswith('tap:')):
+                        continue
+                    if module is None:
+                        module, _ = cls.resolve_module(name)
+                    accepted.update(constructor_params(module))
+        return accepted
+
     @staticmethod
     def _parse_pipeline_entry(entry):
         """

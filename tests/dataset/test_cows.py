@@ -362,27 +362,27 @@ def test_load_mats_pairs_each_scan_with_its_water(tmp_path):
 #***************#
 #   factory     #
 #***************#
-def test_the_factory_passes_subject_groups_only_when_augmentrum_takes_them(study, synthetic,
-                                                                           monkeypatch):
+def test_the_factory_splits_by_subject(study, synthetic, monkeypatch):
     received = {}
 
-    class Grouped:
+    class Recorder(cows.Augmentrum):
+        """Records the call instead of building; keeps the class-level queries."""
         def __init__(self, data, water=None, groups=None, **kwargs):
-            received.update(groups=groups, n=len(data))
+            received.update(groups=groups, n=len(data), kwargs=kwargs)
 
-    class Plain:
-        def __init__(self, data, water=None, **kwargs):
-            received.update(kwargs=kwargs, n=len(data))
-
-    monkeypatch.setattr(cows, 'Augmentrum', Grouped)
+    monkeypatch.setattr(cows, 'Augmentrum', Recorder)
     cows.COWSData(study)
     assert received['n'] == 4
     assert received['groups'] == ['sub-01', 'sub-01', 'sub-01', 'sub-10']
+    # the default pipelines draw coils and transients, so their ranges go through
+    assert received['kwargs']['n_coils'] == (1, None)
+    assert received['kwargs']['n_averages'] == (1, None)
 
     received.clear()
-    monkeypatch.setattr(cows, 'Augmentrum', Plain)
-    cows.COWSData(study, subjects='sub-10')
-    assert received['n'] == 1 and 'groups' not in received['kwargs']
+    cows.COWSData(study, subjects='sub-10', pipelines={})
+    assert received['n'] == 1 and received['groups'] == ['sub-10']
+    # nothing in an empty pipeline takes a sampling range, so none is passed
+    assert 'n_coils' not in received['kwargs'] and 'n_averages' not in received['kwargs']
 
 
 def test_the_factory_builds_an_augmentrum(study, synthetic):

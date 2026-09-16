@@ -314,7 +314,8 @@ def test_noise_statistic_runs_along_the_spectrum_not_across_coils():
     weak = rng.standard_normal((1, 1, 1, 1, 256)) + 1j * rng.standard_normal((1, 1, 1, 1, 256))
     data = np.stack([weak, 1000.0 * weak], axis=-1)             # (1, 1, 1, 1, T, C)
 
-    out, _ = Noise(sigma_frac=0.01, seed=0).process_tensor(data)
+    # Per-trace levels are opt-in: by default a coil array shares one level.
+    out, _ = Noise(sigma_frac=0.01, seed=0, global_scale=False).process_tensor(data)
     added = np.asarray(out) - data
 
     ratio = added[..., 1].std() / added[..., 0].std()

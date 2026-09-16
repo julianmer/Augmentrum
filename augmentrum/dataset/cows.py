@@ -17,7 +17,6 @@
 #*************#
 #   imports   #
 #*************#
-import inspect
 import json
 import os
 import re
@@ -373,8 +372,19 @@ def COWSData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
     Returns:
         Augmentrum instance with COWS data loaded.
     """
+    if pipelines is None:
+        # Train on random coil and transient subsets of the raw acquisition, then
+        # process; validate and test on the full acquisition, processed the same way.
+        pipelines = {'train': ['coil_sampling', 'average_sampling', 'processing'],
+                     'val': ['processing'], 'test': ['processing']}
     if modes is None:
-        modes = {'train': 'random', 'val': 'deterministic', 'test': 'deterministic'}
+        modes = {'train': 'on-the-fly', 'val': 'fixed', 'test': 'fixed'}
+
+    # The sampling ranges only reach a pipeline that draws; with the samplers
+    # absent, Augmentrum would rightly refuse them as unknown kwargs.
+    accepted = Augmentrum.accepted_parameters(pipelines)
+    sampling = {key: value for key, value in (('n_coils', n_coils), ('n_averages', n_averages))
+                if key in accepted}
 
     loader = COWSDataModule(data_dir=data_dir, location=location, water_sup=water_sup,
                             subjects=subjects, remove_oversampling=remove_oversampling,
@@ -386,11 +396,8 @@ def COWSData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
     else:
         raise ValueError(f"source must be 'twix' or 'mat', got {source!r}")
 
-    # Split by subject once Augmentrum takes "groups" (added on another branch); passing
-    # it into **kwargs before then would only reach the modules, so check the signature.
-    grouped = {}
-    if 'groups' in inspect.signature(Augmentrum.__init__).parameters:
-        grouped['groups'] = [scan_info(nifti)['SubjectID'] for nifti in data]
+    # Split by subject: the scans of one person never straddle train and validation.
+    groups = [scan_info(nifti)['SubjectID'] for nifti in data]
 
     return Augmentrum(
         data=data,
@@ -402,9 +409,8 @@ def COWSData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
         batch_size=batch_size,
         seed=seed,
         volatile=volatile,
-        n_coils=n_coils,
-        n_averages=n_averages,
-        **grouped,
+        groups=groups,
+        **sampling,
         **kwargs
     )
 

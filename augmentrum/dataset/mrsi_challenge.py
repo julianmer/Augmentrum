@@ -843,10 +843,16 @@ def MRSIChallengeData(data_dir: str = 'data/mrsi_challenge',
     # Defaults suited to this data. Spatial augmentation needs the real voxel size
     # to rotate physically, and noise needs an absolute sigma because a per-voxel
     # statistic would leave the background noiseless.
-    kwargs.setdefault('pixdim', MRSIChallengeDataModule.VOXEL_MM)
-    kwargs.setdefault('allow_rot90', False)      # 179.2 x 224.0 mm is not square
-    kwargs.setdefault('global_scale', True)
-    kwargs.setdefault('sigma', 1.0e-3)           # the challenge's own training sigma
+    # Applied only where a module of the requested pipelines takes them: an empty
+    # or custom pipeline would otherwise be refused for defaults nobody asked for.
+    accepted = Augmentrum.accepted_parameters(pipelines)
+    defaults = {'pixdim': MRSIChallengeDataModule.VOXEL_MM,
+                'allow_rot90': False,            # 179.2 x 224.0 mm is not square
+                'global_scale': True,
+                'sigma': 1.0e-3}                 # the challenge's own training sigma
+    for key, value in defaults.items():
+        if key in accepted:
+            kwargs.setdefault(key, value)
 
     aug = Augmentrum(
         data=all_data,
