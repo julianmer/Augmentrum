@@ -296,79 +296,16 @@ def run_fitting_pipeline(config):
                 continue
 
     elif data_format == 'mat':
-        # The .mat files contain structured MATLAB arrays with fields:
-        #   exptDat[0][0]['fid']  -> complex FID data
-        #   exptDat[0][0]['sf']   -> spectrometer frequency (MHz)
-        #   exptDat[0][0]['sw_h'] -> spectral bandwidth (Hz)
-        #   exptDat[0][0]['nspecC'] -> number of spectral points
-        print("  Data type: MATLAB structured arrays → extracting FID + metadata")
-
-        from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+        # ─── .mat derivatives: already processed by INSPECTOR (one coil-combined, averaged ───
+        # FID per scan). load_mats() delivers them as standard NIfTI-MRS with the study's
+        # header fields, so there is nothing to convert or conjugate here.
+        print("  Data type: INSPECTOR-processed NIfTI-MRS → used as is")
 
         for i in range(len(data)):
-            print(f"  Converting spectrum {i+1}/{len(data)}: {names[i]}...", end=' ')
-
-            try:
-                raw = data[i]
-
-                # Extract FID and metadata from structured MATLAB array
-                if hasattr(raw, 'dtype') and raw.dtype.names is not None:
-                    # Structured array: exptDat[0] from load_mats()
-                    rec = raw[0] if raw.shape else raw
-                    fid = np.squeeze(rec['fid']).astype(complex)
-                    sf = float(np.squeeze(rec['sf']))     # MHz
-                    sw_h = float(np.squeeze(rec['sw_h'])) # Hz
-                else:
-                    # Already a plain array (shouldn't happen but handle it)
-                    fid = np.squeeze(np.array(raw, dtype=complex))
-                    sf = 123.26   # default 3T Siemens
-                    sw_h = 4000.0 # default bandwidth
-
-                if config['conj']:
-                    fid = np.conjugate(fid)
-
-                # Create NIfTI-MRS object with actual metadata from the .mat file
-                nifti_data = gen_nifti_mrs(
-                    data=fid.reshape((1, 1, 1) + fid.shape),
-                    dwelltime=1.0 / sw_h,
-                    spec_freq=sf,
-                    nucleus='1H',
-                    dim_tags=[None, None, None],
-                    no_conj=True,
-                )
-                processed_data.append(nifti_data)
-
-                # Water reference
-                if i < len(water) and water[i] is not None:
-                    raw_w = water[i]
-                    if hasattr(raw_w, 'dtype') and raw_w.dtype.names is not None:
-                        rec_w = raw_w[0] if raw_w.shape else raw_w
-                        water_fid = np.squeeze(rec_w['fid']).astype(complex)
-                        sf_w = float(np.squeeze(rec_w['sf']))
-                        sw_h_w = float(np.squeeze(rec_w['sw_h']))
-                    else:
-                        water_fid = np.squeeze(np.array(raw_w, dtype=complex))
-                        sf_w, sw_h_w = sf, sw_h
-
-                    if config['conj']:
-                        water_fid = np.conjugate(water_fid)
-
-                    nifti_water = gen_nifti_mrs(
-                        data=water_fid.reshape((1, 1, 1) + water_fid.shape),
-                        dwelltime=1.0 / sw_h_w,
-                        spec_freq=sf_w,
-                        nucleus='1H',
-                        dim_tags=[None, None, None],
-                        no_conj=True,
-                    )
-                    processed_water.append(nifti_water)
-
-                processed_names.append(names[i])
-                print("✓")
-            except Exception as e:
-                processing_failures.append((names[i], str(e)))
-                print(f"✗ Error: {e}")
-                continue
+            processed_data.append(data[i])
+            if i < len(water) and water[i] is not None:
+                processed_water.append(water[i])
+            processed_names.append(names[i])
 
     print(f"\n  Successfully processed: {len(processed_data)} spectra")
     if processing_failures:
