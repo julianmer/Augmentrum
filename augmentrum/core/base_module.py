@@ -382,6 +382,21 @@ class BaseModule(ABC):
         if 'dim_tags' not in kwargs and data.n_subjects > 0:
             kwargs['dim_tags'] = data.dim_tags
 
+        # The water reference is a separate acquisition with its own layout: a
+        # single transient where the metabolite scan has thirty-two, say. A
+        # module handling both must not read the water's axes off the data's.
+        if 'water_dim_tags' not in kwargs and water is not None and water.n_subjects > 0:
+            kwargs['water_dim_tags'] = water.dim_tags
+
+        # The nucleus fixes the ppm reference (4.65 ppm for 1H, the FSL-MRS
+        # convention), so every module places features on the same axis.
+        if 'nucleus' not in kwargs and data.n_subjects > 0:
+            nucleus = data.nucleus
+            if isinstance(nucleus, (list, tuple)):
+                nucleus = nucleus[0] if nucleus else None
+            if nucleus is not None:
+                kwargs['nucleus'] = str(nucleus)
+
         # And where the data is, so a module can act on the domain it is in
         # rather than assume one.
         if 'state' not in kwargs:
