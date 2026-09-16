@@ -123,11 +123,44 @@ def test_volatile_skips_metadata_updates():
 #   registry   #
 #**************#
 def test_registry_aliases_resolve_to_module_classes():
-    """Every name a user can put in a pipeline must map to a BaseModule subclass."""
-    for name, cls in Augmentrum.AVAILABLE_MODULES.items():
+    """
+    Every name a user can put in a pipeline must map to a BaseModule subclass.
+
+    A value is a class or a "(class, fixed_kwargs)" pair; the fixed kwargs must
+    be a dict of names the class's constructor accepts, or the alias would
+    fail on construction.
+    """
+    for name in Augmentrum.AVAILABLE_MODULES:
+        cls, fixed = Augmentrum.resolve_module(name)
         assert isinstance(cls, type) and issubclass(cls, BaseModule), (
-            f"AVAILABLE_MODULES[{name!r}] is {cls!r}, not a BaseModule subclass"
+            f"AVAILABLE_MODULES[{name!r}] resolves to {cls!r}, not a BaseModule subclass"
         )
+        assert isinstance(fixed, dict), f"{name!r}: fixed kwargs must be a dict, got {fixed!r}"
+        accepted = {
+            p.name for p in inspect.signature(cls.__init__).parameters.values()
+            if p.name not in ('self', 'args', 'kwargs')
+        }
+        assert set(fixed) <= accepted, (
+            f"{name!r} fixes {sorted(set(fixed) - accepted)}, which {cls.__name__} does not accept"
+        )
+
+
+def test_registry_aliases_honour_their_fixed_kwargs():
+    """
+    'baseline_bspline' must build a B-spline baseline, not the random walk.
+
+    The three baseline aliases all pointed at BaselineAugmentation without
+    setting "mode", so every one of them silently ran the default random walk.
+    """
+    import numpy as np
+    from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+
+    data = [gen_nifti_mrs((np.random.randn(1, 1, 1, 64) + 1j * np.random.randn(1, 1, 1, 64))
+                          .astype(np.complex64), 1 / 2000, 123.0)]
+    aug = Augmentrum(data=data, pipeline=['baseline_random_walk', 'baseline_bspline',
+                                          'baseline_polynomial'], backend='numpy')
+    modes = [step.mode for step in aug.pipelines['train'].steps]
+    assert modes == ['random_walk', 'bspline', 'polynomial']
 
 
 def test_exported_augmentations_are_reachable_by_name():

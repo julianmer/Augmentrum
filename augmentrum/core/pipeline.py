@@ -14,11 +14,142 @@
 #*************#
 #   imports   #
 #*************#
-from typing import List, Optional, Tuple
+import difflib
+import inspect
+import typing
+import warnings
+from typing import Dict, List, Optional, Sequence, Tuple
+import numpy as np
+from nifti_mrs_plus.random import SeedGenerator
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 from augmentrum.core.base_module import BaseModule, Tap
 from augmentrum.processing.domain import Domain
-import warnings
+
+
+#***************#
+#   seeding     #
+#***************#
+def child_seed(seed, key: Sequence[int]) -> int:
+    """
+    A seed derived from *seed* for one named consumer.
+
+    Every random stream in a run - subject draws, ranged parameters, each
+    module's own generator - is a child of one root seed, so that a single
+    integer fixes the whole run. The children are spawned through NumPy's
+    "SeedSequence" with a spawn key rather than by arithmetic on the seed, so
+    that neighbouring keys give unrelated streams and adding a consumer does
+    not shift the seeds of the others.
+
+    Args:
+        seed: The root seed (any non-negative int).
+        key: The consumer's position, e.g. "(split_index, role)".
+
+    Returns:
+        A 63-bit int usable by "np.random.default_rng" and "SeedGenerator".
+    """
+    sequence = np.random.SeedSequence(int(seed), spawn_key=tuple(int(k) for k in key))
+    return int(sequence.generate_state(1, dtype=np.uint64)[0]) & 0x7FFFFFFFFFFFFFFF
+
+
+#*******************#
+#   introspection   #
+#*******************#
+def constructor_params(module) -> List[str]:
+    """
+    The names a module's constructor accepts, as a pipeline may set them.
+
+    Read from the signature rather than kept in a table, so a new module or
+    argument is picked up without anyone editing a list. "self" and the
+    variadic catch-alls are left out: a "**kwargs" that a constructor merely
+    swallows is not a name a user can meaningfully set.
+
+    Args:
+        module: A module class or instance.
+
+    Returns:
+        The parameter names, in signature order; empty if uninspectable.
+    """
+    cls = module if isinstance(module, type) else module.__class__
+    try:
+        sig = inspect.signature(cls.__init__)
+    except (TypeError, ValueError):
+        params = getattr(module, 'params', None)
+        return list(params.keys()) if isinstance(params, dict) else []
+    return [p.name for p in sig.parameters.values()
+            if p.name != 'self'
+            and p.kind not in (inspect.Parameter.VAR_POSITIONAL,
+                               inspect.Parameter.VAR_KEYWORD)]
+
+
+def integer_params(module) -> set:
+    """
+    The constructor parameters of *module* that count things.
+
+    A range on one of these is drawn as an integer over the inclusive bounds.
+    Read from three places, because none alone covers every module: an "int"
+    annotation ("n_pts: Optional[int]"), an int default ("order: int = 3"),
+    and the module's own "INTEGER_PARAMS" for names typed neither way.
+
+    Args:
+        module: A module class or instance.
+    """
+    cls = module if isinstance(module, type) else module.__class__
+    names = set(getattr(cls, 'INTEGER_PARAMS', ()) or ())
+    try:
+        sig = inspect.signature(cls.__init__)
+    except (TypeError, ValueError):
+        return names
+
+    for p in sig.parameters.values():
+        if _is_integer(p.default):
+            names.add(p.name)
+            continue
+        annotation = p.annotation
+        # Optional[int] / Union[int, None] name int among their arguments
+        candidates = (typing.get_args(annotation) or (annotation,)) \
+            if typing.get_origin(annotation) is typing.Union else (annotation,)
+        if any(a is int for a in candidates):
+            names.add(p.name)
+    return names
+
+
+def suggest_names(name: str, valid, n: int = 3) -> str:
+    """
+    A short "did you mean" clause for an unknown name, empty if nothing is close.
+
+    Args:
+        name: The name that was not recognized.
+        valid: The names that would have been.
+        n: How many suggestions at most.
+    """
+    close = difflib.get_close_matches(name, sorted(set(valid)), n=n, cutoff=0.5)
+    return f" Did you mean {', '.join(repr(c) for c in close)}?" if close else ""
+
+
+def _is_number(value) -> bool:
+    """A real scalar - int or float, NumPy or plain - and not a bool."""
+    return isinstance(value, (int, float, np.integer, np.floating)) \
+        and not isinstance(value, (bool, np.bool_))
+
+
+def _is_integer(value) -> bool:
+    """A plain or NumPy integer, and not a bool."""
+    return isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_))
+
+
+def is_range(value) -> bool:
+    """
+    Whether *value* is a "(min, max)" range the pipeline samples from.
+
+    Only a 2-tuple of numbers, or of numbers and None, counts. A tuple of
+    tuples is structure, not a range - ResidualWater's "peaks" is one - and a
+    list is left to the module too, so nested ranges inside it stay intact.
+
+    Args:
+        value: Any parameter value.
+    """
+    return (isinstance(value, tuple) and len(value) == 2
+            and all(v is None or _is_number(v) for v in value))
 
 
 #**************************************************************************************************#
@@ -42,17 +173,35 @@ class AugmentationPipeline:
     7. Provides warnings if conversions are needed
     
     Uses introspection to automatically discover module parameters!
+
+    Randomness is drawn from two places: ranged parameters from this
+    pipeline's own NumPy generator, and each module's perturbations from the
+    module's "SeedGenerator". "reseed" derives both from one seed, so a
+    pipeline built from unseeded modules becomes reproducible the moment it is
+    handed to a seeded "Augmentrum". A module given an explicit "seed" keeps
+    it.
     """
 
+    #: Keys of "user_kwargs" that steer sampling rather than any module.
+    GLOBAL_KEYS = ('param_distribution', 'param_distributions')
+
     def __init__(self, steps: List[BaseModule], module_names=None, user_kwargs=None,
-                 end_domain=None, domain_planning='auto'):
+                 end_domain=None, domain_planning='auto', step_kwargs=None, seed=None):
         """
         Initializes the pipeline with a list of augmentation steps.
 
         Args:
             steps: List of augmentation step instances (must inherit from BaseModule).
             module_names: List of module name strings (e.g., ['phase', 'noise'])
-            user_kwargs: Dictionary of all user-provided parameters
+            user_kwargs: Dictionary of all user-provided parameters. A key is
+                routed to every step whose constructor names it.
+            step_kwargs: Per-step parameters, one dict per step (or None),
+                aligned with *steps*. These reach that step only and override
+                *user_kwargs* there; a range is sampled per batch like any
+                other, a scalar is injected as given.
+            seed: Fixes every random draw this pipeline makes - see "reseed".
+                None leaves ranged parameters on a fresh generator and the
+                modules on whatever they were built with.
             end_domain: Where the data should be left. Defaults to the NIfTI-MRS
                 canonical form, time domain and image space, so the result can
                 be written out. Pass a "Domain" to stay somewhere else - staying
@@ -73,6 +222,23 @@ class AugmentationPipeline:
         self.module_names = module_names or []
         self.user_kwargs = user_kwargs or {}
         self._validate_steps()
+
+        if step_kwargs is None:
+            step_kwargs = [{} for _ in steps]
+        if len(step_kwargs) != len(steps):
+            raise ValueError(
+                f"step_kwargs has {len(step_kwargs)} entries for {len(steps)} steps; "
+                f"it must be aligned with the steps, with None or {{}} for a step "
+                f"that takes nothing."
+            )
+        self.step_kwargs = [dict(kw or {}) for kw in step_kwargs]
+
+        # Ranged parameters are drawn from here, never from the global
+        # np.random state, so a seed fixes them and nothing else can shift them.
+        self.seed = None
+        self.rng = np.random.default_rng()
+        if seed is not None:
+            self.reseed(seed)
 
         # Store parameters for each module (extracted from user_kwargs using introspection)
         self.module_params = self._extract_module_params()
@@ -99,43 +265,78 @@ class AugmentationPipeline:
         """Whether this pipeline snapshots any stage."""
         return bool(self._tap_indices)
 
+    def reseed(self, seed) -> 'AugmentationPipeline':
+        """
+        Derive every random stream in this pipeline from one seed.
+
+        Two things draw: this pipeline, for ranged parameters, and each step,
+        for its own perturbations. Both get a child of *seed*, spawned by
+        position, so two pipelines built the same way and seeded alike replay
+        the same run - including one assembled by hand from unseeded modules.
+
+        A step constructed with an explicit "seed" is left alone: the user
+        pinned it on purpose, and a pipeline seed should not silently undo that.
+
+        Args:
+            seed: The root seed for this pipeline.
+
+        Returns:
+            "self", so calls can be chained.
+        """
+        self.seed = int(seed)
+        self.rng = np.random.default_rng(child_seed(self.seed, (0,)))
+
+        for index, step in enumerate(self.steps):
+            if not isinstance(step, BaseModule):
+                continue
+            params = getattr(step, 'params', None) or {}
+            if params.get('seed') is not None:
+                continue
+            step.rng = SeedGenerator(child_seed(self.seed, (1, index)))
+        return self
+
     def _extract_module_params(self):
         """
         Extract relevant parameters for each module from user kwargs.
-        
+
         Uses introspection to automatically discover what parameters each module accepts,
-        then extracts matching values from user_kwargs.
-        
-        This is flexible - no need to maintain a hardcoded PARAM_MAPPING!
+        then extracts matching values from user_kwargs. Per-step kwargs are laid
+        over the top, so a global value reaches every step that names it while
+        a step value reaches its step alone.
+
+        A global key that lands on two or more steps is reported once: "lb_hz"
+        names a line width in both LineBroadening and Apodization, and a user
+        who meant one of them would otherwise never learn that both moved.
         """
-        import inspect
-        
         module_params = {}
-        
+        landed = {}   # global key -> [step labels it reached without an override]
+
         for idx, step in enumerate(self.steps):
-            # Get the module's __init__ signature
-            try:
-                sig = inspect.signature(step.__class__.__init__)
-                # Get parameter names (excluding 'self' and 'kwargs')
-                param_names = [
-                    p.name for p in sig.parameters.values()
-                    if p.name not in ['self', 'kwargs', 'args']
-                ]
-            except Exception:
-                # Fallback: try to get from step.params if it exists
-                param_names = []
-                if hasattr(step, 'params'):
-                    param_names = list(step.params.keys())
-            
-            # Extract matching parameters from user_kwargs
+            param_names = constructor_params(step)
+            overrides = self.step_kwargs[idx] if idx < len(self.step_kwargs) else {}
+
             params = {}
             for param_name in param_names:
-                if param_name in self.user_kwargs:
+                if param_name in self.user_kwargs and param_name not in overrides:
                     params[param_name] = self.user_kwargs[param_name]
-            
+                    landed.setdefault(param_name, []).append(
+                        f"{step.__class__.__name__} (step {idx})")
+            params.update(overrides)
+
             if params:
                 module_params[idx] = params
-        
+
+        shared = {key: steps for key, steps in landed.items() if len(steps) > 1}
+        if shared:
+            lines = [f"  {key!r} -> {' and '.join(steps)}" for key, steps in shared.items()]
+            warnings.warn(
+                "A global parameter reaches more than one step, so the same value "
+                "is applied in each of them:\n" + "\n".join(lines) + "\n"
+                "To set one step alone, give the value per step, e.g. "
+                "pipeline=[{'line_broadening': {'lb_hz': (0, 5)}}, ...].",
+                UserWarning, stacklevel=3,
+            )
+
         return module_params
 
     def _validate_steps(self):
@@ -147,7 +348,7 @@ class AugmentationPipeline:
                     f"Backend compatibility checking will be skipped for this step."
                 )
 
-    def sample_batch_parameters(self, batch_size: int):
+    def sample_batch_parameters(self, batch_size: int, rng=None):
         """
         Sample the ranged parameters for the coming batch.
 
@@ -159,11 +360,17 @@ class AugmentationPipeline:
         Args:
             batch_size: Number of samples in the batch, and so the length of
                 any per-sample draw.
+            rng: NumPy generator to draw from. Defaults to the pipeline's own,
+                so a seeded pipeline replays; a caller that wants a draw
+                independent of the batch stream - fixed-mode parameters, say -
+                passes its own.
 
         Returns:
             Dictionary mapping step index to parameter dictionaries
             Format: {step_idx: {param_name: sampled_value}}
         """
+        rng = self.rng if rng is None else rng
+
         # Get distribution settings from user_kwargs
         global_distribution = self.user_kwargs.get('param_distribution', 'uniform')
         per_param_distributions = self.user_kwargs.get('param_distributions', {})
@@ -174,6 +381,7 @@ class AugmentationPipeline:
         for step_idx, params in self.module_params.items():
             step = self.steps[step_idx]
             per_sample = getattr(step, 'PER_SAMPLE_PARAMS', ())
+            counts = integer_params(step)
             step_params = {}
 
             for param_name, param_value in params.items():
@@ -182,7 +390,8 @@ class AugmentationPipeline:
 
                 # Sample value — a vector where the module can broadcast one
                 size = batch_size if param_name in per_sample else None
-                sampled_val = self._sample_from_range(param_value, distribution, size)
+                sampled_val = self._sample_from_range(
+                    param_value, distribution, size, rng, integral=param_name in counts)
                 step_params[param_name] = sampled_val
 
             if step_params:
@@ -190,7 +399,8 @@ class AugmentationPipeline:
 
         return batch_params
 
-    def _sample_from_range(self, param, distribution: str = 'uniform', size=None):
+    def _sample_from_range(self, param, distribution: str = 'uniform', size=None, rng=None,
+                           integral: bool = False):
         """
         Sample from a parameter (range or scalar).
 
@@ -200,16 +410,26 @@ class AugmentationPipeline:
             size: None for a single scalar draw, or a count for a vector of
                 independent draws. Scalars pass through either way — a fixed
                 value is fixed for every sample.
+            rng: NumPy generator to draw from; the pipeline's own by default.
+            integral: The parameter counts things. With integer bounds the
+                draw is then an integer over the inclusive range, as the
+                samplers document "(8, 32)" - a float in [8, 32) cast by the
+                module would never reach 32. Off by default, since "(0, 10)"
+                on a line width means a continuous range written with int
+                literals; "sample_batch_parameters" turns it on for the
+                parameters a module types as integers.
 
         Returns:
             Scalar value, or an array of *size* draws for a ranged parameter.
+            A range with a None bound is handed over unchanged, because only
+            the module knows what "up to all" is.
         """
-        import numpy as np
+        rng = self.rng if rng is None else rng
 
         # If already scalar, return as-is. The type is preserved: casting to
         # float here used to break integer parameters injected through kwargs
         # (np.random.default_rng(0.0) raises where default_rng(0) works).
-        if isinstance(param, (int, float)):
+        if _is_number(param) or isinstance(param, (bool, np.bool_)):
             return param
 
         # If None, return None
@@ -217,45 +437,56 @@ class AugmentationPipeline:
             return None
 
         # If tuple, sample based on distribution
-        if isinstance(param, tuple) and len(param) == 2:
+        if is_range(param):
             min_val, max_val = param
 
-            if min_val is None and max_val is None:
-                return None
-            if min_val is None:
-                min_val = 0.0
-            if max_val is None:
-                max_val = min_val * 2.0
+            # "(1, None)" means "one up to however many there are": the count
+            # is data-dependent and the sampler interprets it, so it must
+            # arrive intact rather than be turned into a number here.
+            if min_val is None or max_val is None:
+                return param
+
+            integral = integral and _is_integer(min_val) and _is_integer(max_val)
+            lo, hi = float(min_val), float(max_val)
 
             # Sample based on distribution
             if distribution in ['gaussian', 'normal']:
                 # Gaussian centered at midpoint, std = range/6 (99.7% within range)
-                mean = (min_val + max_val) / 2.0
-                std = (max_val - min_val) / 6.0
-                value = np.random.normal(mean, std, size)
-                return np.clip(value, min_val, max_val)
+                mean = (lo + hi) / 2.0
+                std = (hi - lo) / 6.0
+                value = np.clip(rng.normal(mean, std, size), lo, hi)
 
             elif distribution == 'exponential':
                 # Exponential biased toward min_val
-                scale = (max_val - min_val) / 3.0
-                value = min_val + np.random.exponential(scale, size)
-                return np.clip(value, min_val, max_val)
+                scale = (hi - lo) / 3.0
+                value = np.clip(lo + rng.exponential(scale, size), lo, hi)
 
             elif distribution == 'beta':
                 # Beta distribution (slightly biased to center)
                 alpha, beta = 2.0, 2.0
-                value = np.random.beta(alpha, beta, size)
-                return min_val + value * (max_val - min_val)
+                value = lo + rng.beta(alpha, beta, size) * (hi - lo)
+
+            elif integral:
+                # 'uniform' on integers: every value in [lo, hi] equally likely
+                value = rng.integers(min_val, max_val + 1, size)
 
             else:
                 # 'uniform', and the default for anything unrecognized
-                return np.random.uniform(min_val, max_val, size)
+                value = rng.uniform(lo, hi, size)
+
+            if integral:
+                # A shaped draw on integer bounds is rounded onto the grid the
+                # bounds define, and clipped so rounding cannot leave the range.
+                value = np.clip(np.rint(value), min_val, max_val).astype(int)
+                return int(value) if size is None else value
+            return float(value) if size is None else value
 
         # If single-element tuple
         if isinstance(param, tuple) and len(param) == 1:
             return float(param[0])
 
-        # Otherwise return as-is
+        # Otherwise return as-is: strings, lists, nested tuples and objects are
+        # the module's business.
         return param
 
     def domain_plan(self, state=None):
@@ -499,4 +730,5 @@ class AugmentationPipeline:
 
     def __repr__(self) -> str:
         step_names = [step.__class__.__name__ for step in self.steps]
-        return f"AugmentationPipeline(steps={step_names})"
+        seed = f", seed={self.seed}" if self.seed is not None else ""
+        return f"AugmentationPipeline(steps={step_names}{seed})"

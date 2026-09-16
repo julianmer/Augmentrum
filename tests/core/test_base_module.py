@@ -558,7 +558,8 @@ class TestSupportedBackendsSemantics:
         """A module supporting no backend at all is always a mistake."""
         from augmentrum.core.augmentrum import Augmentrum
 
-        for name, cls in Augmentrum.AVAILABLE_MODULES.items():
+        for name in Augmentrum.AVAILABLE_MODULES:
+            cls, _ = Augmentrum.resolve_module(name)
             assert cls.SUPPORTED_BACKENDS, (
                 f"{cls.__name__} (registered as '{name}') declares an empty "
                 f"SUPPORTED_BACKENDS, so it claims to support nothing."

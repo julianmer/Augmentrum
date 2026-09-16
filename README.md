@@ -99,6 +99,38 @@ for (x, x_water), (y, y_water) in augmenter.dataloader():
     train_step(x, y)
 ```
 
+### Per-Step Parameters, Seeds and Subject-Wise Splits
+
+A keyword argument reaches every module whose constructor names it, so
+`lb_hz=(0, 5)` would move `LineBroadening` *and* `Apodization` (you get a
+warning). A pipeline entry can carry its own kwargs, which reach that step only
+and override the globals there; a kwarg no module accepts raises with the
+closest valid names instead of being ignored.
+
+```python
+augmenter = Augmentrum(
+    data=data,
+    groups=subject_ids,                     # one id per item: a subject never straddles splits
+    split_fractions={'val': 0.1, 'test': 0.1},
+    pipeline=[
+        'coil_sampling',
+        {'noise': {'sigma_frac': (0.0, 0.02)}},
+        {'line_broadening': {'lb_hz': (0.0, 5.0)}},
+        ('apodization', {'mode': 'exponential', 'lb_hz': 2.0}),
+        'baseline_bspline',                 # registry alias fixing mode='bspline'
+    ],
+    n_coils=(1, 8),                         # integer-typed ranges are inclusive
+    seed=1,                                 # fixes the split, subject draws, ranges and modules
+)
+augmenter.split_groups['val']               # the subject ids held out for validation
+```
+
+Without `groups`, a user-defined `SubjectID` header-extension field is used
+when every item carries one. `seed` makes the whole run replay — including
+`num_workers > 0` DataLoaders, where each worker is reseeded from it — and
+`augmenter.reseed(k)` restarts every stream; `'fixed'` mode draws its ranges
+once per split and keeps them across `dataloader()` calls.
+
 ---
 
 ## Module Reference & Backend Support

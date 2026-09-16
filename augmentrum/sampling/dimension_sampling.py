@@ -79,6 +79,9 @@ class DimensionSampler(BaseModule):
 
     SCHEMES = ('random', 'consecutive', 'strided')
 
+    # A count range is inclusive and integer: (8, 32) may give 8 and may give 32.
+    INTEGER_PARAMS = ('count', 'n_averages', 'n_coils')
+
     def __init__(self, mode: str = 'random', count=None, scheme: str = 'random',
                  stride: int = 1, seed=None):
         super().__init__()

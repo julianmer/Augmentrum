@@ -207,8 +207,17 @@ SPECS: List[ModuleSpec] = [
 #   discovery   #
 #***************#
 def registered_classes() -> Dict[str, Type[BaseModule]]:
-    """Distinct module classes reachable through "Augmentrum.AVAILABLE_MODULES"."""
-    return {c.__name__: c for c in Augmentrum.AVAILABLE_MODULES.values()}
+    """
+    Distinct module classes reachable through "Augmentrum.AVAILABLE_MODULES".
+
+    A registry value is a class or a "(class, fixed_kwargs)" alias; both are
+    resolved through "Augmentrum.resolve_module" so this cannot drift from it.
+    """
+    classes = {}
+    for name in Augmentrum.AVAILABLE_MODULES:
+        cls, _ = Augmentrum.resolve_module(name)
+        classes[cls.__name__] = cls
+    return classes
 
 
 def specs_for(name: str) -> List[ModuleSpec]:

@@ -14,7 +14,6 @@
 #*************#
 #   imports   #
 #*************#
-import random
 import numpy as np
 from typing import List, Optional, Callable
 
@@ -109,16 +108,27 @@ def _resolve_outputs(pipeline, result, outputs):
 #*********************************#
 #   backend-agnostic generators   #
 #*********************************#
-def _make_batch(data, water, indices, copy=False):
+def _make_batch(data, water, indices, copy=True):
     """
     Build a (batch_data, batch_water) NIfTI_MRS_Plus pair from subject indices.
+
+    The batch owns its objects. Every output of the tensor path wraps the very
+    NIFTI_MRS objects it was handed and writes the processed values back into
+    them on materialization - which the dataloader triggers when it converts
+    the batch - and the list path writes into them directly. Handing out the
+    pool's objects therefore turned every shape-preserving augmentation into
+    an accumulation: noise added to the pool on batch one was there for batch
+    two, and doubled. Copying each subject once, here, is the whole fix; it
+    costs one conjugated read per subject (about 3 ms for a 2048 x 32 x 32
+    raw scan), which the tensor path pays again anyway when it stacks.
 
     Args:
         data:    NIfTI_MRS_Plus pool of subjects.
         water:   Optional NIfTI_MRS_Plus pool of water references.
         indices: List of integer subject indices for this batch.
-        copy:    If True, copy each NIfTI-MRS object (use for fixed mode
-                 where the same objects are yielded multiple times).
+        copy:    Copy each NIfTI-MRS object. False aliases the pool's objects
+                 and is only safe for a caller that never materializes or
+                 mutates the batch.
 
     Returns:
         (batch_data, batch_water) as NIfTI_MRS_Plus objects.
@@ -144,22 +154,30 @@ def create_random_generator(data: NIfTI_MRS_Plus,
                             water: Optional[NIfTI_MRS_Plus],
                             pipeline,
                             batch_size: int,
-                            outputs=None):
+                            outputs=None,
+                            rng: Optional[np.random.Generator] = None):
     """
     Infinite random-sampling generator (on-the-fly mode).
 
     Each iteration: pick *batch_size* random subjects, sample fresh
     augmentation parameters, apply the pipeline, yield the batch.
 
+    Args:
+        rng: NumPy generator the subject indices are drawn from. Held by the
+            caller so that a seed fixes the draws and a second generator over
+            the same split continues the stream rather than restarting it.
+            None draws a fresh, unseeded generator.
+
     Yields:
         (batch_data, batch_water) — NIfTI_MRS_Plus objects — or, with an
         *outputs* spec, the spec's nested structure filled with the stages it
         names.
     """
+    rng = rng if rng is not None else np.random.default_rng()
     n_subjects = len(data)
 
     while True:
-        indices = [random.randint(0, n_subjects - 1) for _ in range(batch_size)]
+        indices = rng.integers(0, n_subjects, size=batch_size).tolist()
         batch_data, batch_water = _make_batch(data, water, indices)
         batch_params = pipeline.sample_batch_parameters(batch_size)
         result = pipeline(batch_data, batch_water, batch_params=batch_params)
@@ -171,28 +189,42 @@ def create_fixed_generator(data: NIfTI_MRS_Plus,
                            pipeline,
                            batch_size: int,
                            shuffle: bool = False,
-                           outputs=None):
+                           outputs=None,
+                           rng: Optional[np.random.Generator] = None,
+                           fixed_params=None):
     """
     Single-pass generator with fixed augmentation parameters.
 
-    Parameters are sampled **once** at creation and reused for every batch,
-    giving consistent results across epochs.
+    Parameters are sampled **once** and reused for every batch, giving
+    consistent results across epochs. The caller passes them in so that
+    they are fixed across dataloader calls too: sampled here, they would be
+    redrawn every time a loader was created, and 'fixed' would mean fixed
+    within one pass only.
+
+    Args:
+        rng: NumPy generator that shuffles the subject order. None draws a
+            fresh, unseeded generator.
+        fixed_params: The parameters, as "pipeline.sample_batch_parameters"
+            returns them. None samples them once here, for callers that do
+            not keep any.
 
     Yields:
         (batch_data, batch_water) — NIfTI_MRS_Plus objects — or, with an
         *outputs* spec, the spec's nested structure filled with the stages it
         names.
     """
-    fixed_params = pipeline.sample_batch_parameters(batch_size)
+    rng = rng if rng is not None else np.random.default_rng()
+    if fixed_params is None:
+        fixed_params = pipeline.sample_batch_parameters(batch_size)
 
     n_subjects = len(data)
     indices = list(range(n_subjects))
     if shuffle:
-        random.shuffle(indices)
+        indices = rng.permutation(n_subjects).tolist()
 
     for start in range(0, n_subjects, batch_size):
         batch_idx = indices[start : start + batch_size]
-        batch_data, batch_water = _make_batch(data, water, batch_idx, copy=True)
+        batch_data, batch_water = _make_batch(data, water, batch_idx)
         params = _trim_batch_params(fixed_params, len(batch_idx))
         result = pipeline(batch_data, batch_water, batch_params=params)
         yield _resolve_outputs(pipeline, result, outputs)

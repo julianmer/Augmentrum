@@ -15,7 +15,7 @@
 #   imports   #
 #*************#
 import numpy as np
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
@@ -104,6 +104,27 @@ class Apodization(BaseModule):
 
         if self.mode not in self.MODES:
             raise ValueError(f"mode must be one of {self.MODES}, got '{mode}'")
+
+    def required_parameters(self) -> Tuple[str, ...]:
+        """
+        Names of which this mode needs at least one, or nothing for a fixed window.
+
+        An exponential window without a width, or a truncation without a
+        length, is not a default configuration but a missing one. Naming what
+        is missing lets a pipeline check at build time whether the value will
+        arrive - as a constructor argument or as a range sampled per batch -
+        instead of failing on the first batch with a bare "must provide".
+
+        Returns:
+            The acceptable names, any one of which satisfies the mode.
+        """
+        if self.mode == 'exponential' and not self.auto_lb:
+            return ('lb_hz',)
+        if self.mode == 'gaussian':
+            return ('gb_hz',)
+        if self.mode == 'truncate':
+            return ('n_pts', 'frac_pts')
+        return ()
 
     def process_nifti_list(self, data_list: List, water_list: Optional[List] = None, **kwargs):
         """

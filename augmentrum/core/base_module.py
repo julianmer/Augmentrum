@@ -76,6 +76,13 @@ class BaseModule(ABC):
     # it. Only modules whose processing paths handle a vector may declare this.
     PER_SAMPLE_PARAMS: Tuple[str, ...] = ()
 
+    # Parameters that count things. A range on one of these is drawn as an
+    # integer over the inclusive bounds, so "n_averages=(8, 32)" can actually
+    # give 32. The pipeline also reads an "int" annotation or default off the
+    # constructor; this is for names typed neither way, such as the samplers'
+    # counts, which default to None.
+    INTEGER_PARAMS: Tuple[str, ...] = ()
+
     def __init_subclass__(cls, **kwargs):
         """
         Wrap a subclass's "__init__" so its arguments are recorded automatically.
