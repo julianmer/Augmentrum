@@ -262,15 +262,20 @@ class TestTurcoWater:
         assert np.allclose(per_peak, global_ph, atol=1e-12)
 
     def test_turco_water_stays_in_the_water_region(self):
-        """Seven merged Lorentzians must still be a water hump, not a baseline."""
-        ppm = np.linspace(0.0, 9.4, 2048)
+        """
+        Seven merged Lorentzians must still be a water hump, not a baseline.
+
+        Judged on the absorption part: the lobes are causal, so they carry the
+        dispersive tails a water residual has, which fall off as 1/distance
+        and are not what makes a hump a baseline.
+        """
+        ppm = ppm_axis(N_PTS, SW_HZ, SF_MHZ, '1H')
         profile = ResidualWater._water_lobe_profile(
             ppm, peaks=ResidualWater.TURCO_PEAKS)
 
-        magnitude = np.abs(profile)
         inside = (ppm > 4.3) & (ppm < 5.1)
-        assert magnitude[inside].max() == pytest.approx(1.0, abs=1e-9)
-        assert magnitude[~inside].max() < 0.2
+        assert np.abs(profile[inside]).max() == pytest.approx(1.0, abs=1e-9)
+        assert np.abs(np.real(profile[~inside])).max() < 0.2
 
 
 #*************#
@@ -650,3 +655,82 @@ class TestSeededReproducibility:
         first = _values(module(_batch(_lorentzian_fid(), 2))[0])
         second = _values(module(_batch(_lorentzian_fid(), 2))[0])
         assert not np.allclose(first, second, atol=1e-6)
+
+
+#**************************************************************************************************#
+#                                       Class TestCausality                                        #
+#**************************************************************************************************#
+#                                                                                                  #
+# What a module adds is a signal: it starts at the first point of the FID and decays.              #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestCausality:
+    """
+    A resonance is a decaying complex exponential in the FID, so nothing of it
+    belongs at the end of the acquisition. A lineshape drawn on the axis as a
+    real curve has a two-sided FID instead, half of it wrapped to the end,
+    which is where it used to ring after zero-filling or truncation.
+    """
+
+    @staticmethod
+    def _added(module, **user_kwargs):
+        """What *module* adds to one spectrum, as the time-domain output of a pipeline."""
+        data = _batch(_lorentzian_fid(), 1)
+        pipe = AugmentationPipeline([module], user_kwargs=user_kwargs)
+        out, _ = pipe(data, None, batch_params=pipe.sample_batch_parameters(1))
+        return (_values(out) - _values(data))[0, 0, 0, 0]
+
+    @staticmethod
+    def _second_half(fid):
+        """The fraction of the FID's energy in its second half: ~0 causal, 0.5 white."""
+        fid = np.asarray(fid).ravel()
+        return float(np.sum(np.abs(fid[fid.size // 2:]) ** 2) / np.sum(np.abs(fid) ** 2))
+
+    @pytest.mark.parametrize("make", [
+        lambda: ArtificialPeaks(peaks=[{'ppm': 1.3, 'amp': 0.3, 'lb_hz': 10.0}]),
+        lambda: ArtificialPeaks(peaks=[{'ppm': 1.3, 'amp': 0.3, 'gb_hz': 10.0}]),
+        lambda: ArtificialPeaks(peaks=[{'ppm': 1.3, 'amp': 0.3, 'lb_hz': 6.0, 'gb_hz': 8.0,
+                                        'phase_deg': 40.0}]),
+        lambda: ArtificialPeaks(seed=0),
+        lambda: ResidualWater(amplitude_scale=1.0),
+        lambda: ResidualWater(model='turco', amplitude_scale=1.0, phase_deg=30.0),
+    ], ids=['lorentzian', 'gaussian', 'voigt', 'default_peak', 'water_lobes', 'water_turco'])
+    def test_what_is_added_is_causal(self, make):
+        assert self._second_half(self._added(make())) <= 0.02
+
+    def test_the_fid_of_a_lorentzian_peak_decays_as_a_signal_model_says(self):
+        """The added FID is "A exp(2 pi i f t) exp(-pi lb t)": its envelope is exp(-pi lb t)."""
+        lb_hz = 10.0
+        fid = self._added(ArtificialPeaks(peaks=[{'ppm': 1.3, 'amp': 0.3, 'lb_hz': lb_hz}]))
+        t = np.arange(N_PTS) / SW_HZ
+        envelope = np.abs(fid[:N_PTS // 2]) / np.abs(fid[0])
+        assert np.allclose(envelope, np.exp(-np.pi * lb_hz * t[:N_PTS // 2]), atol=1e-3)
+
+    @pytest.mark.parametrize("peak, fwhm_hz", [
+        ({'ppm': 1.3, 'amp': 0.5, 'lb_hz': 12.0}, 12.0),
+        ({'ppm': 1.3, 'amp': 0.5, 'gb_hz': 12.0}, 12.0),
+    ], ids=['lorentzian', 'gaussian'])
+    def test_the_width_is_the_fwhm_on_the_fsl_axis(self, peak, fwhm_hz):
+        """lb_hz and gb_hz are the FWHM of the absorption line in Hz, to a bin."""
+        axis, spectrum = _fsl_spectrum(self._added(ArtificialPeaks(peaks=[peak])))
+        real = np.real(spectrum)
+        above = np.flatnonzero(real >= 0.5 * real.max())
+        fwhm = (abs(axis[above[-1]] - axis[above[0]]) + _fsl_bin()) * SF_MHZ
+        assert abs(fwhm - fwhm_hz) <= _fsl_bin() * SF_MHZ
+
+    def test_amplitude_is_still_the_fraction_of_the_peak(self):
+        """A causal peak at amp 0.5 still adds a real height of half the spectrum's peak."""
+        data = _batch(_lorentzian_fid(), 1)
+        peaks = ArtificialPeaks(peaks=[{'ppm': 1.3, 'amp': 0.5, 'lb_hz': 10.0}])
+        spectra = [np.fft.fftshift(np.fft.ifft(_values(x)[0, 0, 0, 0]))
+                   for x in (data, peaks(data)[0])]
+        added = spectra[1] - spectra[0]
+        assert np.max(np.real(added)) / np.max(np.real(spectra[0])) == pytest.approx(0.5, rel=1e-3)
+
+    def test_lobes_are_weighed_by_area_so_a_narrower_lobe_stands_taller(self):
+        """rel_amp is the lobe's amplitude in the FID, as in the WaterFit model."""
+        ppm = ppm_axis(N_PTS, SW_HZ, SF_MHZ, '1H')
+        both = ResidualWater._water_lobe_profile(ppm, peaks=((0.0, 0.1, 1.0), (0.5, 0.2, 1.0)))
+
+        at = lambda x: np.real(both)[np.argmin(np.abs(ppm - (4.65 + x)))]
+        assert at(0.0) == pytest.approx(2.0 * at(0.5), rel=0.05)

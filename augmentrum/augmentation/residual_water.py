@@ -8,8 +8,8 @@
 #                                                                                                  #
 # Created: 2026-02-07                                                                              #
 #                                                                                                  #
-# Purpose: Simulates imperfect water suppression by adding Lorentzian water lobes around the       #
-#          water resonance in the frequency domain.                                                #
+# Purpose: Simulates imperfect water suppression by adding causal Lorentzian water lobes around    #
+#          the water resonance.                                                                    #
 #                                                                                                  #
 ####################################################################################################
 
@@ -21,7 +21,7 @@ from typing import Optional, List
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from augmentrum.processing.utils import (ppm_axis, ppm_reference, batch_profile,
-                                         per_sample_factor)
+                                         per_sample_factor, causal_lineshape)
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
 from nifti_mrs_plus.ops import match_backend
@@ -39,9 +39,13 @@ class ResidualWater(BaseModule):
     Add residual water peaks to MRS data.
 
     Adds Lorentzian-shaped water peaks around the water resonance to simulate
-    imperfect water suppression. All ppm values are on the FSL-MRS / NIfTI-MRS
-    axis (protons referenced to 4.65 ppm), so a lobe placed here sits where an
-    FSL-MRS plot shows it.
+    imperfect water suppression. Each lobe is a decaying complex exponential
+    in the FID, as residual water is, transformed to the spectrum
+    ("causal_lineshape"): a Lorentzian drawn on the axis would be real, and a
+    real spectrum has a two-sided FID whose second half wraps to the end of
+    the acquisition and rings once the FID is zero-filled or truncated. All
+    ppm values are on the FSL-MRS / NIfTI-MRS axis (protons referenced to
+    4.65 ppm), so a lobe placed here sits where an FSL-MRS plot shows it.
 
     Parameters
     ----------
@@ -54,7 +58,9 @@ class ResidualWater(BaseModule):
         (delta_ppm, FWHM_ppm, rel_amp, phase_deg)
         - delta_ppm: offset from center in ppm
         - FWHM_ppm: Full Width at Half Maximum in ppm
-        - rel_amp: relative amplitude
+        - rel_amp: relative amplitude of the lobe in the FID - its area in the
+          spectrum, as a signal model weights it - so a narrower lobe stands
+          taller
         - phase_deg: per-peak phase in degrees, optional
         None (default) uses the peaks of the chosen *model*.
     phase_deg : float
@@ -146,10 +152,11 @@ class ResidualWater(BaseModule):
         The complex water lobe profile at unit amplitude.
 
         Depends only on the ppm axis and the lobe parameters, so it is built
-        in NumPy and multiplied by a per-FID amplitude afterwards.
+        in NumPy and multiplied by a per-FID amplitude afterwards. Every lobe
+        is causal, and the sum of causal lobes is causal.
 
         Args:
-            ppm_axis: PPM axis
+            ppm_axis: PPM axis, the bins of "fftshift(ifft(fid))"
             center_ppm: Center position of water peak; None is the proton
                 reference (4.65 ppm)
             peaks: Tuple of (delta_ppm, FWHM_ppm, rel_amp[, phase_deg]) per lobe
@@ -164,13 +171,15 @@ class ResidualWater(BaseModule):
         phi = np.deg2rad(phase_deg)
         w = np.zeros_like(ppm, complex)
 
-        # Simple Lorentzians, each with its own optional phase
+        # Causal Lorentzians of unit area, each with its own optional phase: a
+        # lineshape of unit peak becomes one of unit area through the height
+        # 2 / (pi FWHM) a unit-area Lorentzian has, so rel_amp weighs the lobe
+        # as its amplitude in the FID.
         for peak in peaks:
             dppm, fwhm_ppm, rel_amp = peak[:3]
             peak_phi = np.deg2rad(peak[3]) if len(peak) > 3 else 0.0
-            x = ppm - (center_ppm + dppm)
-            hw = 0.5 * fwhm_ppm
-            w = w + rel_amp * np.exp(1j * peak_phi) * (hw / (x**2 + hw**2)) / np.pi
+            lobe = causal_lineshape(ppm, center_ppm + dppm, lorentz_ppm=fwhm_ppm)
+            w = w + rel_amp * np.exp(1j * peak_phi) * lobe * 2.0 / (np.pi * fwhm_ppm)
 
         # Normalize lobes to ~unit max
         peak_mag = np.max(np.abs(w))
@@ -243,7 +252,7 @@ class ResidualWater(BaseModule):
         """
         Add residual water peaks to tensor/array data (**any backend**).
 
-        The lobe profiles depend only on the ppm axis and the parameters, so
+        The lobe profiles depend only on the FID grid and the parameters, so
         they are built in NumPy, one per sample, and promoted once with
         "match_backend". The only data-dependent term is one amplitude per
         FID, taken on the data's own backend so the spectrum is never

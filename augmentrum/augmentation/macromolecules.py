@@ -22,10 +22,12 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
+from scipy.signal import hilbert
 
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import ppm_axis, batch_profile, per_sample_factor
+from augmentrum.processing.utils import (ppm_axis, batch_profile, per_sample_factor,
+                                         causal_lineshape)
 from nifti_mrs_plus import Backend
 from nifti_mrs_plus import ops
 from nifti_mrs_plus.ops import match_backend
@@ -68,6 +70,14 @@ class MMSource(ABC):
     to unit maximum of its real part, so the module can scale it against the
     data. Randomizable sources draw from the generator they are handed, which
     keeps every draw reproducible from the module's seed.
+
+    Every profile is the spectrum of a causal signal - one that starts at the
+    first point of the FID and decays, rather than wrapping half of itself to
+    the end of the acquisition, where it would ring once the FID is zero-
+    filled or truncated. The parametrized sources build their components in
+    the FID ("causal_lineshape"); a supplied real curve gets the dispersion
+    part a causal signal must have by Hilbert transform; a measured spectrum
+    is causal by acquisition and is passed through.
     """
 
     @abstractmethod
@@ -132,7 +142,9 @@ class Parametrized(MMSource):
     Each component is (ppm, FWHM_ppm, rel_amp); the defaults are the
     "MM_CONSENSUS" table. The jitters are fractional (amplitude, width) or
     absolute in ppm (position) half-ranges drawn uniformly per call, which is
-    what turns a fixed template into an augmentation.
+    what turns a fixed template into an augmentation. A component is a
+    Gaussian-damped resonance in the FID, so rel_amp is its peak height in the
+    spectrum, whatever its width.
     """
 
     def __init__(self, components: Tuple = MM_CONSENSUS,
@@ -150,7 +162,7 @@ class Parametrized(MMSource):
 
     def profile(self, ppm_axis, rng, sf_mhz=None):
         ppm = np.asarray(ppm_axis, float)
-        spectrum = np.zeros_like(ppm)
+        spectrum = np.zeros(ppm.shape, dtype=complex)
 
         for center, fwhm, amp in self.components:
             if self.ppm_jitter:
@@ -160,10 +172,9 @@ class Parametrized(MMSource):
             if self.amp_jitter:
                 amp = amp * (1.0 + rng.uniform(-self.amp_jitter, self.amp_jitter))
 
-            sigma = fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
-            spectrum += amp * np.exp(-0.5 * ((ppm - center) / sigma) ** 2)
+            spectrum += amp * causal_lineshape(ppm, center, gauss_ppm=fwhm)
 
-        return self._normalize(spectrum.astype(complex))
+        return self._normalize(spectrum)
 
 
 #**************************************************************************************************#
@@ -183,6 +194,14 @@ class Supplied(MMSource):
     - "path" to a ".npy" holding "[ppm, real, imag]" rows or a complex spectrum
       (then "ppm" must be given), or to a MATLAB ".mat" with an "exptDat"
       struct carrying "fid" / "sf" / "sw_h" — the layout the COWS release uses.
+
+    A complex spectrum is taken to come from a causal acquisition - an FID
+    transformed the way FSL-MRS or this package does, plotted on its own ppm
+    axis - and is passed through as it is. A real one (no imaginary part) is
+    read as the absorption part of such a signal, and the dispersion part it
+    must then have is its Hilbert transform (Kramers-Kronig), taken on the
+    data's axis after regridding, since the transform's sign follows the
+    direction of the axis it runs along.
     """
 
     def __init__(self, spectrum=None, ppm=None, path: Optional[str] = None):
@@ -192,6 +211,7 @@ class Supplied(MMSource):
             raise ValueError("Supplied needs spectrum+ppm, or a readable path.")
         self._spectrum = self._normalize(np.asarray(spectrum, complex))
         self._ppm = np.asarray(ppm, float)
+        self._absorption_only = not np.any(np.imag(self._spectrum))
 
     @staticmethod
     def _load(path: Path, ppm):
@@ -214,7 +234,10 @@ class Supplied(MMSource):
         raise ValueError(f"Unsupported MM file type: {path}")
 
     def profile(self, ppm_axis, rng, sf_mhz=None):
-        return self._regrid(self._spectrum, self._ppm, np.asarray(ppm_axis, float))
+        spectrum = self._regrid(self._spectrum, self._ppm, np.asarray(ppm_axis, float))
+        if self._absorption_only:
+            spectrum = hilbert(np.real(spectrum))
+        return spectrum
 
 
 #**************************************************************************************************#
@@ -233,7 +256,9 @@ class Measured(MMSource):
     FID sets named "{field}T_MM_{species}_{sequence}_{site}.fid"; the source
     picks the entry whose field strength is closest to the data's (from
     "sf_mhz" at call time, or "field_t" if given), preferring the requested
-    species.
+    species. The FID is transformed as this package transforms its own, so
+    the profile is causal because the acquisition was; it is regridded onto
+    the data's axis and otherwise passed through.
 
     Args:
         field_t: Field strength to match. None reads it off the data.
@@ -349,7 +374,10 @@ class SemiParametrized(MMSource):
     trusted (measured, or the parametrized template by default) while width and
     regional amplitude stay free. Per call the base profile is Gaussian-
     broadened by a draw from "broaden_ppm" and modulated by a smooth random
-    envelope of relative depth "amp_mod".
+    envelope of relative depth "amp_mod". Both keep the profile causal: the
+    broadening is a real kernel, which only damps the FID, and the envelope
+    shapes the absorption part, whose dispersion part is then re-derived by
+    Hilbert transform.
     """
 
     def __init__(self, base: Optional[MMSource] = None,
@@ -382,14 +410,17 @@ class SemiParametrized(MMSource):
                         + 1j * np.convolve(np.imag(spectrum), kernel, mode='same'))
 
         # A slow cosine-series envelope: smooth regional amplitude freedom
-        # without introducing new peaks.
+        # without introducing new peaks. It is amplitude freedom of the
+        # components, so it acts on the absorption part, and the dispersion
+        # part follows from that (Kramers-Kronig) rather than being scaled
+        # alongside, which would leak a little of the FID to its end.
         if self.amp_mod > 0:
             x = np.linspace(0.0, np.pi, ppm.size)
             envelope = np.ones_like(x)
             for k in (1, 2, 3):
                 envelope += rng.uniform(-1.0, 1.0) * np.cos(k * x) / k
             envelope = 1.0 + self.amp_mod * (envelope - envelope.mean())
-            spectrum = spectrum * np.clip(envelope, 0.0, None)
+            spectrum = hilbert(np.real(spectrum) * np.clip(envelope, 0.0, None))
 
         return self._normalize(spectrum)
 
@@ -426,7 +457,9 @@ class Macromolecules(BaseModule):
     A randomizable source (jittered, semi-parametrized) is drawn afresh for
     every sample of a batch from this module's seeded generator; a fixed one
     is shared. Peak positions are on the FSL-MRS / NIfTI-MRS ppm axis (protons
-    referenced to 4.65 ppm).
+    referenced to 4.65 ppm). Every source yields the spectrum of a causal
+    signal (see "MMSource"), so what is added starts at the first point of
+    the FID and decays, as tissue signal does.
 
     Examples
     --------

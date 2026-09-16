@@ -18,7 +18,8 @@ import numpy as np
 from typing import Optional, List, Dict
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import ppm_axis, ppm_reference, batch_profile
+from augmentrum.processing.utils import (ppm_axis, ppm_reference, batch_profile,
+                                         causal_lineshape)
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
 from nifti_mrs_plus.ops import match_backend
@@ -35,10 +36,16 @@ class ArtificialPeaks(BaseModule):
     """
     Add artificial contaminant peaks to MRS data.
 
-    Adds Lorentzian, Gaussian, or Voigt peaks at specified ppm positions
-    in the frequency domain to simulate contamination or additional metabolites.
-    All ppm values are on the FSL-MRS / NIfTI-MRS axis (protons referenced to
-    4.65 ppm), so a peak requested at 1.30 ppm shows at 1.30 on an FSL-MRS plot.
+    Adds Lorentzian, Gaussian, or Voigt peaks at specified ppm positions to
+    simulate contamination or additional metabolites. Each peak is what a
+    resonance is in the FID - a decaying complex exponential, damped
+    exponentially for the Lorentzian width and by a Gaussian for the Gaussian
+    width, both for a Voigt - transformed to the spectrum ("causal_lineshape").
+    A lineshape drawn directly on the axis would be real, and a real spectrum
+    has a two-sided FID: half of it wraps to the end of the acquisition, where
+    it rings once the FID is zero-filled or truncated. All ppm values are on
+    the FSL-MRS / NIfTI-MRS axis (protons referenced to 4.65 ppm), so a peak
+    requested at 1.30 ppm shows at 1.30 on an FSL-MRS plot.
 
     Parameters
     ----------
@@ -49,7 +56,9 @@ class ArtificialPeaks(BaseModule):
         - phase_deg: Complex phase in degrees
         - lb_hz: Lorentzian FWHM in Hz (0 for none)
         - gb_hz: Gaussian FWHM in Hz (0 for none)
-        If both lb_hz and gb_hz > 0, creates Voigt peak.
+        If both lb_hz and gb_hz > 0, creates Voigt peak. A peak with neither
+        width is skipped. "amp" is the peak's real height as a fraction of the
+        spectrum's own peak, whatever its width.
         Any of these may be a "(low, high)" range instead of a number; ranges
         are drawn uniformly, once per sample, from this module's seeded
         generator, while numbers stay fixed for every sample. The default is
@@ -146,7 +155,13 @@ class ArtificialPeaks(BaseModule):
         return table
 
     def _profile(self, index: int, ppm: np.ndarray, table: List[Dict], sf_mhz: float) -> np.ndarray:
-        """Sample *index*'s contamination on *ppm*, in units of its amplitude reference."""
+        """
+        Sample *index*'s contamination on *ppm*, in units of its amplitude reference.
+
+        Each peak is a causal resonance with unit peak real height, so "amp"
+        stays a fraction of the spectrum's peak; its phase rotates absorption
+        and dispersion together, as a phase error would.
+        """
         contam = np.zeros(ppm.shape, dtype=np.complex128)
         for drawn in table:
             ppm0 = float(drawn['ppm'][index])
@@ -154,16 +169,11 @@ class ArtificialPeaks(BaseModule):
             phase_deg = float(drawn['phase_deg'][index])
             lb_hz = float(drawn['lb_hz'][index])
             gb_hz = float(drawn['gb_hz'][index])
-
-            if lb_hz > 0 and gb_hz > 0:
-                shape = self._voigt(ppm, ppm0, lb_hz, gb_hz, sf_mhz)
-            elif lb_hz > 0:
-                shape = self._lorentzian(ppm, ppm0, lb_hz, sf_mhz)
-            elif gb_hz > 0:
-                shape = self._gaussian(ppm, ppm0, gb_hz, sf_mhz)
-            else:
+            if lb_hz <= 0 and gb_hz <= 0:
                 continue  # No width, skip
 
+            # Widths in Hz are widths in ppm on the same axis, one sf_mhz apart.
+            shape = causal_lineshape(ppm, ppm0, lb_hz / float(sf_mhz), gb_hz / float(sf_mhz))
             contam += amp_frac * shape * np.exp(1j * np.deg2rad(phase_deg))
         return contam
 
@@ -225,7 +235,7 @@ class ArtificialPeaks(BaseModule):
 
         Everything touching the data runs on the data's own backend, so
         gradients and device placement survive. Only the peak shapes are built
-        in NumPy: they depend on the ppm axis and the drawn parameters alone,
+        in NumPy: they depend on the FID grid and the drawn parameters alone,
         one profile per sample, promoted once with "match_backend".
 
         Args:
@@ -267,55 +277,3 @@ class ArtificialPeaks(BaseModule):
 
         # 3. Add contamination in the spectral domain (backend-native)
         return spec + contam, water_array
-
-    @staticmethod
-    def _lorentzian(ppm: np.ndarray, ppm0: float, fwhm_hz: float, sf_mhz: float) -> np.ndarray:
-        """Generate Lorentzian peak shape."""
-        if fwhm_hz <= 0:
-            return np.zeros_like(ppm)
-
-        # Convert Hz to ppm: divide by sf_mhz (which is in MHz)
-        # This gives: Hz / MHz = ppm (since 1 MHz = 1e6 Hz, the ratio is in ppm)
-        fwhm_ppm = fwhm_hz / float(sf_mhz)
-        x = ppm - ppm0
-        hw = 0.5 * fwhm_ppm
-        L = (hw / (x**2 + hw**2)) / np.pi
-        return L / (L.max() if L.max() > 0 else 1.0)
-
-    @staticmethod
-    def _gaussian(ppm: np.ndarray, ppm0: float, fwhm_hz: float, sf_mhz: float) -> np.ndarray:
-        """Generate Gaussian peak shape."""
-        if fwhm_hz <= 0:
-            return np.zeros_like(ppm)
-
-        # Convert Hz to ppm: divide by sf_mhz (which is in MHz)
-        fwhm_ppm = fwhm_hz / float(sf_mhz)
-        x = ppm - ppm0
-        G = np.exp(-4.0 * np.log(2.0) * (x**2) / (fwhm_ppm**2))
-        return G
-
-    @staticmethod
-    def _voigt(ppm: np.ndarray, ppm0: float, lb_hz: float, gb_hz: float, sf_mhz: float) -> np.ndarray:
-        """Generate Voigt peak shape (product of Lorentzian and Gaussian)."""
-        if lb_hz <= 0 and gb_hz <= 0:
-            return np.zeros_like(ppm)
-
-        # Don't call the normalized functions - build them here
-        if lb_hz > 0:
-            fwhm_ppm_l = lb_hz / float(sf_mhz)
-            x = ppm - ppm0
-            hw = 0.5 * fwhm_ppm_l
-            L = (hw / (x**2 + hw**2)) / np.pi
-        else:
-            L = 1.0
-
-        if gb_hz > 0:
-            fwhm_ppm_g = gb_hz / float(sf_mhz)
-            x = ppm - ppm0
-            G = np.exp(-4.0 * np.log(2.0) * (x**2) / (fwhm_ppm_g**2))
-        else:
-            G = 1.0
-
-        V = L * G
-        vmax = V.max() if isinstance(V, np.ndarray) else V
-        return V / (vmax if vmax > 0 else 1.0)

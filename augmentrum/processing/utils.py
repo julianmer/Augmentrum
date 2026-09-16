@@ -530,6 +530,58 @@ def ppm_window(n, sw_hz, sf_mhz, lim, shift=None):
 
 
 #***********************#
+#   causal lineshapes   #
+#***********************#
+def causal_lineshape(ppm, center_ppm, lorentz_ppm=0.0, gauss_ppm=0.0):
+    """
+    The spectrum of a causal resonance at *center_ppm* on the axis *ppm*, unit peak real height.
+
+    A resonance is a decaying complex exponential in the FID,
+    "exp(2 pi i f t) exp(-pi lb t) exp(-(pi gb t)^2 / (4 ln 2))", whose spectrum
+    is the Lorentzian of FWHM lb, the Gaussian of FWHM gb, or their convolution,
+    a Voigt. It is built there and transformed as "DomainTransform" does
+    ("fftshift(ifft(fid))"), which is what keeps it causal: a lineshape drawn
+    directly on the axis is real, so its FID is two-sided with half of it wrapped
+    to the end of the acquisition, where it rings whenever the FID is zero-filled
+    or truncated. Everything is expressed in bins read off the axis - the
+    frequency is the one that peaks on the bin the axis labels *center_ppm*, and a
+    width is its FWHM in ppm over the axis step - so a feature lands and measures
+    exactly where its frequency-domain twin would, whichever way the axis runs.
+
+    Args:
+        ppm: The ppm of every bin of "fftshift(ifft(fid))", uniform apart from the
+            Nyquist alias "ppm_axis" puts in bin 0.
+        center_ppm: Where the peak sits.
+        lorentz_ppm: Lorentzian FWHM in ppm, 0 for none.
+        gauss_ppm: Gaussian FWHM in ppm, 0 for none. With neither width the
+            resonance does not decay and its spectrum is the Dirichlet kernel.
+
+    Returns:
+        A "(n,)" complex array whose real part peaks at 1.
+    """
+    ppm = np.asarray(ppm, dtype=np.float64)
+    n = ppm.size
+    if n < 2:
+        return np.ones(n, dtype=np.complex128)
+
+    # The median step survives the alias in bin 0; its sign carries the direction.
+    step = float(np.median(np.diff(ppm)))
+    centre_bin = n // 2 + (float(center_ppm) - ppm[n // 2]) / step
+    t = np.arange(n, dtype=np.float64)
+
+    # Bin j of fftshift(ifft(fid)) holds (n//2 - j)/n cycles per sample, and a width
+    # of w bins is exp(-pi w t / n) per sample for a Lorentzian.
+    fid = np.exp(2j * np.pi * (n // 2 - centre_bin) / n * t)
+    if lorentz_ppm > 0:
+        fid = fid * np.exp(-np.pi * (lorentz_ppm / abs(step)) * t / n)
+    if gauss_ppm > 0:
+        fid = fid * np.exp(-(np.pi * (gauss_ppm / abs(step)) * t / n) ** 2 / (4.0 * np.log(2.0)))
+
+    spectrum = np.fft.fftshift(np.fft.ifft(fid))
+    return spectrum / np.max(np.real(spectrum))
+
+
+#***********************#
 #   per-sample values   #
 #***********************#
 def batch_profile(profile, ndim):

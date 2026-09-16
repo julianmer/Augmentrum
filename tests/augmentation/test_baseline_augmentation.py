@@ -9,6 +9,7 @@ Tests cover:
 - Integration tests
 - The two processing paths agreeing, and the native math agreeing across backends
 - Per-sample parameters, the ppm axis, and the cached operators
+- Every baseline being the spectrum of a causal signal
 """
 
 import pytest
@@ -356,12 +357,15 @@ class TestPolynomialModel:
     @pytest.mark.parametrize("order", [2, 5])
     def test_order_k_needs_degree_k(self, order):
         """
-        A degree-k fit reproduces the baseline to rounding; degree k-1 cannot.
+        A degree-k fit reproduces the real baseline to rounding; degree k-1 cannot.
 
         The unit fit axis runs from -1 to 1 with ppm over the window, as
         FSL-MRS defines it, so a plain polynomial fit in that variable must
-        recover the baseline exactly.
+        recover the real part exactly. The imaginary part is not a polynomial:
+        it is the real part's Hilbert transform.
         """
+        from scipy.signal import hilbert
+
         plus = _batch(1)
         before = _spectrum(plus)[0].ravel()
         out, _ = BaselineAugmentation(mode='polynomial', order=order, seed=3)(plus)
@@ -372,12 +376,13 @@ class TestPolynomialModel:
         x = 2.0 * (ppm - ppm.min()) / (ppm.max() - ppm.min()) - 1.0
         residual = {}
         for degree in (order - 1, order):
-            coeffs = np.polynomial.polynomial.polyfit(x, added, degree)
+            coeffs = np.polynomial.polynomial.polyfit(x, added.real, degree)
             fit = np.polynomial.polynomial.polyval(x, coeffs)
-            residual[degree] = np.abs(added - fit).max() / np.abs(added).max()
+            residual[degree] = np.abs(added.real - fit).max() / np.abs(added.real).max()
 
         assert residual[order] < 1e-10, f"degree {order} left {residual[order]:.1e}"
         assert residual[order - 1] > 1e-3, f"degree {order - 1} fitted an order-{order} baseline"
+        assert np.allclose(added, hilbert(added.real), atol=1e-12 * np.abs(added).max())
 
     def test_scaled_and_dc_free(self):
         """The real baseline peaks at exactly baseline_frac of the real peak, averaging zero."""
@@ -394,9 +399,12 @@ class TestPolynomialModel:
 
     def test_confined_to_windows_on_the_fsl_axis(self):
         """
-        Outside the windows the data is untouched, judged on FSL-MRS's own axis.
+        Outside the windows the real baseline is zero, judged on FSL-MRS's own axis.
 
-        The windows are given in either order, as a user would write them.
+        The windows are given in either order, as a user would write them. The
+        imaginary part is the Hilbert transform of the windowed curve and
+        reaches beyond the windows, as the dispersion of anything confined
+        must; only the absorption part is confined.
         """
         windows = [(4.0, 3.5), (1.8, 0.8)]
         plus = _batch(1)
@@ -405,7 +413,8 @@ class TestPolynomialModel:
                                       baseline_frac=0.1, seed=2)(plus)
         axis, spec_before = _fsl_view(fid_before)
         _, spec_after = _fsl_view(out.list()[0][:])
-        delta = np.abs(spec_after - spec_before)
+        delta = np.abs(np.real(spec_after - spec_before))
+        dispersion = np.abs(np.imag(spec_after - spec_before))
 
         inside = np.zeros(axis.size, bool)
         for a, b in windows:
@@ -413,6 +422,7 @@ class TestPolynomialModel:
 
         assert delta[~inside].max() < 1e-9 * delta.max(), "baseline leaked outside its windows"
         assert np.mean(delta[inside] > 1e-6 * delta.max()) > 0.9, "windows barely touched"
+        assert dispersion[~inside].max() > 1e-3 * delta.max(), "dispersion reaches beyond"
 
     def test_window_too_narrow_raises(self):
         """A window with fewer points than the order can hold is a mistake, not a fit."""
@@ -597,15 +607,17 @@ class TestPerSample:
             assert abs(ratio - fracs[b]) < 1e-9
 
     def test_each_sample_gets_its_own_phase(self):
-        """A B-spline baseline is real; a quarter turn makes it imaginary."""
-        plus = _batch(2)
-        before = _spectrum(plus)
-        out, _ = BaselineAugmentation(mode='bspline', phase_deg=np.array([0.0, 90.0]),
-                                      seed=4)(plus)
-        added = _spectrum(out) - before
+        """A quarter turn on one sample multiplies that sample's baseline by i, only that one."""
+        added = {}
+        for phase in (0.0, 90.0, np.array([0.0, 90.0])):
+            plus = _batch(2)
+            before = _spectrum(plus)
+            out, _ = BaselineAugmentation(mode='bspline', phase_deg=phase, seed=4)(plus)
+            added[np.ndim(phase) or float(phase)] = _spectrum(out) - before
 
-        assert np.abs(added[0].imag).max() < 1e-9 * np.abs(added[0].real).max()
-        assert np.abs(added[1].real).max() < 1e-9 * np.abs(added[1].imag).max()
+        assert np.allclose(added[90.0], 1j * added[0.0], atol=1e-12 * np.abs(added[0.0]).max())
+        assert np.allclose(added[1][0], added[0.0][0])
+        assert np.allclose(added[1][1], added[90.0][1])
 
     def test_pipeline_spreads_a_range_over_the_batch(self):
         """A ranged baseline_frac arrives as one value per sample, not one per batch."""
@@ -689,7 +701,8 @@ class TestPpmAxis:
                                           ref_ppm=ref, seed=6)
             out, _ = module(plus)
             axis, spec = _fsl_view(out.list()[0][:])
-            touched = np.abs(spec - before) > 1e-9 * np.abs(spec - before).max()
+            # the real part: the dispersion of a confined curve reaches beyond it
+            touched = np.abs(np.real(spec - before)) > 1e-9 * np.abs(np.real(spec - before)).max()
             results.append((axis[touched].min(), axis[touched].max()))
 
         assert results[0] == pytest.approx((1.0, 2.0), abs=0.02)
@@ -713,3 +726,70 @@ class TestReproducibility:
         outs = [BaselineAugmentation(mode=mode, seed=seed)(_batch(1))[0].list()[0][:]
                 for seed in (1, 2)]
         assert not np.allclose(outs[0], outs[1])
+
+
+#**************************************************************************************************#
+#                                      Class TestCausality                                         #
+#**************************************************************************************************#
+#                                                                                                  #
+# A baseline is the spectrum of causal broad signals, so its FID starts at the first point.        #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestCausality:
+    """
+    The imaginary part of a baseline follows from its real part (Kramers-
+    Kronig). Drawn independently, or left at zero, the baseline is a spectrum
+    whose FID is two-sided, half of it wrapped to the end of the acquisition.
+    """
+
+    @staticmethod
+    def _second_half(fid):
+        """The fraction of the FID's energy in its second half: ~0 causal, 0.5 white."""
+        fid = np.asarray(fid).ravel()
+        return float(np.sum(np.abs(fid[fid.size // 2:]) ** 2) / np.sum(np.abs(fid) ** 2))
+
+    @pytest.mark.parametrize("n_pts", [1024, 1001])
+    def test_the_analytic_signal_is_scipy_s_hilbert(self, n_pts):
+        """The one-sided step in the transform, even and odd lengths alike."""
+        from scipy.signal import hilbert
+        curve = np.random.default_rng(0).standard_normal((3, n_pts))
+        like = np.zeros(1, complex)
+        assert np.allclose(BaselineAugmentation._analytic(curve, like), hilbert(curve, axis=-1),
+                           atol=1e-12)
+
+    def test_the_analytic_signal_is_native_on_torch(self):
+        torch = pytest.importorskip("torch")
+        from scipy.signal import hilbert
+        curve = np.random.default_rng(0).standard_normal((2, 512)).astype(np.float32)
+        like = torch.zeros(1, dtype=torch.complex64)
+        out = BaselineAugmentation._analytic(torch.as_tensor(curve), like)
+        assert isinstance(out, torch.Tensor) and out.dtype == torch.complex64
+        assert np.allclose(out.numpy(), hilbert(curve, axis=-1), atol=1e-5)
+
+    @pytest.mark.parametrize("kwargs", [
+        dict(mode='random_walk'),
+        dict(mode='bspline'),
+        dict(mode='polynomial'),
+        dict(mode='polynomial', order=4, ppm_windows=[(0.2, 4.2)]),
+    ], ids=['random_walk', 'bspline', 'polynomial', 'windowed'])
+    def test_what_is_added_is_causal(self, kwargs):
+        """Measured on the time-domain output of a pipeline, for a single spectrum."""
+        from augmentrum.core.pipeline import AugmentationPipeline
+
+        plus = _batch(1)
+        before = np.asarray(plus.get_data(Backend.NUMPY))
+        pipe = AugmentationPipeline([BaselineAugmentation(seed=2, phase_deg=20.0, **kwargs)])
+        out, _ = pipe(plus, None, batch_params=pipe.sample_batch_parameters(1))
+        added = np.asarray(out.get_data(Backend.NUMPY)) - before
+        assert self._second_half(added[0, 0, 0, 0]) <= 0.02
+
+    @pytest.mark.parametrize("mode", ['bspline', 'polynomial'])
+    def test_the_imaginary_part_is_the_hilbert_transform_of_the_real_part(self, mode):
+        from scipy.signal import hilbert
+        plus = _batch(2)
+        before = _spectrum(plus)
+        out, _ = BaselineAugmentation(mode=mode, seed=6)(plus)
+        added = _spectrum(out) - before
+        for b in range(2):
+            row = added[b].ravel()
+            assert np.allclose(row, hilbert(row.real), atol=1e-12 * np.abs(row).max())

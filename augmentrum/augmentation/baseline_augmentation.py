@@ -38,17 +38,29 @@ class BaselineAugmentation(BaseModule):
     Add baseline distortions to MRS data.
 
     Supports three modes:
-    - 'random_walk': Bounded random walk with Hilbert transform (default)
+    - 'random_walk': Bounded random walk (default)
     - 'bspline': Cubic B-spline baseline with P-spline smoothing
-    - 'polynomial': Random complex polynomial over the fit window, as FSL-MRS
-      parameterises its baseline
+    - 'polynomial': Random polynomial over the fit window, on the regressors
+      FSL-MRS parameterises its baseline with
 
-    Every mode builds its baseline in the spectrum and scales it against each
-    trace's own real peak. The random draws happen on the data's backend and
-    the baseline is formed there too, so a torch batch keeps its device and
-    its autograd graph; only the data-independent operators (a spline basis,
-    a polynomial basis, the smoothing operator) are built in NumPy, once per
-    spectral axis, and cached.
+    Every mode draws one real smooth curve per trace and makes it complex by
+    its Hilbert transform, then scales it against the trace's own real peak
+    and rotates it by "phase_deg". A baseline is the spectrum of broad,
+    fast-decaying signals - macromolecules, lipids, residual water, eddy
+    currents - and every one of those is causal: it starts at the first point
+    of the FID. The spectrum of a causal signal is analytic, so its imaginary
+    part is fixed by its real part (Kramers-Kronig). That is why the imaginary
+    coefficient set of FSL-MRS's fit model, free there because the fit only
+    has to follow the data, is not drawn independently here: an independent
+    imaginary curve, or a real one on its own, is a spectrum whose FID is
+    two-sided, half of it wrapped to the end of the acquisition, where it
+    rings once the FID is zero-filled or truncated.
+
+    The random draws happen on the data's backend and the baseline is formed
+    there too, Hilbert transform included, so a torch batch keeps its device
+    and its autograd graph; only the data-independent operators (a spline
+    basis, a polynomial basis, the smoothing operator) are built in NumPy,
+    once per spectral axis, and cached.
 
     Parameters
     ----------
@@ -82,8 +94,10 @@ class BaselineAugmentation(BaseModule):
         Polynomial order (default: 2, FSL-MRS's default baseline order)
     ppm_windows : list of tuples or None
         Windows the baseline is confined to, as [(ppm_a, ppm_b), ...] in
-        either order; each carries its own polynomial and the baseline is zero
-        elsewhere (default: None = the whole axis)
+        either order; each carries its own polynomial and the real baseline is
+        zero elsewhere (default: None = the whole axis). The imaginary part is
+        the Hilbert transform of the windowed curve, and reaches a little
+        beyond the windows, as the dispersion of anything confined must.
 
     ref_ppm : float or None
         The ppm at the carrier. None takes it from the data's nucleus by the
@@ -258,9 +272,9 @@ class BaselineAugmentation(BaseModule):
         magnitude = ops.abs(ops.real(flat))
 
         if self.mode == 'polynomial':
-            unit = self._polynomial(magnitude, ppm)
+            unit = self._analytic(self._polynomial(magnitude, ppm), flat)
         elif self.mode == 'bspline':
-            unit = self._bspline(magnitude, ppm)
+            unit = self._analytic(self._bspline(magnitude, ppm), flat)
         else:
             unit = self._random_walk(flat)
 
@@ -287,20 +301,18 @@ class BaselineAugmentation(BaseModule):
     #*****************#
     def _polynomial(self, like, ppm):
         """
-        A random complex polynomial per trace: real and imaginary coefficient
-        sets over the orthogonal basis, as FSL-MRS parameterises its baseline.
+        A random real polynomial per trace: one coefficient set over the
+        orthogonal basis FSL-MRS parameterises its baseline with.
         """
         basis = self._polynomial_basis(ppm)
         traces = ops.shape(like)[0]
         basis_t = ops.match_backend(np.ascontiguousarray(basis.T), like)
-        real = ops.matmul(self._draw((traces, basis.shape[1]), like), basis_t)
-        imag = ops.matmul(self._draw((traces, basis.shape[1]), like), basis_t)
-        return ops.complex_from(real, imag)
+        return ops.matmul(self._draw((traces, basis.shape[1]), like), basis_t)
 
     def _bspline(self, like, ppm):
         """
-        A smooth random curve per trace: white noise put through the P-spline
-        smoother, "a = A^-1 B^T z", then read out on the centred basis.
+        A smooth random real curve per trace: white noise put through the
+        P-spline smoother, "a = A^-1 B^T z", then read out on the centred basis.
         """
         basis_c, smoother = self._bspline_operator(ppm)
         traces, n_pts = ops.shape(like)
@@ -312,7 +324,8 @@ class BaselineAugmentation(BaseModule):
         """
         A bounded, smoothed random walk per trace, made complex by its Hilbert
         transform. Generated in NumPy - each step reflects off the bound the
-        previous one reached, which no backend vectorises - then promoted once.
+        previous one reached, which no backend vectorises - then promoted once;
+        scipy's "hilbert" is the construction "_analytic" repeats natively.
         """
         traces, n_pts = ops.shape(like)
         rng = self.rng.numpy_rng()
@@ -332,6 +345,37 @@ class BaselineAugmentation(BaseModule):
             walk = convolve(walk, np.ones((1, width)) / float(width), mode='same')
 
         return ops.match_backend(hilbert(walk, axis=-1), like)
+
+    #*************************#
+    #   the analytic signal   #
+    #*************************#
+    @staticmethod
+    def _analytic(curve, like):
+        """
+        The analytic signal "r + i H(r)" of each real curve *r*, along the spectral axis.
+
+        Built as "scipy.signal.hilbert" builds it - the transform of *r* kept
+        on one side, doubled, and transformed back - but on the curve's own
+        backend, so a torch baseline stays on its device and in its graph.
+
+        Args:
+            curve: "(traces, n_points)" real curves, any backend.
+            like: A complex tensor lending its dtype.
+
+        Returns:
+            "(traces, n_points)" complex, whose real part is *curve*.
+        """
+        n_pts = ops.shape(curve)[-1]
+        one_sided = np.zeros(n_pts)
+        one_sided[0] = 1.0
+        if n_pts % 2 == 0:
+            one_sided[1:n_pts // 2] = 2.0
+            one_sided[n_pts // 2] = 1.0
+        else:
+            one_sided[1:(n_pts + 1) // 2] = 2.0
+
+        transform = ops.fft(ops.cast_like(curve, like))
+        return ops.ifft(transform * ops.match_backend(one_sided, transform))
 
     #*******************#
     #   the operators   #
