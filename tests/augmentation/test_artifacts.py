@@ -64,6 +64,17 @@ class TestResidualWater:
         result_data, _ = water(nifti_plus, None)
         assert np.iscomplexobj(result_data[0][:])
 
+    def test_shared_profiles_are_built_once_and_stay_exact(self):
+        """Samples sharing lobe parameters share a profile; each stays its own."""
+        ppm = ppm_axis(256, 2000.0, 123.0)
+        water = ResidualWater(phase_deg=10.0)
+        water.phase_deg = np.array([10.0, 30.0, 10.0])
+        profiles = water._profiles(3, ppm, '1H')
+        assert len(water._profile_cache) == 2
+        for i in range(3):
+            assert np.array_equal(profiles[i], water._profile(i, ppm, '1H'))
+        assert np.array_equal(water._profiles(3, ppm, '1H'), profiles)
+
 
 #**************************************************************************************************#
 #                                 Class TestSpuriousEchoesCreation                                 #

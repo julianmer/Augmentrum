@@ -21,6 +21,7 @@ from typing import Optional, List
 from abc import ABC, abstractmethod
 
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.utils import to_backend
 from nifti_mrs_plus import Backend, ops
 
 
@@ -655,7 +656,7 @@ class Noise(BaseModule):
             A float32 tensor of shape "(1 or batch, 1, ..., 1)".
         """
         arr = np.asarray(value, dtype=np.float64).reshape((-1,) + (1,) * (ndim - 1))
-        return ops.asarray_like(like, arr, dtype='float32')
+        return to_backend(arr, like, dtype='float32')
 
     #***************#
     #   how where   #

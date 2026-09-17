@@ -20,6 +20,7 @@ from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
+from augmentrum.processing.utils import to_backend
 from nifti_mrs_plus import Backend, ops
 
 
@@ -167,7 +168,7 @@ class LineBroadening(BaseModule):
         arr = np.asarray(value, dtype=np.float64)
         if arr.ndim == 0:
             return float(arr)
-        return ops.match_backend(arr.reshape((-1,) + (1,) * (ndim - 1)), t)
+        return to_backend(arr.reshape((-1,) + (1,) * (ndim - 1)), t)
 
     @staticmethod
     def _make_time_envelope(fid, sw_hz, lb_hz, gb_hz):

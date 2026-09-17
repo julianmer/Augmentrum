@@ -415,6 +415,22 @@ class TestMaskedSubsets:
             assert _rel(got[b:b + 1], ref) < 1e-12
 
 
+def test_uploads_match_the_backend_conversion():
+    """to_backend is ops.match_backend (or asarray_like) in values, dtype and device."""
+    from nifti_mrs_plus import ops
+    from augmentrum.processing.utils import to_backend
+
+    param = np.linspace(0, 1, 5)[:, None] * (1 + 2j)
+    like = torch.zeros(2, dtype=torch.complex64)
+    for got, ref in ((to_backend(param, like), ops.match_backend(param, like)),
+                     (to_backend(param.real, like, dtype='float32'),
+                      ops.asarray_like(like, param.real, dtype='float32'))):
+        assert got.dtype == ref.dtype and torch.equal(got, ref)
+    if CUDA:
+        got = to_backend(param, like.cuda())
+        assert got.device.type == 'cuda' and torch.equal(got.cpu(), ops.match_backend(param, like))
+
+
 #**************************************************************************************************#
 #                                     Class TestDevices                                            #
 #**************************************************************************************************#
