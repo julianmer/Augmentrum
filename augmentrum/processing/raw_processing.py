@@ -6,9 +6,10 @@
 #                                                                                                  #
 # Created: 2025-10-07                                                                              #
 #                                                                                                  #
-# Purpose: Processing of raw (uncombined, unaveraged) MRS data. One RawProcessor, two engines:     #
-#          the FSL-MRS reference per NIfTI object on the list backend, and the same pipeline       #
-#          batched and differentiable on every tensor backend.                                     #
+# Purpose: Processing of raw (uncombined, unaveraged) MRS data. One RawProcessor, three engines:   #
+#          the FSL-MRS reference per NIfTI object on the list backend, the same pipeline batched   #
+#          and differentiable on every tensor backend, and a fully batched torch engine that       #
+#          keeps every estimate on the data's device and consumes per-sample coil/transient masks. #
 #                                                                                                  #
 ####################################################################################################
 
@@ -27,6 +28,7 @@ from augmentrum.processing.utils import (safe_squeeze, fid_to_spec,
                                          ppm_shift_axis, ppm_window, move_axis)
 from augmentrum.processing.domain import Domain
 from augmentrum.core.base_module import BaseModule
+from augmentrum.core.pool import WATER_SHARED
 from augmentrum.core import Backend
 
 
@@ -67,6 +69,29 @@ class RawProcessor(BaseModule):
         decomposition, so it matches to floating-point tolerance rather than
         bit-exactly.
 
+    registration_method='torch' selects the batched device engine for the
+    whole tensor path (augmentrum.processing.torch_engine): every estimate
+    runs as whole-batch torch operations on the data's own device, with no
+    per-transient loop, no SciPy and no host round trip - NumPy input is
+    processed on CPU torch and handed back. Its differences from the
+    reference, all measured on the COWS raw data:
+      * registration emulates Powell's decisive first line searches (the
+        bracket FSL-MRS's search opens from zero shift) and solves the rest
+        exactly; on noisy transients whose cost ripples at the bin scale a
+        few in a thousand settle in a neighbouring minimum of equal cost;
+      * wSVD whitens with a Cholesky factor instead of an eigendecomposition
+        (the weights are invariant to that choice);
+      * the outlier metric is taken in the time domain (Parseval);
+      * prewhitening that per-sample draws switch off is not warned about;
+      * adaptive coil combination and water removal keep their NumPy
+        estimates.
+
+    Per-sample coil and transient masks (a sampler drawing with
+    per_sample=True) are consumed on every tensor engine: coils combine and
+    transients align, reject and average over the kept entries only, which
+    equals processing the gathered subset. The torch engine does so batched;
+    the others process sample by sample.
+
     On tensors, the water reference keeps its own dimension layout (read off
     the injected 'water_dim_tags': one transient next to thirty-two
     metabolite averages is the common case), and ppm referencing assumes 1H
@@ -75,6 +100,12 @@ class RawProcessor(BaseModule):
 
     SUPPORTED_BACKENDS = tuple(Backend)
     DOMAIN = Domain(spectral='time')
+
+    # Coil combination and averaging aggregate over exactly the drawn entries.
+    MASKS = 'consume'
+
+    #: Registration methods that run only on tensors.
+    TENSOR_ONLY_REGISTRATION = ('pattern', 'torch')
 
     _dropped_tags = frozenset()
     _dropped_water_tags = frozenset()
@@ -105,7 +136,8 @@ class RawProcessor(BaseModule):
             coil_method (str): Coil combination method ('fsl-mrs' or 'adaptive').
             registration_method (str): Registration method ('fsl-mrs' for the
                 FSL-MRS Powell search; 'pattern' for the fast vectorized
-                search, tensor engine only).
+                search, tensor engine only; 'torch' for the batched device
+                engine of every step, see above).
             remove_method (str): Outlier removal method ('fsl-mrs').
             average_method (str): Averaging method ('fsl-mrs').
             ecc_method (str): Eddy current correction method ('fsl-mrs' for the raw
@@ -116,10 +148,10 @@ class RawProcessor(BaseModule):
         """
         super().__init__()
 
-        # The pattern registration exists only batched, so that configuration
-        # narrows support and lets a NIfTI-list batch route to the tensor
-        # engine instead of failing on the list engine.
-        if registration_method == 'pattern':
+        # The pattern and torch registrations exist only batched, so those
+        # configurations narrow support and let a NIfTI-list batch route to
+        # the tensor engine instead of failing on the list engine.
+        if registration_method in self.TENSOR_ONLY_REGISTRATION:
             self.SUPPORTED_BACKENDS = tuple(b for b in Backend
                                             if b is not Backend.NIFTI_LIST)
 
@@ -559,6 +591,12 @@ class RawProcessor(BaseModule):
             raise ValueError("RawProcessor needs 'sw_hz' and 'sf_mhz' — provide them or process "
                              "data with header metadata attached.")
 
+        masks = {tag: mask for tag, mask in (kwargs.get('dim_masks') or {}).items()
+                 if mask is not None}
+        self.dim_masks_ = {}
+        if masks and self.registration_method != 'torch':
+            return self._process_per_sample(data_array, water_array, backend, masks, **kwargs)
+
         met, wat = data_array, water_array
         self._warned_no_prewhiten = False
 
@@ -578,6 +616,14 @@ class RawProcessor(BaseModule):
             self._dropped_water_tags = set(given_w[len(wtags):])
             if len(ops.shape(wat)) > 5:
                 wat = move_axis(wat, self.SPECTRAL_AXIS, -1)
+
+        if self.registration_method == 'torch':
+            met, wat = self._process_torch(met, wat, tags, wtags, sw_hz, sf_mhz, masks,
+                                           kwargs.get('pool_origin'),
+                                           kwargs.get('water_pool_origin'))
+            if wat is not None and len(ops.shape(wat)) > 5:
+                wat = move_axis(wat, -1, self.SPECTRAL_AXIS)
+            return met, wat
 
         if self.conj:
             met = ops.complex_from(ops.real(met), -ops.imag(met))
@@ -859,7 +905,7 @@ class RawProcessor(BaseModule):
         Returns:
             Tuple of (met, wat, tags, wtags).
         """
-        if self.registration_method not in ('fsl-mrs', 'pattern'):
+        if self.registration_method not in ('fsl-mrs', 'pattern', 'torch'):
             raise ValueError(f"Unknown tensor registration method: {self.registration_method}")
         met, tags = self._align_transients(met, tags, self._dropped_tags,
                                            sw_hz, sf_mhz, (0.2, 4.2))
@@ -1120,6 +1166,432 @@ class RawProcessor(BaseModule):
         met = phase(met, (2.9, 3.1))
         wat = phase(wat, (4.55, 4.7)) if wat is not None else None
         return met, wat
+
+    #*************************#
+    #   per-sample fallback   #
+    #*************************#
+    def _process_per_sample(self, data_array, water_array, backend, masks, **kwargs):
+        """
+        Per-sample masks on the NumPy-estimate engines: every sample's drawn
+        subset is gathered and processed on its own, which is exactly what the
+        masks stand for. Slow, as those engines are; the torch engine does the
+        same batched.
+
+        Args:
+            data_array: Data, spectral axis last.
+            water_array: Water in its untransposed layout, or None.
+            backend: The array backend.
+            masks: {tag: (batch, n) bool} over the data's dimensions.
+            **kwargs: As for process_tensor.
+
+        Returns:
+            "(data, water)" as process_tensor returns them.
+        """
+        given = [t for t in (kwargs.get('dim_tags') or []) if t]
+        given_w = kwargs.get('water_dim_tags')
+        given_w = [t for t in (given if given_w is None else given_w) if t]
+        if ('DIM_COIL' in masks and not self.coil) or ('DIM_DYN' in masks and not self.average):
+            raise NotImplementedError(
+                "Per-sample masks over a dimension this processor keeps need "
+                "registration_method='torch', which carries them through.")
+
+        inner = {key: value for key, value in kwargs.items()
+                 if key not in ('dim_masks', 'pool_origin', 'water_pool_origin')}
+        outs, water_outs, layout = [], [], None
+        for i in range(ops.shape(data_array)[0]):
+            sample = data_array[i:i + 1]
+            water = water_array[i:i + 1] if water_array is not None else None
+            for tag, mask in masks.items():
+                keep = np.flatnonzero(np.asarray(ops.to_numpy(mask))[i])
+                sample = ops.take(sample, keep, axis=4 + given.index(tag))
+                if water is not None and tag in WATER_SHARED and tag in given_w:
+                    water = ops.take(water, keep, axis=5 + given_w.index(tag))
+            out, water_out = self.process_tensor(sample, water, backend, **inner)
+            state = (tuple(ops.shape(out)[1:]), sorted(self._dropped_tags),
+                     sorted(self._dropped_water_tags))
+            if layout is not None and state != layout:
+                raise ValueError("The drawn subsets left the samples in different layouts; "
+                                 "use registration_method='torch'.")
+            layout = state
+            outs.append(out)
+            water_outs.append(water_out)
+
+        water_out = ops.concatenate(water_outs, axis=0) if water_array is not None else None
+        return ops.concatenate(outs, axis=0), water_out
+
+    #******************#
+    #   torch engine   #
+    #******************#
+    #: Higher dimensions the torch engine knows how to process.
+    TORCH_DIMS = ('DIM_COIL', 'DIM_DYN')
+
+    def _process_torch(self, met, wat, tags, wtags, sw_hz, sf_mhz, masks, origin=None,
+                       water_origin=None):
+        """
+        The raw pipeline as batched torch operations on the data's device.
+
+        Data and water are brought to one layout, (B, V, C, D, T) - voxels,
+        coils, transients, points, a singleton for a dimension that is absent
+        - and every aggregate is restricted to the entries each sample drew.
+        Where the values are still the pool's, per-subject results the pool
+        cached (noise moments, the water's Gram matrix) replace recomputation;
+        they are exact, since a subset's statistics are sums and sub-matrices
+        of the whole's.
+
+        Args:
+            met: Data, (B, X, Y, Z, <tags>, T).
+            wat: Water, (B, X, Y, Z, <wtags>, T), or None.
+            tags: The data's higher-dimension tags, mutated as dimensions go.
+            wtags: The water's, likewise.
+            sw_hz: Spectral width in Hz.
+            sf_mhz: Spectrometer frequency in MHz.
+            masks: {tag: (B, n) bool} per-sample masks over the data's dimensions.
+            origin: PoolOrigin of the data, or None.
+            water_origin: PoolOrigin of the water, or None.
+
+        Returns:
+            "(met, wat)" with collapsed dimensions removed, spectral axis last,
+            on the input's backend; "dim_masks_" holds the masks of the
+            dimensions that remain.
+        """
+        import torch
+        from augmentrum.processing import torch_engine as engine
+
+        for group, name in ((tags, 'data'), (wtags, 'water')):
+            unknown = [t for t in group if t not in self.TORCH_DIMS]
+            if unknown:
+                raise ValueError(f"registration_method='torch' processes {self.TORCH_DIMS}, "
+                                 f"but the {name} carries {unknown}; use 'fsl-mrs' or "
+                                 f"'pattern'.")
+        entry_tags, entry_wtags = list(tags), list(wtags)
+        x, spatial = self._to_torch_layout(met, tags)
+        w = self._to_torch_layout(wat, wtags)[0] if wat is not None else None
+        b, v, c, d, n = x.shape
+        masks = {tag: torch.as_tensor(np.asarray(ops.to_numpy(mask))) if not ops.is_torch(mask)
+                 else mask for tag, mask in masks.items()}
+        masks = {tag: mask.to(device=x.device, dtype=torch.bool) for tag, mask in masks.items()}
+        coil_mask, dyn_mask = masks.get('DIM_COIL'), masks.get('DIM_DYN')
+
+        if self.conj:
+            x = torch.conj_physical(x)
+            w = torch.conj_physical(w) if w is not None else None
+
+        if self.coil and 'DIM_COIL' in tags and c > 1:
+            if w is not None:
+                if 'DIM_COIL' not in wtags:
+                    raise ValueError('The water reference has no coil dimension to combine '
+                                     'alongside the data.')
+                if w.shape[2] != c:
+                    raise ValueError('Reference and data coil dimension does not match.')
+            if self.coil_method == 'fsl-mrs':
+                x, w = self._torch_wsvd(x, w, coil_mask, dyn_mask, origin, water_origin,
+                                        entry_tags, entry_wtags)
+            elif self.coil_method == 'adaptive':
+                if coil_mask is not None:
+                    raise NotImplementedError("Adaptive coil combination takes no coil masks; "
+                                              "use coil_method='fsl-mrs'.")
+                x, w = self._torch_adaptive(x, w, dyn_mask)
+            else:
+                raise ValueError(f"Unknown tensor coil combination method: {self.coil_method}")
+            tags.remove('DIM_COIL')
+            self._dropped_tags.add('DIM_COIL')
+            if w is not None:
+                wtags.remove('DIM_COIL')
+                self._dropped_water_tags.add('DIM_COIL')
+            coil_mask = None
+
+        if self.align:
+            x, coil_mask, estimates = self._torch_align(
+                x, tags, self._dropped_tags, coil_mask, dyn_mask, sw_hz, sf_mhz, (0.2, 4.2))
+            if estimates is not None:
+                self.last_alignment_ = estimates
+            if w is not None:
+                w = self._torch_align(w, wtags, self._dropped_water_tags, None, None,
+                                      sw_hz, sf_mhz, (0, 8))[0]
+
+        valid = dyn_mask
+        if self.remove_outliers:
+            if self.remove_method != 'fsl-mrs':
+                raise ValueError(f"Unknown tensor outlier removal method: {self.remove_method}")
+            if 'DIM_DYN' in tags and x.shape[3] > 1:
+                if spatial != (1, 1, 1) or len(tags) != 1:
+                    raise ValueError('Outlier removal is only specified for SVS data with a '
+                                     'single dynamic dimension (as in FSL-MRS remove_unlike).')
+                every = torch.ones(b, x.shape[3], dtype=torch.bool, device=x.device)
+                valid = engine.unlike_mask(x[:, 0, 0], every if dyn_mask is None else dyn_mask)
+                self.last_keep_mask_ = valid.reshape(b, 1, 1, 1, -1)
+
+        remaining = {}
+        if self.average and self.average_method != 'fsl-mrs':
+            raise ValueError(f"Unknown tensor averaging method: {self.average_method}")
+        if 'DIM_DYN' in tags and x.shape[3] > 1:
+            if not self.average:
+                if valid is not None:
+                    # no average to consume the mask: removal is expressed as zeros
+                    x = x * valid.to(x.real.dtype)[:, None, None, :, None]
+                    remaining['DIM_DYN'] = valid
+            else:
+                if valid is None:
+                    x = x.mean(dim=3, keepdim=True)
+                else:
+                    weights = valid.to(torch.float64)
+                    weights = (weights / weights.sum(dim=1, keepdim=True)).to(x.real.dtype)
+                    x = (x * weights[:, None, None, :, None]).sum(dim=3, keepdim=True)
+                tags.remove('DIM_DYN')
+                self._dropped_tags.add('DIM_DYN')
+        if self.average and w is not None and 'DIM_DYN' in wtags and w.shape[3] > 1:
+            w = w.mean(dim=3, keepdim=True)
+            wtags.remove('DIM_DYN')
+            self._dropped_water_tags.add('DIM_DYN')
+
+        if coil_mask is not None and 'DIM_COIL' in tags:
+            x = x * coil_mask.to(x.real.dtype)[:, None, :, None, None]
+            remaining['DIM_COIL'] = coil_mask
+
+        for group, dropped, data in ((tags, self._dropped_tags, x),
+                                     (wtags, self._dropped_water_tags, w)):
+            if data is not None and ('DIM_DYN' in group or 'DIM_COIL' in group):
+                for tag in list(group):
+                    if data.shape[2 if tag == 'DIM_COIL' else 3] == 1:
+                        group.remove(tag)
+                        dropped.add(tag)
+
+        x, w = self._torch_corrections(x, w, tags, wtags, sw_hz, sf_mhz)
+
+        self.dim_masks_ = {tag: mask for tag, mask in remaining.items() if tag in tags}
+        met_out = self._from_torch_layout(x, spatial, tags)
+        wat_out = self._from_torch_layout(w, spatial, wtags) if w is not None else None
+        if not ops.is_torch(met):
+            met_out = ops.match_backend(met_out.numpy(), met)
+            wat_out = ops.match_backend(wat_out.numpy(), wat) if wat_out is not None else None
+            self.dim_masks_ = {tag: mask.numpy() for tag, mask in self.dim_masks_.items()}
+        return met_out, wat_out
+
+    def _torch_wsvd(self, x, w, coil_mask, dyn_mask, origin, water_origin, tags, wtags):
+        """
+        wSVD coil combination of the torch engine, over each sample's drawn coils.
+
+        The noise covariance pools the last tenth of every drawn transient (as
+        FSL-MRS estimate_noise_cov does over the gathered array), from moments
+        the pool caches per subject and transient where it can; the weights
+        come from the water averaged over its transients, or from each
+        transient itself without a water.
+        """
+        import torch
+        from augmentrum.processing import torch_engine as engine
+
+        b, v, c, d, n = x.shape
+        tail = n - int((1 - engine.NOISE_FRACTION) * n)
+        if self._pool_holds(origin, 'data', tags, n):
+            second, first = origin.pool.cached(
+                ('RawProcessor.noise_moments', tuple(tags), n),
+                lambda pool: self._pool_noise_moments(pool.data, tags, tail))
+            index = torch.as_tensor(origin.indices, device=x.device)
+            second, first = second[index], first[index]
+            if self.conj:
+                second, first = second.conj(), first.conj()
+        else:
+            second, first = engine.noise_moments(x[..., n - tail:])
+        cov, samples = engine.noise_covariance(second, first, v * tail, dyn_mask)
+
+        active = (coil_mask if coil_mask is not None
+                  else torch.ones(b, c, dtype=torch.bool, device=x.device))
+        whiten = samples >= engine.MIN_SAMPLES_PER_COIL * active.sum(dim=1)
+        if coil_mask is None and dyn_mask is None and v * d * tail < \
+                engine.MIN_SAMPLES_PER_COIL * c:
+            self._warn_no_prewhiten()
+
+        if w is None:
+            gram = engine.reference_gram(x.permute(0, 1, 3, 4, 2))          # (B, V, D, C, C)
+            weights = engine.wsvd_weights(gram, cov, active, whiten, False)
+            return engine.combine_coils(x, weights.to(x.dtype)).unsqueeze(2), None
+
+        if self._pool_holds(water_origin, 'water', wtags, n):
+            gram = water_origin.pool.cached(
+                ('RawProcessor.water_gram', tuple(wtags), n),
+                lambda pool: self._pool_water_gram(pool.water, wtags))
+            gram = gram[torch.as_tensor(water_origin.indices, device=x.device)]
+            gram = gram.conj() if self.conj else gram
+        else:
+            gram = engine.reference_gram(w.mean(dim=3).transpose(-1, -2))   # (B, V, C, C)
+        weights = engine.wsvd_weights(gram, cov, active, whiten, True)       # (B, V, C)
+        x = engine.combine_coils(x, weights.to(x.dtype))
+        w = engine.combine_coils(w, weights.to(w.dtype))
+        return x.unsqueeze(2), w.unsqueeze(2)
+
+    @staticmethod
+    def _pool_holds(origin, role, tags, n):
+        """Whether *origin* is a pool entry of *role* laid out like the tensor at hand."""
+        if origin is None or origin.role != role:
+            return False
+        pool_tags = origin.pool.data_tags if role == 'data' else origin.pool.water_tags
+        tensor = origin.pool.data if role == 'data' else origin.pool.water
+        return ([t for t in (pool_tags or []) if t] == list(tags)
+                and ops.shape(tensor)[4] == n)
+
+    def _pool_noise_moments(self, pool_data, tags, tail, subjects=8):
+        """Per-subject, per-transient noise moments of a whole pool, a few subjects at a time."""
+        import torch
+        from augmentrum.processing import torch_engine as engine
+
+        layout = self._to_torch_layout(move_axis(pool_data, 4, -1), tags)[0]
+        moments = [engine.noise_moments(chunk[..., chunk.shape[-1] - tail:])
+                   for chunk in layout.split(subjects)]
+        return torch.cat([m[0] for m in moments]), torch.cat([m[1] for m in moments])
+
+    def _pool_water_gram(self, pool_water, wtags):
+        """The Gram matrix of every pooled water, averaged over its transients."""
+        from augmentrum.processing import torch_engine as engine
+
+        layout = self._to_torch_layout(move_axis(pool_water, 4, -1), wtags)[0]
+        return engine.reference_gram(layout.mean(dim=3).transpose(-1, -2))
+
+    def _torch_adaptive(self, x, w, dyn_mask):
+        """
+        The adaptive combination in the torch engine's layout: its eigenvector
+        estimate stays in NumPy (as in the reference), the combination on the device.
+        """
+        import torch
+        from augmentrum.processing.utils import estimate_csm
+
+        if w is not None:
+            ref = w.mean(dim=3)
+        elif dyn_mask is None:
+            ref = x.mean(dim=3)
+        else:
+            weights = dyn_mask.to(x.real.dtype)[:, None, None, :, None]
+            ref = (x * weights).sum(dim=3) / weights.sum(dim=3)
+        ref = ops.to_numpy(ref).astype(np.complex128).transpose(0, 1, 3, 2)   # (B, V, T, C)
+        phase = np.exp(-1j * np.angle(ref))
+        flat = (ref * phase).reshape((-1,) + ref.shape[-2:])
+        csm = np.stack([estimate_csm(voxel)[:, 0] for voxel in flat])
+        csm = csm.reshape(ref.shape[:2] + (ref.shape[-1],))
+        csmsq = np.real((csm * np.conj(csm)).sum(-1, keepdims=True))
+        weights = torch.as_tensor(np.conj(csm)[..., None, :] * phase
+                                  / (csmsq[..., None] + np.finfo(float).eps), device=x.device)
+        x = torch.einsum('bvcdt,bvtc->bvdt', x, weights.to(x.dtype)).unsqueeze(2)
+        if w is not None:
+            w = torch.einsum('bvcdt,bvtc->bvdt', w, weights.to(w.dtype)).unsqueeze(2)
+        return x, w
+
+    def _torch_align(self, x, tags, dropped, coil_mask, dyn_mask, sw_hz, sf_mhz, ppmlim):
+        """
+        Registration along DIM_DYN, where there is more than one transient.
+
+        A coil dimension still present is cut to its first drawn element first,
+        as the list path's copy(remove_dim='DIM_COIL') does with the gathered
+        array.
+
+        Returns:
+            "(x, coil_mask, estimates)": the aligned tensor, the coil mask left
+            (None once cut), and the (phi, eps) per voxel and transient, or None.
+        """
+        import torch
+        from augmentrum.processing import torch_engine as engine
+
+        b, v, c, d, n = x.shape
+        if 'DIM_DYN' not in tags or d <= 1:
+            return x, coil_mask, None
+        if 'DIM_COIL' in tags:
+            first = (engine.first_true(coil_mask) if coil_mask is not None
+                     else torch.zeros(b, dtype=torch.long, device=x.device))
+            x = x.gather(2, first.reshape(b, 1, 1, 1, 1).expand(b, v, 1, d, n))
+            tags.remove('DIM_COIL')
+            dropped.add('DIM_COIL')
+            coil_mask = None
+
+        flat = x[:, :, 0].reshape(b * v, d, n)
+        valid = (torch.ones(b * v, d, dtype=torch.bool, device=x.device) if dyn_mask is None
+                 else dyn_mask.repeat_interleave(v, dim=0))
+        phi, eps = engine.align(flat, valid, sw_hz, sf_mhz, ppmlim)
+        x = flat * engine.alignment_phasor(phi, eps, n, sw_hz, x.dtype)
+        return x.reshape(b, v, 1, d, n), coil_mask, (phi.reshape(b, v, d), eps.reshape(b, v, d))
+
+    def _torch_corrections(self, x, w, tags, wtags, sw_hz, sf_mhz):
+        """Eddy current correction, truncation, water removal, referencing and phasing."""
+        import torch
+        from augmentrum.processing import torch_engine as engine
+
+        if self.ecc:
+            if w is not None and wtags and (wtags != tags or w.shape != x.shape):
+                raise ValueError('Reference and data shape must match or the reference must be '
+                                 'a single FID per voxel (as in eddy current correction).')
+            ref = w if w is not None else x
+            if self.ecc_method == 'smoothed':
+                phase = engine.ecc_phase(ref)
+            elif self.ecc_method == 'fsl-mrs':
+                phase = torch.angle(ref.to(torch.complex128))
+            else:
+                raise ValueError(f"Unknown ECC method: {self.ecc_method}")
+            phasor = torch.polar(torch.ones_like(phase), -phase)
+            x = x * phasor.to(x.dtype)
+            w = w * phasor.to(w.dtype) if w is not None else None
+
+        if self.truncate:
+            x = x[..., 1:]
+            w = w[..., 1:] if w is not None else None
+
+        if self.remove_water:
+            x = self.water_removal(x, sw_hz, sf_mhz)
+
+        n = x.shape[-1]
+        if self.shift_ref:
+            if self.shift_ref_method != 'fsl-mrs':
+                raise ValueError(f"Unknown tensor frequency shifting method: "
+                                 f"{self.shift_ref_method}")
+            shift = engine.peak_shift_hz(x.reshape(-1, n), sw_hz, sf_mhz, (2.9, 3.1), 3.027)
+            x = x * engine.shift_phasor(shift, n, sw_hz, x.dtype).reshape(x.shape[:-1] + (n,))
+
+        if self.phase_correct:
+            if self.phase_correct_method != 'fsl-mrs':
+                raise ValueError(f"Unknown tensor phase correction method: "
+                                 f"{self.phase_correct_method}")
+
+            def phased(data, window):
+                angle = engine.peak_phase(data.reshape(-1, data.shape[-1]), sw_hz, sf_mhz, window)
+                factor = torch.polar(torch.ones_like(angle), angle)
+                return data * factor.reshape(data.shape[:-1] + (1,)).to(data.dtype)
+
+            x = phased(x, (2.9, 3.1))
+            w = phased(w, (4.55, 4.7)) if w is not None else None
+        return x, w
+
+    @staticmethod
+    def _to_torch_layout(array, tags):
+        """
+        (B, X, Y, Z, <tags>, T) as a torch (B, V, C, D, T), with the spatial shape.
+
+        Absent dimensions become singletons; NumPy input is wrapped, not copied.
+        """
+        import torch
+
+        x = array if ops.is_torch(array) else torch.from_numpy(np.asarray(ops.to_numpy(array)))
+        spatial = tuple(x.shape[1:4])
+        present = list(tags)
+        for tag in RawProcessor.TORCH_DIMS:
+            if tag not in present:
+                x = x.unsqueeze(-2)
+                present.append(tag)
+        order = [0, 1, 2, 3] + [4 + present.index(t) for t in RawProcessor.TORCH_DIMS] \
+            + [x.dim() - 1]
+        x = x.permute(order)
+        return x.reshape((x.shape[0], -1) + tuple(x.shape[4:])), spatial
+
+    @staticmethod
+    def _from_torch_layout(x, spatial, tags):
+        """(B, V, C, D, T) back to (B, X, Y, Z, <tags>, T); other dimensions must be singletons."""
+        b, _, c, d, n = x.shape
+        y = x.reshape((b,) + tuple(spatial) + (c, d, n))
+        present = list(RawProcessor.TORCH_DIMS)
+        for i in reversed(range(len(present))):
+            if present[i] not in tags:
+                if y.shape[4 + i] != 1:
+                    raise RuntimeError(f"{present[i]} was dropped while still {y.shape[4 + i]} "
+                                       f"long.")
+                y = y.squeeze(4 + i)
+                present.pop(i)
+        order = [0, 1, 2, 3] + [4 + present.index(t) for t in tags] + [y.dim() - 1]
+        return y.permute(order)
 
     #************************#
     #   detached estimates   #
