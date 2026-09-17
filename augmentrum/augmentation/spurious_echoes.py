@@ -7,7 +7,7 @@
 #                                                                                                  #
 # Created: 2026-02-07                                                                              #
 #                                                                                                  #
-# Purpose: Adds delayed echo replicas (ghosting artifacts) to MRS data.                            #
+# Purpose: Adds spurious echoes (out-of-voxel signal refocused late) to MRS data.                  #
 #          Supports a localized echo, a delayed replica of the FID, and a hybrid of the two        #
 #          (Kyathanahally et al. 2021, Berrington et al. 2021, Bugler et al. 2025).                #
 #                                                                                                  #
@@ -16,11 +16,13 @@
 #*************#
 #   imports   #
 #*************#
+import warnings
+
 import numpy as np
 from typing import Optional, List, Dict
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import batch_profile
+from augmentrum.processing.utils import batch_profile, ppm_reference
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
 from nifti_mrs_plus.ops import match_backend
@@ -42,10 +44,13 @@ class SpuriousEchoes(BaseModule):
 
     Supports three modes:
 
-    - 'echo': The localized echo of Berrington et al. 2021 / SMART MRS
-      (Bugler et al. 2025): an independent additive signal
-      "A·exp(-|t-t_echo|/T2)·exp(i(2πf·t+φ))", scaled by max |FID|.
-    - 'replica' (default): A delayed replica of the FID itself,
+    - 'echo' (default): The localized echo of Berrington et al. 2021 / SMART MRS
+      (Bugler et al. 2025, Eq. 1): an independent additive signal
+      "A·exp(-|t-t_echo|/T2)·exp(i(2πf·t+φ))", scaled by max |FID| - signal from
+      outside the voxel, refocused late by imperfect crushing. The phase sits
+      inside the exponent as in the paper; SMART MRS's code adds it outside,
+      where it scales the amplitude instead.
+    - 'replica': A delayed replica of the FID itself,
       "amp·e^{iφ}·fid(t-τ)·exp(-π·decay·(t-τ))·exp(i2πf(t-τ))" for t ≥ τ:
       the FID shifted by τ, attenuated and frequency-shifted. In the
       spectrum this is the whole spectrum again, weighted by a modulation of
@@ -66,28 +71,54 @@ class SpuriousEchoes(BaseModule):
 
         For echo and hybrid mode, additional per-echo keys:
         - t_echo: Echo center time in seconds (defaults to tau)
+        - t_echo_frac: Echo center as a fraction of the acquisition time,
+          instead of t_echo
         - T2: Envelope time constant in seconds (defaults to 0.04)
         - gaussian_env: Use Gaussian envelope (bool, default False)
+
+        For echo mode only:
+        - ppm: Where the echo sits, on the FSL-MRS / NIfTI-MRS axis of the
+          data's nucleus (4.65 ppm at the carrier for 1H), instead of freq_hz
+
+        Without *echoes*, echo mode draws one echo per sample from the ranges
+        SMART MRS uses - t_echo_frac 0.1-0.9, ppm 0-8, any phase - with T2 of
+        10-50 ms (SMART's code draws 10-50 against a time axis in seconds, which
+        leaves the echo undamped) and an amplitude of 2-20 % of max |FID|.
+        Replica and hybrid mode default to one fixed replica at 0.1 s.
 
         Any numeric key may be a "(low, high)" range instead of a number.
         Ranges are drawn uniformly, once per sample, from this module's
         seeded generator; numbers stay fixed for every sample.
 
-    mode : str
-        'echo', 'replica' (default), or 'hybrid'.
+    mode : str, optional
+        'echo', 'replica', or 'hybrid'. None (default) is 'echo', or 'replica'
+        when *echoes* are given as legacy tuples, which describe replicas.
     global_phase_deg : float
         Global phase offset for all echoes (default: 0.0)
     alpha_reference : str
         How amplitude is referenced in hybrid mode:
         'max' (default) = fraction of max(|FID|),
         'tau' = fraction of |FID| at delay time
+    transient_fraction : float
+        Share of the transients (DIM_DYN) that carry the echo, drawn per sample;
+        1.0 (default) puts it in all of them. As SMART MRS does, an echo can
+        then hit a few transients of a scan before they are averaged. Data
+        without a transient axis gets the echo whole, with a warning.
     seed : int, optional
         Seed for the per-sample draws.
 
     Examples
     --------
+    >>> # A random localized echo per sample, in a quarter of the transients
+    >>> se = SpuriousEchoes(transient_fraction=0.25, seed=0)
+
+    >>> # A localized echo placed on the ppm axis
+    >>> se = SpuriousEchoes(echoes=[{'ppm': 1.3, 't_echo': 0.25, 'T2': 0.03,
+    ...                              'amp': 0.1, 'phase_deg': (-180, 180)}])
+
     >>> # Replica mode (simple)
     >>> se = SpuriousEchoes(
+    ...     mode='replica',
     ...     echoes=[{'delay_s': 0.1, 'amp': 0.3, 'phase_deg': 0,
     ...              'decay_hz': 5.0, 'freq_hz': 0.0}]
     ... )
@@ -95,6 +126,7 @@ class SpuriousEchoes(BaseModule):
 
     >>> # A different replica per sample: delay, amplitude and phase drawn
     >>> se = SpuriousEchoes(
+    ...     mode='replica',
     ...     echoes=[{'delay_s': (0.05, 0.2), 'amp': (0.05, 0.3),
     ...              'phase_deg': (-180, 180), 'decay_hz': (2, 10)}], seed=0
     ... )
@@ -120,26 +152,43 @@ class SpuriousEchoes(BaseModule):
     #: Numeric keys that may be given as (low, high) ranges, with the default
     #: used when absent; None means "depends on the mode" (see _defaults).
     NUMERIC_KEYS = {'delay_s': None, 'amp': None, 'phase_deg': 0.0, 'decay_hz': 5.0,
-                    'freq_hz': 0.0, 'T2': 0.04, 't_echo': None}
+                    'freq_hz': 0.0, 'T2': 0.04, 't_echo': None, 't_echo_frac': None,
+                    'ppm': None}
+
+    #: The echo drawn when none is given in echo mode (see the class docstring).
+    ECHO_DEFAULT = {'t_echo_frac': (0.1, 0.9), 'T2': (0.01, 0.05), 'ppm': (0.0, 8.0),
+                    'phase_deg': (0.0, 360.0), 'amp': (0.02, 0.2)}
+
+    #: The replica used when none is given in replica or hybrid mode.
+    REPLICA_DEFAULT = {'delay_s': 0.1, 'amp': 0.2, 'phase_deg': 0.0,
+                       'decay_hz': 5.0, 'freq_hz': 0.0}
 
     def __init__(self, echoes=None,
-                 mode: str = 'replica',
+                 mode: Optional[str] = None,
                  global_phase_deg: float = 0.0,
                  alpha_reference: str = 'max',
+                 transient_fraction: float = 1.0,
                  seed: Optional[int] = None):
         """Initialize spurious echoes module."""
-        if echoes is None:
-            echoes = [{'delay_s': 0.1, 'amp': 0.2, 'phase_deg': 0.0,
-                       'decay_hz': 5.0, 'freq_hz': 0.0}]
-
         super().__init__()
 
+        if mode is None:
+            # Legacy tuples are (delay_s, amp, phase_deg, decay_hz, freq_hz): replicas.
+            legacy = echoes is not None and any(isinstance(e, (tuple, list)) for e in echoes)
+            mode = 'replica' if legacy else 'echo'
         self.mode = mode.lower()
         if self.mode not in ('echo', 'replica', 'hybrid'):
             raise ValueError(f"mode must be 'echo', 'replica' or 'hybrid', got '{mode}'")
 
+        if echoes is None:
+            echoes = [dict(self.ECHO_DEFAULT if self.mode == 'echo' else self.REPLICA_DEFAULT)]
+
+        if not 0.0 < float(transient_fraction) <= 1.0:
+            raise ValueError(f"transient_fraction must be in (0, 1], got {transient_fraction}")
+
         self.global_phase_deg = global_phase_deg
         self.alpha_reference = alpha_reference
+        self.transient_fraction = float(transient_fraction)
 
         # Normalize echoes to a list of dicts with canonical keys
         self.echoes = []
@@ -158,6 +207,15 @@ class SpuriousEchoes(BaseModule):
             else:
                 raise ValueError(f"Echo must be a dict or tuple, got {type(echo)}")
 
+        for echo in self.echoes:
+            if 'ppm' in echo and 'freq_hz' in echo:
+                raise ValueError("An echo takes 'ppm' or 'freq_hz', not both.")
+            if 'ppm' in echo and self.mode != 'echo':
+                raise ValueError(f"'ppm' places a localized echo; in {self.mode} mode the "
+                                 f"frequency is an offset of the copy, give 'freq_hz'.")
+            if 't_echo_frac' in echo and self.mode == 'replica':
+                raise ValueError("'t_echo_frac' has no meaning in replica mode.")
+
     #***************#
     #   the draws   #
     #***************#
@@ -167,7 +225,9 @@ class SpuriousEchoes(BaseModule):
             return {'delay_s': 0.1, 'amp': 0.1}
         return {'delay_s': 0.18, 'amp': 0.05}
 
-    def _draw(self, batch: int, sw_hz: float) -> List[Dict[str, np.ndarray]]:
+    def _draw(self, batch: int, sw_hz: float, n_points: Optional[int] = None,
+              sf_mhz: Optional[float] = None,
+              nucleus: Optional[str] = None) -> List[Dict[str, np.ndarray]]:
         """
         This batch's echo parameters, one "(batch,)" vector per key per echo.
 
@@ -175,7 +235,16 @@ class SpuriousEchoes(BaseModule):
         stream, so the same seed gives the same echoes on every backend and on
         both processing paths; fixed values are repeated. Delays are resolved
         to whole samples here, so the envelope starts exactly where the shifted
-        copy does.
+        copy does. A position in ppm becomes a frequency on the data's axis,
+        "f = (ppm - reference) · sf", and a fractional echo time becomes seconds
+        of this acquisition.
+
+        Args:
+            batch: Number of samples.
+            sw_hz: Spectral width in Hz.
+            n_points: Points per FID, for 't_echo_frac'.
+            sf_mhz: Spectrometer frequency in MHz, for 'ppm'.
+            nucleus: NIfTI-MRS nucleus, for the ppm reference (1H when None).
         """
         rng = self.rng.numpy_rng()
         defaults = self._defaults()
@@ -200,11 +269,54 @@ class SpuriousEchoes(BaseModule):
                 delay = np.where(delay > 1.0, delay / float(sw_hz), delay)
                 drawn['shift'] = np.round(delay * float(sw_hz)).astype(int)
             drawn['delay_s'] = drawn['shift'] / float(sw_hz)
+
+            frac = drawn.pop('t_echo_frac', None)
+            if frac is not None and 't_echo' not in drawn:
+                if n_points is None:
+                    raise ValueError("'t_echo_frac' needs the number of points per FID.")
+                drawn['t_echo'] = frac * (int(n_points) - 1) / float(sw_hz)
             if 't_echo' not in drawn:
                 drawn['t_echo'] = drawn['delay_s']
+
+            ppm = drawn.pop('ppm', None)
+            if ppm is not None:
+                if sf_mhz is None:
+                    raise ValueError("'ppm' needs the spectrometer frequency of the data.")
+                drawn['freq_hz'] = (ppm - ppm_reference(nucleus)) * float(sf_mhz)
             drawn['gaussian_env'] = bool(echo.get('gaussian_env', False))
             table.append(drawn)
         return table
+
+    def _transient_mask(self, batch: int, n_dyn: int) -> np.ndarray:
+        """
+        Which transients carry the echo: "(batch, n_dyn)", ones and zeros.
+
+        Each sample hits its own randomly chosen round(fraction · n_dyn)
+        transients, at least one.
+        """
+        rng = self.rng.numpy_rng()
+        n_hit = max(1, int(round(self.transient_fraction * n_dyn)))
+        mask = np.zeros((batch, n_dyn))
+        for b in range(batch):
+            mask[b, rng.choice(n_dyn, size=n_hit, replace=False)] = 1.0
+        return mask
+
+    def _dyn_axis(self, tags, rank: int, offset: int) -> Optional[int]:
+        """
+        The transient axis of an array with the spectral points last, or None.
+
+        *offset* is where the higher dimensions start (4 with a batch axis in
+        front, 3 for one NIfTI object); tags past the array's rank name axes a
+        singleton squeeze already removed.
+        """
+        if self.transient_fraction >= 1.0:
+            return None
+        tags = [t for t in (tags or []) if t][:max(0, rank - offset - 1)]
+        if 'DIM_DYN' not in tags:
+            warnings.warn("SpuriousEchoes: transient_fraction is set but the data has no "
+                          "transient (DIM_DYN) axis; the echo is added to every trace.")
+            return None
+        return offset + tags.index('DIM_DYN')
 
     @staticmethod
     def _at(drawn: Dict, index: int) -> Dict:
@@ -281,24 +393,47 @@ class SpuriousEchoes(BaseModule):
             Tuple of (processed_data_list, processed_water_list)
         """
         processed_data = []
-        table = None
+        table, masks = None, None
 
         for i, nifti in enumerate(data_list):
             fid = nifti[:]
             sw_hz = 1.0 / nifti.dwelltime
-            if table is None:
-                table = self._draw(len(data_list), sw_hz)
 
             # The spectral axis is index 3 of a NIfTI-MRS array; bring it last
             # so a coil or average axis behind it is not mistaken for it.
             moved = fid.ndim > 4
             work = np.moveaxis(fid, 3, -1) if moved else fid
+            dyn_axis = self._dyn_axis(getattr(nifti, 'dim_tags', None), work.ndim, 3)
 
-            out = self._add_echoes(work, sw_hz, [self._at(d, i) for d in table])
+            if table is None:
+                # the whole batch is drawn first, in the tensor path's order
+                table = self._draw(len(data_list), sw_hz, n_points=work.shape[-1],
+                                   sf_mhz=nifti.spectrometer_frequency[0],
+                                   nucleus=self._nucleus_of(nifti))
+                if dyn_axis is not None:
+                    masks = self._transient_mask(len(data_list), work.shape[dyn_axis])
+
+            weights = None
+            if masks is not None and dyn_axis is not None:
+                view = [1] * work.ndim
+                view[dyn_axis] = work.shape[dyn_axis]
+                flags = np.broadcast_to(masks[i].reshape(view), work.shape)
+                weights = flags.reshape(-1, work.shape[-1])[:, 0]
+
+            out = self._add_echoes(work, sw_hz, [self._at(d, i) for d in table],
+                                   weights=weights)
             nifti[:] = np.moveaxis(out, -1, 3) if moved else out
             processed_data.append(nifti)
 
         return processed_data, water_list
+
+    @staticmethod
+    def _nucleus_of(nifti) -> Optional[str]:
+        """A NIfTI-MRS object's nucleus as one string, or None."""
+        nucleus = getattr(nifti, 'nucleus', None)
+        if isinstance(nucleus, (list, tuple)):
+            nucleus = nucleus[0] if nucleus else None
+        return None if nucleus is None else str(nucleus)
 
     def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
         """
@@ -321,7 +456,8 @@ class SpuriousEchoes(BaseModule):
             data_array: Input tensor of shape "(batch, ..., n_points)"
             water_array: Optional water reference (unchanged)
             backend: Backend enum (unused)
-            **kwargs: Must contain "'sw_hz'" (spectral width in Hz)
+            **kwargs: Must contain "'sw_hz'" (spectral width in Hz); 'sf_mhz' and
+                'nucleus' place a ppm, 'dim_tags' finds the transients.
 
         Returns:
             Tuple of (processed_data, water_array)
@@ -336,7 +472,14 @@ class SpuriousEchoes(BaseModule):
         batch = int(shape[0]) if ndim > 1 else 1
         t = np.arange(n_points, dtype=np.float64) / float(sw_hz)
 
-        table = self._draw(batch, float(sw_hz))
+        table = self._draw(batch, float(sw_hz), n_points=n_points,
+                           sf_mhz=kwargs.get('sf_mhz'), nucleus=kwargs.get('nucleus'))
+        dyn_axis = self._dyn_axis(kwargs.get('dim_tags'), ndim, 4)
+        mask = None
+        if dyn_axis is not None:
+            view = [1] * ndim
+            view[0], view[dyn_axis] = batch, int(shape[dyn_axis])
+            mask = self._transient_mask(batch, int(shape[dyn_axis])).reshape(view)
         ghost_total = None
 
         for drawn in table:
@@ -378,6 +521,9 @@ class SpuriousEchoes(BaseModule):
 
         if ghost_total is None:
             return data_array, water_array
+        if mask is not None:
+            ghost_total = ghost_total * ops.cast_like(match_backend(mask, data_array),
+                                                      data_array)
         return data_array + ghost_total, water_array
 
     @staticmethod
@@ -394,7 +540,8 @@ class SpuriousEchoes(BaseModule):
     #   the numpy path   #
     #********************#
     def _add_echoes(self, fid: np.ndarray, sw_hz: float,
-                    echoes: Optional[List[Dict]] = None) -> np.ndarray:
+                    echoes: Optional[List[Dict]] = None, weights: Optional[np.ndarray] = None,
+                    sf_mhz: Optional[float] = None, nucleus: Optional[str] = None) -> np.ndarray:
         """
         Add spurious echoes to one subject's FIDs in NumPy.
 
@@ -403,12 +550,18 @@ class SpuriousEchoes(BaseModule):
             sw_hz: Spectral width in Hz
             echoes: This subject's echoes, scalar parameters per echo; None
                 draws them for a single subject
+            weights: Per-trace 0/1 flags (traces in C order), which traces
+                carry the echo; None puts it in all of them
+            sf_mhz: Spectrometer frequency in MHz, when drawing a ppm here
+            nucleus: NIfTI-MRS nucleus, when drawing a ppm here
 
         Returns:
             FID with echoes
         """
         if echoes is None:
-            echoes = [self._at(drawn, 0) for drawn in self._draw(1, sw_hz)]
+            echoes = [self._at(drawn, 0) for drawn in
+                      self._draw(1, sw_hz, n_points=fid.shape[-1], sf_mhz=sf_mhz,
+                                 nucleus=nucleus)]
 
         original_shape = fid.shape
         n_points = original_shape[-1]
@@ -418,6 +571,9 @@ class SpuriousEchoes(BaseModule):
 
         for i in range(fid_2d.shape[0]):
             fid_1d = fid_2d[i]
+            if weights is not None and not weights[i]:
+                result[i] = fid_1d
+                continue
             if self.mode == 'hybrid':
                 result[i] = self._add_echoes_hybrid_1d(fid_1d, sw_hz, echoes)
             elif self.mode == 'echo':

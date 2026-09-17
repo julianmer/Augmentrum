@@ -558,8 +558,9 @@ class TestReplica:
 
     def _spectra(self, sw=2000.0):
         fid = self._fid(sw=sw)
-        out, _ = SpuriousEchoes(echoes=[{'delay_s': self.TAU, 'amp': self.AMP,
-                                         'decay_hz': 0.0}]).process_tensor(fid, sw_hz=sw)
+        out, _ = SpuriousEchoes(mode='replica', echoes=[{'delay_s': self.TAU, 'amp': self.AMP,
+                                                         'decay_hz': 0.0}]).process_tensor(
+            fid, sw_hz=sw)
         freq = np.fft.fftshift(np.fft.fftfreq(fid.shape[-1], 1 / sw))
         return freq, np.fft.fftshift(np.fft.fft(fid[0])), np.fft.fftshift(np.fft.fft(out[0]))
 
@@ -580,7 +581,8 @@ class TestReplica:
     def test_the_ghost_starts_at_the_delay_with_the_fid_s_first_point(self):
         sw, n = 2000.0, 1024
         fid = self._fid(n=n, sw=sw)
-        out, _ = SpuriousEchoes(echoes=[{'delay_s': 0.1, 'amp': 0.3, 'phase_deg': 90.0,
+        out, _ = SpuriousEchoes(mode='replica',
+                                echoes=[{'delay_s': 0.1, 'amp': 0.3, 'phase_deg': 90.0,
                                          'decay_hz': 0.0}]).process_tensor(fid, sw_hz=sw)
         ghost = np.asarray(out)[0] - fid[0]
         shift = int(round(0.1 * sw))
@@ -593,7 +595,7 @@ class TestReplica:
         """The default echo (0.1 s) must be a shifted copy, not a step envelope."""
         sw = 2000.0
         fid = self._fid(n=1024, sw=sw)
-        out, _ = SpuriousEchoes().process_tensor(fid, sw_hz=sw)
+        out, _ = SpuriousEchoes(mode='replica').process_tensor(fid, sw_hz=sw)
         ghost = np.asarray(out)[0] - fid[0]
         assert np.allclose(ghost[:200], 0.0)
         assert not np.allclose(ghost[200:], 0.0)
@@ -615,13 +617,151 @@ class TestReplica:
         assert np.allclose(module._add_echoes(fid[0], 2000.0), fid[0] + ghost, atol=1e-6)
 
     def test_echo_ranges_stay_inside_their_bounds(self):
-        module = SpuriousEchoes(echoes=[{'delay_s': (0.05, 0.1), 'amp': (0.1, 0.2),
+        module = SpuriousEchoes(mode='replica',
+                                echoes=[{'delay_s': (0.05, 0.1), 'amp': (0.1, 0.2),
                                          'decay_hz': 4.0}], seed=3)
         (drawn,) = module._draw(128, 2000.0)
         assert drawn['delay_s'].min() >= 0.05 - 1e-9 and drawn['delay_s'].max() <= 0.1 + 1e-9
         assert drawn['amp'].min() >= 0.1 and drawn['amp'].max() <= 0.2
         assert np.all(drawn['decay_hz'] == 4.0)
         assert np.all(drawn['shift'] == np.round(drawn['delay_s'] * 2000.0))
+
+
+#**************************************************************************************************#
+#                                   Class TestLocalizedEcho                                        #
+#**************************************************************************************************#
+#                                                                                                  #
+# The default: SMART MRS's localized echo, drawn per sample, placed on the ppm axis.               #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestLocalizedEcho:
+    """The localized echo is the default, placed in ppm, and can hit a few transients."""
+
+    @staticmethod
+    def _run(module, plus, water=None):
+        pipe = AugmentationPipeline([module])
+        out, _ = pipe(plus, water, batch_params=pipe.sample_batch_parameters(len(plus)))[:2]
+        return _values(out)
+
+    def test_the_default_is_a_random_localized_echo(self):
+        module = SpuriousEchoes(seed=0)
+        assert module.mode == 'echo'
+        (drawn,) = module._draw(256, SW_HZ, n_points=N_PTS, sf_mhz=SF_MHZ, nucleus='1H')
+        t_acq = (N_PTS - 1) / SW_HZ
+        assert 0.1 * t_acq - 1e-9 <= drawn['t_echo'].min() <= drawn['t_echo'].max() <= 0.9 * t_acq
+        assert 0.01 <= drawn['T2'].min() <= drawn['T2'].max() <= 0.05
+        ppm = drawn['freq_hz'] / SF_MHZ + ppm_reference('1H')
+        assert 0.0 <= ppm.min() <= ppm.max() <= 8.0
+        assert 0.02 <= drawn['amp'].min() <= drawn['amp'].max() <= 0.2
+        assert np.unique(drawn['t_echo']).size == 256, "every sample draws its own echo"
+
+    def test_the_registry_name_gives_the_localized_echo(self):
+        from augmentrum import Augmentrum
+        module, fixed = Augmentrum.resolve_module('spurious_echoes')
+        assert module(**fixed).mode == 'echo'
+
+    def test_legacy_tuples_still_mean_replicas(self):
+        assert SpuriousEchoes(echoes=[(0.1, 0.2, 0.0, 5.0, 0.0)]).mode == 'replica'
+        assert SpuriousEchoes(mode='replica').echoes == [SpuriousEchoes.REPLICA_DEFAULT]
+
+    @pytest.mark.parametrize("ppm", [0.9, 1.3, 3.5, 6.0])
+    def test_an_echo_requested_in_ppm_peaks_there_on_the_fsl_axis(self, ppm):
+        plus = _batch(_lorentzian_fid(ppm=2.01), 1)
+        before = _values(plus)[0, 0, 0, 0]
+        echo = SpuriousEchoes(echoes=[{'ppm': ppm, 't_echo': 0.2, 'T2': 0.05, 'amp': 0.5}])
+        added = self._run(echo, plus)[0, 0, 0, 0] - before
+        axis, spec = _fsl_spectrum(added)
+        assert abs(axis[np.argmax(np.abs(spec))] - ppm) <= 1.5 * _fsl_bin()
+
+    def test_the_echo_is_centred_at_t_echo_and_follows_eq_1(self):
+        plus = _batch(_lorentzian_fid(), 1)
+        before = _values(plus)[0, 0, 0, 0]
+        echo = SpuriousEchoes(echoes=[{'ppm': 1.3, 't_echo': 0.25, 'T2': 0.03, 'amp': 0.1,
+                                       'phase_deg': 40.0}])
+        added = self._run(echo, plus)[0, 0, 0, 0] - before
+        t = np.arange(N_PTS) / SW_HZ
+        f = (1.3 - 4.65) * SF_MHZ
+        expected = (0.1 * np.abs(before).max() * np.exp(-np.abs(t - 0.25) / 0.03)
+                    * np.exp(1j * (2 * np.pi * f * t + np.deg2rad(40.0))))
+        assert np.allclose(added, expected, atol=1e-6 * np.abs(expected).max())
+
+    def test_the_phase_turns_the_echo_and_leaves_its_size(self):
+        """SMART MRS's code adds the phase outside the exponent, where it scales the echo."""
+        plus = _batch(_lorentzian_fid(), 1)
+        before = _values(plus)[0, 0, 0, 0]
+        added = {}
+        for phase in (0.0, 180.0):
+            echo = SpuriousEchoes(echoes=[{'ppm': 1.3, 't_echo': 0.2, 'amp': 0.1,
+                                           'phase_deg': phase}])
+            added[phase] = self._run(echo, _batch(_lorentzian_fid(), 1))[0, 0, 0, 0] - before
+        assert np.allclose(added[180.0], -added[0.0], atol=1e-6)
+
+    def test_31p_places_the_echo_from_a_zero_reference(self):
+        plus = _batch(_lorentzian_fid(ppm=0.0, nucleus='31P', sf=49.9), 1, nucleus='31P',
+                      sf=49.9)
+        before = _values(plus)[0, 0, 0, 0]
+        echo = SpuriousEchoes(echoes=[{'ppm': -10.0, 't_echo': 0.2, 'T2': 0.05, 'amp': 0.5}])
+        added = self._run(echo, plus)[0, 0, 0, 0] - before
+        axis, spec = _fsl_spectrum(added, nucleus='31P', sf=49.9)
+        assert abs(axis[np.argmax(np.abs(spec))] + 10.0) <= 1.5 * _fsl_bin(sf=49.9)
+
+    @pytest.mark.parametrize("kwargs, message", [
+        ({'echoes': [{'ppm': 1.0, 'freq_hz': 10.0}]}, "not both"),
+        ({'mode': 'replica', 'echoes': [{'ppm': 1.0}]}, "freq_hz"),
+        ({'mode': 'replica', 'echoes': [{'t_echo_frac': 0.5}]}, "replica"),
+        ({'transient_fraction': 0.0}, "transient_fraction"),
+    ])
+    def test_inconsistent_settings_are_refused(self, kwargs, message):
+        with pytest.raises(ValueError, match=message):
+            SpuriousEchoes(**kwargs)
+
+    @staticmethod
+    def _transients(n_dyn=8, n_coils=2, subjects=3, backend=Backend.NUMPY):
+        """Uncombined data with coils and transients, one object per subject."""
+        rng = np.random.default_rng(0)
+        niftis = []
+        for _ in range(subjects):
+            data = (rng.standard_normal((1, 1, 1, 256, n_coils, n_dyn))
+                    + 1j * rng.standard_normal((1, 1, 1, 256, n_coils, n_dyn)))
+            nifti = gen_nifti_mrs(data.astype(np.complex64), 1 / 2000.0, 123.26,
+                                  dim_tags=['DIM_COIL', 'DIM_DYN', None])
+            niftis.append(nifti)
+        return niftis
+
+    @pytest.mark.parametrize("backend", [Backend.NUMPY, Backend.NIFTI_LIST])
+    def test_a_fraction_of_the_transients_carries_the_echo(self, backend):
+        niftis = self._transients()
+        before = np.stack([n[:] for n in niftis])
+        plus = NIfTI_MRS_Plus([n.copy() for n in niftis], backend=backend, volatile=True)
+        module = SpuriousEchoes(transient_fraction=0.25, seed=0)
+        pipe = AugmentationPipeline([module])
+        out, _ = pipe(plus, None, batch_params=pipe.sample_batch_parameters(3))[:2]
+        after = np.stack([n[:] for n in out.list()])
+
+        changed = ~np.all(np.isclose(after, before), axis=(1, 2, 3, 4))    # (subject, coil, dyn)
+        for subject in changed:
+            hit = np.flatnonzero(subject.any(axis=0))
+            assert hit.size == 2, "a quarter of 8 transients"
+            assert np.all(subject[:, hit]), "every coil of a hit transient carries it"
+        assert not np.array_equal(changed[0], changed[1]) or not np.array_equal(changed[1],
+                                                                                changed[2])
+
+    def test_the_transient_fraction_draws_equally_on_both_engines(self):
+        niftis = self._transients()
+        results = []
+        for backend in (Backend.NUMPY, Backend.NIFTI_LIST):
+            plus = NIfTI_MRS_Plus([n.copy() for n in niftis], backend=backend, volatile=True)
+            pipe = AugmentationPipeline([SpuriousEchoes(transient_fraction=0.5, seed=7)])
+            out, _ = pipe(plus, None, batch_params=pipe.sample_batch_parameters(3))[:2]
+            results.append(np.stack([n[:] for n in out.list()]))
+        assert np.allclose(results[0], results[1], atol=1e-5)
+
+    def test_without_transients_the_fraction_warns_and_hits_everything(self):
+        plus = _batch(_lorentzian_fid(), 2)
+        before = _values(plus)
+        with pytest.warns(UserWarning, match="no transient"):
+            after = self._run(SpuriousEchoes(transient_fraction=0.5, seed=0), plus)
+        assert not np.any(np.all(np.isclose(after, before), axis=-1))
 
 
 #**************************************************************************************************#

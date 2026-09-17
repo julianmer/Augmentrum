@@ -184,6 +184,7 @@ SPECS: List[ModuleSpec] = [
     ModuleSpec("SpatialAugmentations", None, {"dim": 2, "prob": 1.0}, spatial=True,
                nifti_kwargs={"dim": 3}),
 
+    ModuleSpec("SpuriousEchoes[echo]", None, {"seed": 0}),
     ModuleSpec("SpuriousEchoes[replica]", None, {"mode": "replica"}),
     # The default echo (tau=0.1 s) falls beyond the short FIDs the sweeps use
     # and a shifted copy of nothing is exactly zero, so the sweep would skip
