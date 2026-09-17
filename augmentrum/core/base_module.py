@@ -76,6 +76,13 @@ class BaseModule(ABC):
     # it. Only modules whose processing paths handle a vector may declare this.
     PER_SAMPLE_PARAMS: Tuple[str, ...] = ()
 
+    # Parameters that count things. A range on one of these is drawn as an
+    # integer over the inclusive bounds, so "n_averages=(8, 32)" can actually
+    # give 32. The pipeline also reads an "int" annotation or default off the
+    # constructor; this is for names typed neither way, such as the samplers'
+    # counts, which default to None.
+    INTEGER_PARAMS: Tuple[str, ...] = ()
+
     def __init_subclass__(cls, **kwargs):
         """
         Wrap a subclass's "__init__" so its arguments are recorded automatically.
@@ -382,6 +389,21 @@ class BaseModule(ABC):
         if 'dim_tags' not in kwargs and data.n_subjects > 0:
             kwargs['dim_tags'] = data.dim_tags
 
+        # The water reference is a separate acquisition with its own layout: a
+        # single transient where the metabolite scan has thirty-two, say. A
+        # module handling both must not read the water's axes off the data's.
+        if 'water_dim_tags' not in kwargs and water is not None and water.n_subjects > 0:
+            kwargs['water_dim_tags'] = water.dim_tags
+
+        # The nucleus fixes the ppm reference (4.65 ppm for 1H, the FSL-MRS
+        # convention), so every module places features on the same axis.
+        if 'nucleus' not in kwargs and data.n_subjects > 0:
+            nucleus = data.nucleus
+            if isinstance(nucleus, (list, tuple)):
+                nucleus = nucleus[0] if nucleus else None
+            if nucleus is not None:
+                kwargs['nucleus'] = str(nucleus)
+
         # And where the data is, so a module can act on the domain it is in
         # rather than assume one.
         if 'state' not in kwargs:
@@ -411,7 +433,8 @@ class BaseModule(ABC):
         water_out = None
         if water is not None:
             water_out = self._wrap_processed(water, processed_water, backend,
-                                             operation_name, operation_details)
+                                             operation_name, operation_details,
+                                             dim_tags=self._output_water_dim_tags(water))
 
         return data_out, water_out
 
@@ -420,7 +443,8 @@ class BaseModule(ABC):
     #****************#
     def _wrap_processed(self, source: NIfTI_MRS_Plus, processed,
                         backend: Backend, operation_name: str,
-                        operation_details: Dict) -> NIfTI_MRS_Plus:
+                        operation_details: Dict, dim_tags: Optional[List] = None
+                        ) -> NIfTI_MRS_Plus:
         """
         Wrap a processed tensor back into a "NIfTI_MRS_Plus".
 
@@ -429,12 +453,23 @@ class BaseModule(ABC):
         A module that resized or added a dimension is no exception: fitting the
         NIfTI objects to it is deferred to materialization, which is the single
         point at which data becomes NumPy again.
+
+        Args:
+            source: The batch the tensor came from.
+            processed: The tensor to install, or None to leave the source's.
+            backend: The backend the tensor lives on.
+            operation_name: What to record in the provenance.
+            operation_details: The provenance record's details.
+            dim_tags: Higher-dimension tags of the processed tensor; the
+                source's, minus what this module collapsed, when not given.
         """
         out = NIfTI_MRS_Plus(nifti_list=source.nifti_list, backend=backend,
                              volatile=source.volatile,
                              state=self.output_state(source.state))
         if processed is not None:
-            out.set_data(processed, backend, dim_tags=self._output_dim_tags(source))
+            if dim_tags is None:
+                dim_tags = self._output_dim_tags(source)
+            out.set_data(processed, backend, dim_tags=dim_tags)
 
         if not source.volatile:
             out.update_metadata(operation_name, operation_details)
@@ -520,6 +555,17 @@ class BaseModule(ABC):
         tags += list(self.ADDS_DIM_TAGS)
         tags += [None] * (3 - len(tags))
         return tags[:3]
+
+    def _output_water_dim_tags(self, source: NIfTI_MRS_Plus) -> List:
+        """
+        Higher-dimension tags the processed water carries.
+
+        The water is a separate acquisition with its own layout, so a module
+        that collapses its dimensions on their own terms (the raw processor
+        averages the water's transients, not the data's) overrides this; by
+        default the water follows the data's rule.
+        """
+        return self._output_dim_tags(source)
 
     def _process_via_forward(self, data: NIfTI_MRS_Plus, water: Optional[NIfTI_MRS_Plus],
                             **kwargs) -> Tuple[NIfTI_MRS_Plus, Optional[NIfTI_MRS_Plus]]:

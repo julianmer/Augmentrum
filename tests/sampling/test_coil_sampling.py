@@ -380,6 +380,61 @@ def test_only_the_coil_axis_is_touched(volume):
     assert drawn.shape[-2:] == (3, 10), "the average axis must be left as it was"
 
 
+def test_drawing_keeps_the_same_coils_on_the_water(volume):
+    """
+    Both acquisitions come off one receive array, so a combination weighted
+    by the water needs the very same coils on both sides: the draw applies
+    to the water along its own coil axis - one transient, no DIM_DYN - not
+    along the data's.
+    """
+    array, _ = CoilSampler(mode='synthesize', n_coils=8, seed=0).process_tensor(volume)
+    batch = np.repeat(array[..., None], 10, axis=-1)                # (B, X, Y, Z, T, C, D)
+    water = array * 2                                               # (B, X, Y, Z, T, C)
+    keep = CoilSampler(mode='random', n_coils=3, seed=0).draw(8)
+
+    drawn, drawn_water = CoilSampler(mode='random', n_coils=3, seed=0).process_tensor(
+        batch, water, dim_tags=['DIM_COIL', 'DIM_DYN', None],
+        water_dim_tags=['DIM_COIL', None, None])
+
+    assert drawn.shape[-2:] == (3, 10)
+    assert drawn_water.shape == water.shape[:-1] + (3,)
+    assert np.array_equal(drawn, np.take(batch, keep, axis=-2))
+    assert np.array_equal(drawn_water, np.take(water, keep, axis=-1))
+
+
+def test_drawing_keeps_the_same_coils_on_the_water_nifti():
+    """The list path draws the same coils from the water too, whatever its transients."""
+    from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+
+    rng = np.random.default_rng(0)
+    met = rng.standard_normal((1, 1, 1, 64, 8, 10)) + 0j
+    wat = rng.standard_normal((1, 1, 1, 64, 8)) + 0j
+    data = gen_nifti_mrs(met, 1 / 2000, 123.0)
+    data.set_dim_tag(4, 'DIM_COIL')
+    data.set_dim_tag(5, 'DIM_DYN')
+    water = gen_nifti_mrs(wat, 1 / 2000, 123.0)
+    water.set_dim_tag(4, 'DIM_COIL')
+
+    out, wout = CoilSampler(mode='random', n_coils=3, seed=0).process_nifti_list(
+        [data], [water], indices=[0, 2, 5])
+
+    assert out[0].shape == (1, 1, 1, 64, 3, 10)
+    assert wout[0].shape == (1, 1, 1, 64, 3)
+    assert np.allclose(out[0][:], np.take(met, [0, 2, 5], axis=4))
+    assert np.allclose(wout[0][:], np.take(wat, [0, 2, 5], axis=4))
+
+
+def test_a_water_without_coils_is_left_alone(volume):
+    """An already combined water has no coil axis to draw from."""
+    array, _ = CoilSampler(mode='synthesize', n_coils=8, seed=0).process_tensor(volume)
+
+    _, drawn_water = CoilSampler(mode='random', n_coils=3, seed=0).process_tensor(
+        array, volume, dim_tags=['DIM_COIL', None, None],
+        water_dim_tags=[None, None, None])
+
+    assert drawn_water is volume
+
+
 def test_an_unknown_mode_is_refused():
     """A typo should not silently become a mode that does nothing."""
     with pytest.raises(ValueError, match="mode must be one of"):

@@ -16,6 +16,7 @@
 #*************#
 import nifti_mrs.utils as utils
 import numpy as np
+import warnings
 
 from datetime import datetime
 
@@ -324,14 +325,22 @@ def nifti_coil_combination_adaptive(data, reference=None, report=None):
     for main, idx in data.iterate_over_spatial():
         main = np.reshape(main, data.shape[3:])   # prevent loosing dim when avg is 1
 
+        # The water is its own acquisition: a single transient has no
+        # dynamic axis at all, so it is given one to average over.
+        wref = None
+        if reference is not None:
+            wref = np.reshape(reference[idx], reference.shape[3:])
+            if wref.ndim == 2:
+                wref = wref[..., None]
+
         # coil combination
-        data_metab, data_wref = coil_combination_adaptive(main, reference[idx] if reference is not None else None)
+        data_metab, data_wref = coil_combination_adaptive(main, wref)
         data_metab = np.reshape(data_metab, combined_data[idx].shape)   # adjust to lost dim when avg is 1
 
         # update data
         combined_data[idx] = data_metab
         if combined_wat is not None:
-            combined_wat[idx] = data_wref
+            combined_wat[idx] = np.reshape(data_wref, combined_wat[idx].shape)
 
     # plot
     if report is not None:
@@ -426,21 +435,193 @@ def fid_to_spec(fids):
     return np.fft.fftshift(np.fft.fft(fids, axis=-1, norm='ortho'), axes=-1)
 
 
-def ppm_shift_axis(n, sw_hz, sf_mhz, shift=4.65):
-    """The shifted ppm axis FSL-MRS builds for an n-point spectrum.
+#: fsl_mrs.utils.constants.PPM_SHIFT, copied so the axis helpers work without FSL-MRS.
+_PPM_SHIFT = {'1H': 4.65, '2H': 4.65, '13C': 0.0, '31P': 0.0}
 
-    The default *shift* is FSL-MRS's proton referencing constant
-    (PPM_SHIFT['1H']), so the tensor path assumes 1H data.
+
+def ppm_reference(nucleus='1H'):
     """
+    The ppm at which FSL-MRS / NIfTI-MRS place the carrier (0 Hz) for *nucleus*.
+
+    Protons are referenced to water at 4.65 ppm; 13C and 31P to 0 ppm. Every
+    module that places a feature at a ppm uses this, so a user's ppm values mean
+    the same thing here as on an FSL-MRS plot.
+
+    Args:
+        nucleus: NIfTI-MRS nucleus string, e.g. '1H'. None means 1H.
+
+    Returns:
+        The reference shift in ppm. An unknown nucleus gives 0.0 with a warning,
+        which is the right answer for most X-nuclei and loud for the rest.
+    """
+    if nucleus is None:
+        nucleus = '1H'
+    try:
+        from fsl_mrs.utils.constants import PPM_SHIFT
+    except ImportError:                                   # pragma: no cover
+        PPM_SHIFT = _PPM_SHIFT
+
+    key = str(nucleus).strip().upper()
+    for name, shift in PPM_SHIFT.items():
+        if name.upper() == key:
+            return float(shift)
+
+    import warnings
+    warnings.warn(f"No ppm reference known for nucleus {nucleus!r}; using 0.0 ppm.")
+    return 0.0
+
+
+def ppm_axis(n, sw_hz, sf_mhz, nucleus='1H'):
+    """
+    The FSL-MRS ppm of every bin of the spectrum "fftshift(ifft(fid))".
+
+    That is the spectrum the spectral modules work on (see "DomainTransform").
+    FSL-MRS displays "fftshift(fft(fid))" instead and labels its bins with
+    "linspace(-sw/2, sw/2, n) / sf + reference" ("MRS.getAxes"), a grid whose
+    step is sw/(n-1) rather than sw/n - up to one bin off the fftfreq grid at the
+    edges. Since "ifft" mirrors "fft", bin j here is bin (-j) mod n there, so this
+    axis is FSL's read backwards: it descends in ppm. The Nyquist bin (j = 0) is
+    given its +sw/2 alias instead of FSL's -sw/2 label, which keeps the axis
+    monotonic; every other bin carries exactly the ppm FSL-MRS would print for
+    it. A feature built at a ppm on this axis therefore lands at that ppm on an
+    FSL-MRS plot, which is what users' ppm values refer to.
+
+    Args:
+        n: Number of spectral points.
+        sw_hz: Spectral width (bandwidth) in Hz.
+        sf_mhz: Spectrometer frequency in MHz.
+        nucleus: NIfTI-MRS nucleus string; sets the reference via "ppm_reference".
+
+    Returns:
+        A "(n,)" float array, descending in ppm.
+    """
+    ref = ppm_reference(nucleus)
+    if n < 2:
+        return np.full(int(n), ref)
+    j = np.arange(n, dtype=np.float64)
+    return ref + (sw_hz / 2.0 - (j - 1.0) * sw_hz / (n - 1.0)) / float(sf_mhz)
+
+
+def ppm_shift_axis(n, sw_hz, sf_mhz, shift=None):
+    """
+    The shifted ppm axis FSL-MRS builds for an n-point "fftshift(fft(fid))" spectrum.
+
+    Identical to "MRS.getAxes()" ("linspace(-sw/2, sw/2, n) / sf + shift"), so it
+    goes with "fid_to_spec". "ppm_axis" is the same labelling for the mirrored
+    "fftshift(ifft(fid))" spectrum the modules use.
+
+    Args:
+        n: Number of spectral points.
+        sw_hz: Spectral width in Hz.
+        sf_mhz: Spectrometer frequency in MHz.
+        shift: Reference ppm; None is the proton reference (4.65 ppm).
+    """
+    if shift is None:
+        shift = ppm_reference('1H')
     return np.linspace(-sw_hz / 2, sw_hz / 2, n) / sf_mhz + shift
 
 
-def ppm_window(n, sw_hz, sf_mhz, lim, shift=4.65):
-    """First and last index of the ppm window *lim* (FSL-MRS limit_to_range)."""
+def ppm_window(n, sw_hz, sf_mhz, lim, shift=None):
+    """First and last index of the ppm window *lim* on "ppm_shift_axis" (FSL-MRS limit_to_range)."""
     axis = ppm_shift_axis(n, sw_hz, sf_mhz, shift)
     first = int(np.argmin(np.abs(axis - lim[0])))
     last = int(np.argmin(np.abs(axis - lim[1])))
     return (first, last) if first <= last else (last, first)
+
+
+#***********************#
+#   causal lineshapes   #
+#***********************#
+def causal_lineshape(ppm, center_ppm, lorentz_ppm=0.0, gauss_ppm=0.0):
+    """
+    The spectrum of a causal resonance at *center_ppm* on the axis *ppm*, unit peak real height.
+
+    A resonance is a decaying complex exponential in the FID,
+    "exp(2 pi i f t) exp(-pi lb t) exp(-(pi gb t)^2 / (4 ln 2))", whose spectrum
+    is the Lorentzian of FWHM lb, the Gaussian of FWHM gb, or their convolution,
+    a Voigt. It is built there and transformed as "DomainTransform" does
+    ("fftshift(ifft(fid))"), which is what keeps it causal: a lineshape drawn
+    directly on the axis is real, so its FID is two-sided with half of it wrapped
+    to the end of the acquisition, where it rings whenever the FID is zero-filled
+    or truncated. Everything is expressed in bins read off the axis - the
+    frequency is the one that peaks on the bin the axis labels *center_ppm*, and a
+    width is its FWHM in ppm over the axis step - so a feature lands and measures
+    exactly where its frequency-domain twin would, whichever way the axis runs.
+
+    Args:
+        ppm: The ppm of every bin of "fftshift(ifft(fid))", uniform apart from the
+            Nyquist alias "ppm_axis" puts in bin 0.
+        center_ppm: Where the peak sits.
+        lorentz_ppm: Lorentzian FWHM in ppm, 0 for none.
+        gauss_ppm: Gaussian FWHM in ppm, 0 for none. With neither width the
+            resonance does not decay and its spectrum is the Dirichlet kernel.
+
+    Returns:
+        A "(n,)" complex array whose real part peaks at 1.
+    """
+    ppm = np.asarray(ppm, dtype=np.float64)
+    n = ppm.size
+    if n < 2:
+        return np.ones(n, dtype=np.complex128)
+
+    # The median step survives the alias in bin 0; its sign carries the direction.
+    step = float(np.median(np.diff(ppm)))
+    centre_bin = n // 2 + (float(center_ppm) - ppm[n // 2]) / step
+    t = np.arange(n, dtype=np.float64)
+
+    # Bin j of fftshift(ifft(fid)) holds (n//2 - j)/n cycles per sample, and a width
+    # of w bins is exp(-pi w t / n) per sample for a Lorentzian.
+    fid = np.exp(2j * np.pi * (n // 2 - centre_bin) / n * t)
+    if lorentz_ppm > 0:
+        fid = fid * np.exp(-np.pi * (lorentz_ppm / abs(step)) * t / n)
+    if gauss_ppm > 0:
+        fid = fid * np.exp(-(np.pi * (gauss_ppm / abs(step)) * t / n) ** 2 / (4.0 * np.log(2.0)))
+
+    spectrum = np.fft.fftshift(np.fft.ifft(fid))
+    return spectrum / np.max(np.real(spectrum))
+
+
+#***********************#
+#   per-sample values   #
+#***********************#
+def batch_profile(profile, ndim):
+    """
+    A "(batch, N)" profile shaped to broadcast over a rank-*ndim* "(batch, ..., N)" array.
+
+    Profiles are built one per sample and must reach every coil and transient
+    of that sample alike, so the sample axis stays in front and everything in
+    between is a singleton.
+
+    Args:
+        profile: "(batch, N)" array.
+        ndim: Rank of the array it will be added to or multiplied with.
+
+    Returns:
+        The profile reshaped to "(batch, 1, ..., 1, N)"; for a 1-D target, its
+        single row.
+    """
+    profile = np.asarray(profile)
+    if ndim <= 1:
+        return profile[0]
+    return profile.reshape((profile.shape[0],) + (1,) * (ndim - 2) + (profile.shape[-1],))
+
+
+def per_sample_factor(value, ndim, like):
+    """
+    A scalar as a float, or a per-sample vector as "(batch, 1, ..., 1)" on *like*'s backend.
+
+    The pipeline hands a module either one value for the batch or one per
+    sample; this makes the two cases one multiply at the call site.
+
+    Args:
+        value: Scalar, or a "(batch,)" vector of per-sample values.
+        ndim: Rank of the tensor the factor multiplies.
+        like: Tensor whose backend and dtype the vector adopts.
+    """
+    arr = np.asarray(value, dtype=np.float64)
+    if arr.ndim == 0:
+        return float(arr)
+    return ops.match_backend(arr.reshape((-1,) + (1,) * (ndim - 1)), like)
 
 
 #********************#

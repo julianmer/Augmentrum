@@ -108,6 +108,52 @@ def test_data_without_averages_is_left_alone(batch):
     assert np.array_equal(untagged, batch)
 
 
+def test_the_water_is_left_alone(batch):
+    """
+    The water has its own one or two transients, none of them the data's to
+    draw from: a draw of four out of ten must not touch a water with one.
+    """
+    water = batch[..., 0]                                            # (B, X, Y, Z, T, C)
+
+    drawn, drawn_water = AverageSampler(n_averages=4, seed=0).process_tensor(
+        batch, water, dim_tags=TAGS, water_dim_tags=['DIM_COIL', None, None])
+
+    assert drawn.shape[-1] == 4
+    assert drawn_water is water
+
+
+def test_the_water_keeps_its_own_transients(batch):
+    """Even a water that carries DIM_DYN keeps all of its (fewer) transients."""
+    water = batch[..., :2]
+
+    _, drawn_water = AverageSampler(n_averages=4, seed=0).process_tensor(
+        batch, water, dim_tags=TAGS, water_dim_tags=TAGS)
+
+    assert drawn_water is water
+
+
+def test_the_water_is_left_alone_on_the_list_path():
+    """
+    On NIfTI objects too: indices drawn for ten transients would run past a
+    water with two, and used to be applied to it whenever it had the tag.
+    """
+    from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+
+    rng = np.random.default_rng(0)
+    data = gen_nifti_mrs(rng.standard_normal((1, 1, 1, 64, 4, 10)) + 0j, 1 / 2000, 123.0)
+    data.set_dim_tag(4, 'DIM_COIL')
+    data.set_dim_tag(5, 'DIM_DYN')
+    water = gen_nifti_mrs(rng.standard_normal((1, 1, 1, 64, 4, 2)) + 0j, 1 / 2000, 123.0)
+    water.set_dim_tag(4, 'DIM_COIL')
+    water.set_dim_tag(5, 'DIM_DYN')
+
+    out, wout = AverageSampler(n_averages=4, seed=0).process_nifti_list(
+        [data], [water], indices=[3, 5, 7, 9])
+
+    assert out[0].shape[-1] == 4
+    assert wout[0] is water
+
+
 def test_an_unknown_mode_is_refused():
     """A typo should not silently become a mode that does nothing."""
     with pytest.raises(ValueError, match="mode must be"):

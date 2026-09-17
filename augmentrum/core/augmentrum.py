@@ -15,12 +15,15 @@
 #*************#
 #   imports   #
 #*************#
+import os
 import warnings
 from typing import List, Optional, Sequence, Tuple, Union, Dict, Any
+import numpy as np
 from augmentrum import __version__
 from augmentrum.core import NIfTI_MRS_Plus, Backend
-from augmentrum.core.base_module import Tap
-from augmentrum.core.pipeline import AugmentationPipeline
+from augmentrum.core.base_module import BaseModule, Tap
+from augmentrum.core.pipeline import (AugmentationPipeline, child_seed, constructor_params,
+                                      is_range, suggest_names)
 
 # Import helper functions from dataset_utils
 from augmentrum.core.dataset_utils import (
@@ -73,10 +76,11 @@ class Augmentrum:
 
     Provides easy-to-use interface for:
     - Loading NIFTI_MRS data (metabolite + water)
-    - Optional train/val/test splitting
-    - Flexible augmentation pipelines (different per split)
+    - Optional train/val/test splitting, subject-wise when group ids are known
+    - Flexible augmentation pipelines (different per split), configurable per step
     - On-the-fly (random) or fixed (exact) augmentation parameters
     - Multi-backend support (PyTorch, NumPy, TensorFlow, JAX)
+    - One seed for the whole run: split, subject draws, ranges and modules
 
     Example 1: On-the-fly augmentation with RANGE sampling::
 
@@ -85,12 +89,11 @@ class Augmentrum:
             water=water_list,
             pipeline=['coil_sampling', 'processing', 'noise', 'line_broadening'],
             mode='on-the-fly',
-            n_coils=(1, 8),         # Random 1-8 coils
-            n_averages=(4, 16),     # Random 4-16 averages
-            sigma_frac=(0.01, 0.05),  # Random noise 1-5%
-            lb_hz=(0, 10),          # Random broadening 0-10 Hz
-            phase0_deg=(-180, 180), # Random phase -180 to 180°
-            param_distribution='uniform',  # How to sample from ranges (default)
+            n_coils=(1, 8),               # Random 1-8 coils (inclusive)
+            n_averages=(4, 16),           # Random 4-16 averages (inclusive)
+            sigma_frac=(0.01, 0.05),      # Random noise 1-5%
+            lb_hz=(0, 10),                # Random broadening 0-10 Hz
+            param_distribution='uniform', # How to sample from ranges (default)
             batch_size=32,
             backend='numpy'
         )
@@ -113,11 +116,31 @@ class Augmentrum:
             backend='pytorch'
         )
 
-        # Each batch will have IDENTICAL augmentations
+        # Each batch will have IDENTICAL augmentations, and so will every
+        # dataloader() call: a ranged parameter in 'fixed' mode is drawn once
+        # per split and reused until reseed().
         for batch_data, batch_water in augmenter.dataloader():
             validate_model(batch_data)
 
-    Example 3: Gaussian distribution sampling::
+    Example 3: Per-step parameters::
+
+        # A global kwarg reaches every step whose constructor names it, so
+        # lb_hz would move LineBroadening AND Apodization. A step's own
+        # kwargs reach that step alone and override the globals there.
+        augmenter = Augmentrum(
+            data=nifti_list,
+            pipeline=[
+                'coil_sampling',
+                {'noise': {'sigma_frac': (0.0, 0.02)}},
+                {'line_broadening': {'lb_hz': (0.0, 5.0)}},
+                ('apodization', {'mode': 'exponential', 'lb_hz': 2.0}),
+                'baseline_bspline',            # alias fixing mode='bspline'
+            ],
+            n_coils=(1, 8),
+            backend='pytorch'
+        )
+
+    Example 4: Gaussian distribution sampling::
 
         augmenter = Augmentrum(
             data=nifti_list,
@@ -130,12 +153,13 @@ class Augmentrum:
         # Samples will be more concentrated around 0.03 (midpoint) for sigma_frac
         # and around 5.0 (midpoint) for lb_hz, with tails at the extremes
 
-    Example 3: With train/val/test splitting::
+    Example 5: With train/val/test splitting::
 
         augmenter = Augmentrum(
             data=nifti_list,
             water=water_list,
             split_fractions={'val': 0.1, 'test': 0.1},
+            groups=subject_ids,          # one id per item; a subject never straddles splits
             pipelines={
                 'train': ['processing', 'noise', 'line_broadening', 'baseline'],
                 'val': ['processing'],
@@ -146,19 +170,21 @@ class Augmentrum:
                 'val': 'fixed',         # Fixed params for validation
                 'test': 'fixed'         # Fixed params for testing
             },
-            # Training uses ranges
             n_coils=(1, 8),
             sigma_frac=(0.01, 0.05),
-            # But validation/test use fixed values (extracted from ranges)
             batch_size=32,
-            backend='pytorch'
+            backend='pytorch',
+            seed=1,                      # the whole run replays from this
         )
 
         train_dl = augmenter.train_dataloader()
         val_dl = augmenter.val_dataloader()
+        augmenter.split_groups['val']    # -> the subject ids held out for validation
     """
 
-    # Available augmentation modules
+    # Available augmentation modules. A value is a class, or a "(class,
+    # fixed_kwargs)" pair for a name that means one configuration of a class;
+    # see "resolve_module".
     AVAILABLE_MODULES = {
         # Processing
         'coil_sampling': CoilSampler,
@@ -180,9 +206,9 @@ class Augmentrum:
 
         # Baseline
         'baseline': BaselineAugmentation,
-        'baseline_random_walk': BaselineAugmentation,
-        'baseline_bspline': BaselineAugmentation,
-        'baseline_polynomial': BaselineAugmentation,
+        'baseline_random_walk': (BaselineAugmentation, {'mode': 'random_walk'}),
+        'baseline_bspline': (BaselineAugmentation, {'mode': 'bspline'}),
+        'baseline_polynomial': (BaselineAugmentation, {'mode': 'polynomial'}),
 
         # Phase & Frequency
         'phase': PhaseShift,
@@ -226,7 +252,8 @@ class Augmentrum:
         # Splitting
         split_fractions: Optional[Dict[str, float]] = None,  # e.g., {'val': 0.1, 'test': 0.1}
         split_indices: Optional[Dict[str, Sequence[int]]] = None,  # explicit, overrides fractions
-        seed: int = 42,
+        groups: Optional[Sequence] = None,  # one hashable id per item, e.g. the subject
+        seed: Optional[int] = 42,
 
         # Pre-processing (applied once and cached)
         pre_pipeline: Optional[Union[List, AugmentationPipeline, Dict[str, Union[List, AugmentationPipeline]]]] = None,  # Fixed preprocessing
@@ -258,7 +285,20 @@ class Augmentrum:
             data: List of NIFTI_MRS objects or NIfTI_MRS_Plus
             water: Optional water references
             split_fractions: Dict like {'val': 0.1, 'test': 0.1}, train gets rest
-            seed: Random seed for splitting
+            split_indices: Explicit item indices per split; overrides the fractions.
+            groups: One hashable id per item (a subject id, say). Items of one
+                    group always land in the same split, and the fractions are
+                    met in number of items as closely as the group sizes allow.
+                    None reads a user-defined "SubjectID" field from every
+                    NIfTI header extension when all items carry one, and
+                    otherwise splits item-wise. "split_groups" reports the
+                    assignment.
+            seed: Root seed for the whole run: the split, which subjects each
+                  batch draws, every ranged parameter and every module's own
+                  perturbations derive from it, so two instances built alike
+                  with the same seed yield the same batches. None draws a root
+                  from OS entropy; the value drawn is kept in ".seed" so the
+                  run can still be repeated.
             pre_pipeline: Fixed preprocessing applied ONCE and cached. Can be:
                          - List of module names: ['coil_sampling', 'processing'] (same for all splits)
                          - AugmentationPipeline object (same for all splits)
@@ -266,37 +306,70 @@ class Augmentrum:
                            {'train': ['coil_sampling', 'processing'], 'val': ['processing'], 'test': None}
                          These steps run before the main pipeline and results are stored.
                          Useful for expensive operations that don't need randomization.
-            pipeline: Single pipeline for all splits (list of module names or AugmentationPipeline)
+            pipeline: Single pipeline for all splits: an AugmentationPipeline, or a
+                      list whose entries are each a registry name ('noise'), a module
+                      instance (Noise(sigma=0.1)), a one-key dict with that step's own
+                      kwargs ({'noise': {'sigma_frac': (0.0, 0.02)}}) or a
+                      (name, kwargs) tuple. Step kwargs reach that step only and
+                      override the global **kwargs there.
             pipelines: Dict mapping split names to pipelines (overrides 'pipeline')
             mode: Single mode for all splits:
                   'on-the-fly' = Random sampling from ranges (e.g., n_coils=(1,8) picks randomly)
-                  'fixed' = Use exact values provided (e.g., n_coils=4 always uses 4 coils)
+                  'fixed' = Use exact values provided (e.g., n_coils=4 always uses 4 coils);
+                            a range is drawn once per split and then kept.
             modes: Dict mapping split names to modes (overrides 'mode')
             batch_size: Batch size
             backend: 'pytorch', 'numpy', 'tensorflow', 'keras', 'jax', or Backend enum
             device: Device for PyTorch backend ('cuda', 'cpu', etc.). Note: Use .to() method
                     on batches for GPU support instead of this parameter.
             volatile: Skip metadata updates for speed
-            **kwargs: Module-specific parameters, including:
+            **kwargs: Module parameters, routed by name to every module in the
+                pipelines whose constructor accepts them. A key no module accepts
+                raises ValueError - a typo must not turn a step into a no-op.
+
                 ALL PARAMETERS support both tuple ranges and exact values:
-                  - Tuple (min, max) = randomly sample from range
-                  - Scalar (float/int) = use exact value
+                  - Tuple (min, max) = randomly sample from range, once per batch
+                    (per sample for parameters a module lists in PER_SAMPLE_PARAMS).
+                    Integer-typed parameters draw integers over the inclusive
+                    range; a None bound ("(1, None)") is passed to the module.
+                  - Scalar (float/int/str/bool) = use exact value
 
-                SAMPLING PARAMETERS:
-                  - n_coils: (1, 8) or 4
-                  - n_averages: (4, 16) or 8
+                SAMPLING (coil_sampling / average_sampling / transient_synthesis):
+                  - n_coils: (1, 8) or 4          - n_averages: (4, 16) or 8
+                  - n_transients: 32, tr_s, drift_hz_per_min, ...
 
-                AUGMENTATION PARAMETERS
-                  - sigma_frac: (0.01, 0.05) or 0.03
-                  - lb_hz: (0, 10) or 5.0
-                  - gb_hz: (0, 5) or 2.0
-                  - phase0_deg: (-180, 180) or 0.0
-                  - phase1_deg: (-90, 90) or 0.0
-                  - shift_hz: (-5, 5) or 0.0
-                  - baseline_frac: (0.01, 0.1) or 0.05
-                  - water_amp: (0.05, 0.2) or 0.1
-                  - eddy_std: (0.3, 1.0) or 0.6
-                  - ... etc.
+                PROCESSING ('processing' = RawProcessor):
+                  - conj, coil, align, remove_outliers, average, ecc, truncate,
+                    remove_water, shift_ref, phase_correct (bools)
+                  - coil_method: 'fsl-mrs', 'adaptive'
+                  - registration_method: 'fsl-mrs', 'pattern'
+                  - ecc_method, remove_method, average_method, water_removal_method,
+                    shift_ref_method, phase_correct_method
+
+                AUGMENTATION:
+                  - noise: exactly one of sigma_frac (0.01, 0.05), snr, snr_db, sigma;
+                    global_scale
+                  - amplitude: scale_factor (0.7, 1.3)
+                  - line_broadening: lb_hz (0, 10), gb_hz (0, 5)
+                  - phase: zero_order_deg (-180, 180), first_order_deg (-90, 90)
+                  - frequency_shift: shift_hz (-5, 5)
+                  - baseline: baseline_frac (0.01, 0.1), step_sd, bounds_amp, smooth_pts,
+                    knots_per_ppm, ed_per_ppm, phase_deg, order, ppm_windows
+                  - residual_water: center_ppm, amplitude_scale (0.05, 0.2), phase_deg,
+                    peaks, model
+                  - macromolecules: mm_source, mm_scale (0.1, 0.2), source_params
+                  - eddy_current: std_rad (0.3, 1.0), lp_cut_hz, strength (0.5, 1.5),
+                    remove_linear
+                  - spurious_echoes: echoes, global_phase_deg, alpha_reference
+                  - artificial_peaks: peaks, ref_ppm, amp_mode
+                  - apodization: lb_hz, gb_hz, n_pts, frac_pts, auto_lb, target_damp,
+                    target_pts
+                  - zero_fill: target_pts
+                  - undersampling: ksp_mode, acceleration_factor, us_seed, ...
+
+                Names shared by several modules (lb_hz, gb_hz, phase_deg, peaks,
+                target_pts) reach all of them when given globally, with a warning;
+                give them per step to target one (see "pipeline").
 
                 DISTRIBUTION (for sampling from ranges):
                   - param_distribution: 'uniform' (default), 'gaussian', 'exponential', 'beta'
@@ -306,17 +379,12 @@ class Augmentrum:
                       Per-parameter control (overrides param_distribution)
                       Examples:
                         param_distributions={
-                            'sigma_frac': 'gaussian',  # Gaussian for noise
-                            'lb_hz': 'exponential',    # Exponential for broadening
-                            'phase0_deg': 'uniform'    # Uniform for phase
+                            'sigma_frac': 'gaussian',      # Gaussian for noise
+                            'lb_hz': 'exponential',        # Exponential for broadening
+                            'zero_order_deg': 'uniform'    # Uniform for phase
                         }
 
                   Note: If neither specified, default is 'uniform'
-
-                PROCESSING OPTIONS:
-                  - coil_method: 'fsl-mrs', 'adaptive'
-                  - baseline_mode: 'random_walk', 'bspline', 'polynomial'
-                  - ...
         """
         # Convert backend
         if isinstance(backend, str):
@@ -329,6 +397,10 @@ class Augmentrum:
         self.volatile = volatile
         self.domain_planning = domain_planning
         self.kwargs = kwargs
+
+        # One root seed fixes the whole run. An unseeded run draws its root
+        # from OS entropy and keeps it, so it can still be repeated afterwards.
+        self.seed = int(seed) if seed is not None else int.from_bytes(os.urandom(8), 'little')
 
         # Convert data to NIfTI_MRS_Plus
         if not isinstance(data, NIfTI_MRS_Plus):
@@ -343,11 +415,14 @@ class Augmentrum:
         else:
             self.water_all = None
 
+        # Group ids keep a subject's scans together across splits
+        self.groups = self._resolve_groups(groups)
+
         # Handle splitting
         if split_indices is not None:
             self._create_splits_from_indices(split_indices)
         elif split_fractions is not None:
-            self._create_splits(split_fractions, seed)
+            self._create_splits(split_fractions, self.seed)
         else:
             # No splitting - all data goes to train, but create empty val/test
             empty_data = NIfTI_MRS_Plus(nifti_list=[], backend=self.backend, volatile=self.volatile)
@@ -356,18 +431,21 @@ class Augmentrum:
                 'val': (empty_data, None),
                 'test': (empty_data, None)
             }
+            self.split_groups = self._groups_of({'train': list(range(len(self.data_all))),
+                                                 'val': [], 'test': []})
 
-        # Handle pre-pipeline (applied once and cached)
+        # Build every pipeline first and validate the kwargs against all of
+        # them, so a typo is caught before any preprocessing has been paid for.
         self._create_pre_pipeline(pre_pipeline)
-
-        # Handle pipelines
         self._create_pipelines(pipeline, pipelines)
-
-        # Handle modes
         self._create_modes(mode, modes)
-
-        # Handle outputs specs (what the dataloaders yield)
         self._create_outputs(outputs)
+        self._validate_kwargs()
+
+        # Derive every random stream from the root seed, then run the cached
+        # preprocessing on seeded pipelines.
+        self._seed_streams()
+        self._apply_pre_pipelines()
 
         # Additional features for flexibility
         self.callbacks = []  # Custom augmentation callbacks
@@ -377,6 +455,69 @@ class Augmentrum:
             'split_stats': {split: {'batches': 0, 'samples': 0} for split in self.splits.keys()}
         }
 
+    #**************#
+    #   grouping   #
+    #**************#
+    #: Header extension field a loader may set to name the subject of a scan.
+    GROUP_FIELD = 'SubjectID'
+
+    def _resolve_groups(self, groups) -> Optional[list]:
+        """
+        The group id of every item, from the argument or the NIfTI headers.
+
+        A loader that knows which subject a scan belongs to writes it as a
+        user-defined "SubjectID" header field (nifti_mrs wraps those as
+        "{'Value': ..., 'Description': ...}"). When every item carries one,
+        that is the grouping; a partial set is ignored rather than mixed with
+        made-up ids, because a half-grouped split is not a subject-wise split.
+
+        Args:
+            groups: The caller's ids, or None to look in the headers.
+
+        Returns:
+            One id per item, or None to split item-wise.
+        """
+        n_total = len(self.data_all)
+        if groups is not None:
+            groups = list(groups)
+            if len(groups) != n_total:
+                raise ValueError(
+                    f"groups has {len(groups)} entries for {n_total} items; "
+                    f"give one group id per item."
+                )
+            return groups
+
+        ids = [self._header_group(nifti) for nifti in self.data_all.list()]
+        if ids and all(value is not None for value in ids):
+            return ids
+        return None
+
+    @classmethod
+    def _header_group(cls, nifti):
+        """The item's "SubjectID" header value, or None when it has none."""
+        try:
+            value = nifti.hdr_ext[cls.GROUP_FIELD]
+        except (KeyError, TypeError, AttributeError):
+            return None
+        if isinstance(value, dict):
+            value = value.get('Value')
+        return value
+
+    def _groups_of(self, split_indices: Dict[str, Sequence[int]]) -> Optional[Dict[str, list]]:
+        """
+        Sorted group ids per split, or None when the items are ungrouped.
+
+        Args:
+            split_indices: Item indices per split.
+        """
+        if self.groups is None:
+            return None
+        return {name: SubjectSplitter._sorted_ids({self.groups[i] for i in idx})
+                for name, idx in split_indices.items()}
+
+    #***********#
+    #   splits  #
+    #***********#
     def _create_splits(self, split_fractions: Dict[str, float], seed: int):
         """Create train/val/test splits."""
         val_frac = split_fractions.get('val', 0.0)
@@ -387,10 +528,12 @@ class Augmentrum:
             self.water_all.list() if self.water_all is not None else None,
             seed=seed,
             val_frac=val_frac,
-            test_frac=test_frac
+            test_frac=test_frac,
+            groups=self.groups,
         )
 
         splits_raw = splitter.split()
+        self.split_groups = splitter.split_groups
 
         # Convert back to NIfTI_MRS_Plus
         self.splits = {}
@@ -422,6 +565,7 @@ class Augmentrum:
 
         seen: Dict[int, str] = {}
         self.splits = {}
+        chosen: Dict[str, List[int]] = {}
         for split_name, indices in split_indices.items():
             idx = [int(i) for i in indices]
 
@@ -437,6 +581,7 @@ class Augmentrum:
                         "Overlapping splits would leak data between them."
                     )
                 seen[i] = split_name
+            chosen[split_name] = idx
 
             data_plus = NIfTI_MRS_Plus(
                 nifti_list=[data_list[i] for i in idx],
@@ -458,6 +603,22 @@ class Augmentrum:
                 RuntimeWarning, stacklevel=3,
             )
 
+        # Explicit indices are the caller's call, but a subject straddling two
+        # of them is almost never what was meant, so say so.
+        self.split_groups = self._groups_of(chosen)
+        if self.split_groups is not None:
+            straddling = {}
+            for name, ids in self.split_groups.items():
+                for group in ids:
+                    straddling.setdefault(group, []).append(name)
+            leaked = {g: names for g, names in straddling.items() if len(names) > 1}
+            if leaked:
+                warnings.warn(
+                    f"split_indices place items of one group in several splits: "
+                    f"{leaked}. Scans of one subject in both train and val leak.",
+                    RuntimeWarning, stacklevel=3,
+                )
+
     def _create_pre_pipeline(self, pre_pipeline):
         """
         Create and apply pre-pipeline (fixed preprocessing that runs once and is cached).
@@ -475,10 +636,10 @@ class Augmentrum:
                          - AugmentationPipeline object: same for all splits
                          - Dict mapping split names to pipelines: different per split
         """
+        self.pre_pipeline = None
+        self.pre_pipelines = None
+        self.preprocessed_splits = None
         if pre_pipeline is None:
-            self.pre_pipeline = None
-            self.pre_pipelines = None
-            self.preprocessed_splits = None
             return
 
         # Check if it's a dict (per-split pre-pipelines)
@@ -508,6 +669,17 @@ class Augmentrum:
 
             # Create dict for all splits
             self.pre_pipelines = {split_name: self.pre_pipeline for split_name in self.splits.keys()}
+
+    def _apply_pre_pipelines(self):
+        """
+        Run the pre-pipelines over every split and cache the results.
+
+        Separate from building them so that the kwargs can be validated and
+        the seeds derived first: a typo should surface before minutes of coil
+        combination, and a stochastic preprocessing step should replay.
+        """
+        if self.pre_pipelines is None:
+            return
 
         print(f"Applying pre-pipeline to all data (this happens ONCE)...")
 
@@ -595,18 +767,190 @@ class Augmentrum:
                 self.pipelines[split_name] = built_pipeline
 
         else:
-            # Default: processing for all splits
-            default_pipeline = AugmentationPipeline([
-                RawProcessor(**self.kwargs)
-            ])
+            # Default: processing for all splits, built like any named step so
+            # that only the kwargs RawProcessor accepts reach it.
+            default_pipeline = self._build_pipeline_from_list(['processing'])
             for split_name in self.splits.keys():
                 self.pipelines[split_name] = default_pipeline
 
-    def _build_pipeline_from_list(self, module_names: List[str]) -> AugmentationPipeline:
-        """Build pipeline from list of module name strings."""
-        import inspect
+    #*******************#
+    #   the registry    #
+    #*******************#
+    @classmethod
+    def resolve_module(cls, name: str):
+        """
+        The class behind a registry name, and the arguments the name fixes.
 
-        modules = []
+        A registry value is a class, or a "(class, fixed_kwargs)" pair for a
+        name that means one configuration of a class: 'baseline_bspline' is
+        BaselineAugmentation with mode='bspline', and used to run the random
+        walk because the alias set nothing.
+
+        Args:
+            name: A key of "AVAILABLE_MODULES".
+
+        Returns:
+            "(module_class, fixed_kwargs)", the kwargs a fresh dict.
+
+        Raises:
+            ValueError: For a name not in the registry, with close matches.
+        """
+        if name not in cls.AVAILABLE_MODULES:
+            raise ValueError(
+                f"Unknown module '{name}'. Available: {list(cls.AVAILABLE_MODULES.keys())}."
+                f"{suggest_names(name, cls.AVAILABLE_MODULES)}"
+            )
+        entry = cls.AVAILABLE_MODULES[name]
+        if isinstance(entry, tuple):
+            module_class, fixed_kwargs = entry
+            return module_class, dict(fixed_kwargs)
+        return entry, {}
+
+    @classmethod
+    def accepted_parameters(cls, pipelines) -> set:
+        """
+        The kwargs the modules of a pipeline spec accept, before it is built.
+
+        A dataset factory carries defaults that only mean something with a
+        certain module present - a voxel size for the spatial augmentation,
+        an absolute sigma for the noise - and a user who hands the factory an
+        empty or different pipeline must not be refused for defaults they
+        never asked for. This answers "would this kwarg reach anything" from
+        the spec alone, so a factory can drop the defaults that would not.
+
+        Args:
+            pipelines: A pipeline spec as "Augmentrum" takes it: None, a list
+                of entries, an "AugmentationPipeline", or a dict of those per
+                split.
+
+        Returns:
+            The union of the constructor parameter names of every module named
+            or instantiated in the spec, plus the sampling controls.
+        """
+        accepted = set(AugmentationPipeline.GLOBAL_KEYS)
+        specs = list(pipelines.values()) if isinstance(pipelines, dict) else [pipelines]
+        for spec in specs:
+            if spec is None:
+                accepted.update(constructor_params(RawProcessor))
+            elif isinstance(spec, AugmentationPipeline):
+                for step in spec.steps:
+                    accepted.update(constructor_params(step))
+            else:
+                for entry in spec:
+                    name, module, _ = cls._parse_pipeline_entry(entry)
+                    if name == 'tap' or (name and name.startswith('tap:')):
+                        continue
+                    if module is None:
+                        module, _ = cls.resolve_module(name)
+                    accepted.update(constructor_params(module))
+        return accepted
+
+    @staticmethod
+    def _parse_pipeline_entry(entry):
+        """
+        One pipeline entry as "(name, module, step_kwargs)".
+
+        Accepted forms: a registry name, a module instance, a one-key dict
+        "{name_or_module: {kwargs}}" and a "(name_or_module, {kwargs})" pair.
+        Exactly one of *name* and *module* is set.
+
+        Args:
+            entry: The entry as the user wrote it.
+
+        Returns:
+            "(name, module, step_kwargs)".
+        """
+        step_kwargs = {}
+        if isinstance(entry, dict):
+            if len(entry) != 1:
+                raise ValueError(
+                    f"A pipeline dict entry names one module, e.g. {{'noise': {{...}}}}; "
+                    f"got {len(entry)} keys {list(entry)}."
+                )
+            (entry, step_kwargs), = entry.items()
+        elif isinstance(entry, tuple):
+            if len(entry) != 2 or not isinstance(entry[1], (dict, type(None))):
+                raise ValueError(
+                    f"A pipeline tuple entry is (name, {{kwargs}}), got {entry!r}."
+                )
+            entry, step_kwargs = entry
+
+        step_kwargs = dict(step_kwargs or {})
+        if isinstance(entry, str):
+            return entry, None, step_kwargs
+        if isinstance(entry, BaseModule):
+            return None, entry, step_kwargs
+        raise ValueError(
+            f"Pipeline entries are module names, module instances, {{name: kwargs}} "
+            f"dicts or (name, kwargs) tuples; got {entry!r}."
+        )
+
+    @staticmethod
+    def _is_constructor_value(value) -> bool:
+        """
+        Whether a per-step value is handed to the constructor as given.
+
+        A range is sampled per batch instead, and a list or tuple may carry
+        nested ranges - echoes, peaks - that are injected per batch as well.
+        Everything else, objects included, is what the constructor wants.
+        """
+        return not is_range(value) and not isinstance(value, (list, tuple))
+
+    @staticmethod
+    def _placeholder(value):
+        """A representative constructor value for a range: its lower bound."""
+        if is_range(value):
+            low, high = value
+            return low if low is not None else high
+        return value
+
+    def _check_required(self, name: str, module, provided) -> None:
+        """
+        Raise if a step is missing a parameter its configuration cannot do without.
+
+        A module that declares "required_parameters()" names what its mode
+        needs; a value counts as present when it is set on the instance or
+        will arrive per batch from a range.
+
+        Args:
+            name: The registry name, for the message.
+            module: The constructed step.
+            provided: Names a global or per-step kwarg will inject.
+        """
+        required = getattr(module, 'required_parameters', None)
+        if not callable(required):
+            return
+        names = tuple(required())
+        if not names:
+            return
+        if any(getattr(module, n, None) is not None or n in provided for n in names):
+            return
+        options = ' or '.join(repr(n) for n in names)
+        raise ValueError(
+            f"'{name}' ({module.__class__.__name__}, mode={getattr(module, 'mode', None)!r}) "
+            f"needs {options}. Pass a value or a range, e.g. "
+            f"pipeline=[{{'{name}': {{'{names[0]}': ...}}}}] or {names[0]}=... globally."
+        )
+
+    def _build_pipeline_from_list(self, entries, seed=None) -> AugmentationPipeline:
+        """
+        Build a pipeline from a list of entries.
+
+        Each entry is a registry name, a module instance, a one-key dict
+        "{name: {kwargs}}" or a "(name, {kwargs})" pair. A named module is
+        constructed from, in rising precedence, the builder's defaults, the
+        global kwargs it accepts (scalars only - ranges are sampled per
+        batch), the kwargs its registry alias fixes, and its own step kwargs.
+
+        Args:
+            entries: The pipeline as the user wrote it.
+            seed: Optional seed for the pipeline; "_seed_streams" sets one later
+                either way.
+
+        Returns:
+            The pipeline, carrying the per-step kwargs for batch sampling.
+        """
+        modules, names, step_kwargs = [], [], []
 
         # Default parameters for modules that require them at init
         # TODO: Maybe solve at module level instead
@@ -617,54 +961,85 @@ class Augmentrum:
         # Parameters that are alternative ways to say the same thing. A module
         # given two members of a group cannot tell which the caller meant and
         # rightly refuses, so a user-supplied member must suppress the default
-        # for every other member rather than arriving alongside it.
+        # for every other member rather than arriving alongside it. A ranged
+        # member is constructed at its lower bound: the module resolves the
+        # members in a fixed order at run time, so a default left in place would
+        # win over the range injected per batch.
         EXCLUSIVE_GROUPS = [
             {'snr', 'snr_db', 'sigma', 'sigma_frac'},   # Noise
         ]
 
-        for name in module_names:
+        for entry in entries:
+            name, module, kwargs = self._parse_pipeline_entry(entry)
+
+            if module is not None:
+                # A ready instance; only its step kwargs can still be checked.
+                accepted = constructor_params(module)
+                unknown = [k for k in kwargs if k not in accepted]
+                if unknown:
+                    raise ValueError(
+                        f"{module.__class__.__name__} does not accept {unknown}; it accepts "
+                        f"{accepted}.{suggest_names(unknown[0], accepted)}"
+                    )
+                modules.append(module)
+                names.append(module.__class__.__name__)
+                step_kwargs.append(kwargs)
+                continue
+
             # 'tap:<name>' names the tap; a bare 'tap' keeps the default name.
             if name == 'tap' or name.startswith('tap:'):
                 modules.append(Tap(name=name.partition(':')[2] or 'tap'))
+                names.append(name)
+                step_kwargs.append({})
                 continue
 
-            if name not in self.AVAILABLE_MODULES:
-                raise ValueError(f"Unknown module '{name}'. Available: {list(self.AVAILABLE_MODULES.keys())}")
+            module_class, fixed_kwargs = self.resolve_module(name)
+            init_param_names = constructor_params(module_class)
 
-            module_class = self.AVAILABLE_MODULES[name]
+            unknown = [k for k in kwargs if k not in init_param_names]
+            if unknown:
+                raise ValueError(
+                    f"'{name}' ({module_class.__name__}) does not accept {unknown}; it "
+                    f"accepts {init_param_names}.{suggest_names(unknown[0], init_param_names)}"
+                )
 
-            # --- Introspect constructor to find which user kwargs apply ---
-            try:
-                sig = inspect.signature(module_class.__init__)
-                init_param_names = [
-                    p.name for p in sig.parameters.values()
-                    if p.name not in ('self', 'args', 'kwargs')
-                ]
-            except Exception:
-                init_param_names = []
-
-            # Only inject scalar values (bool, int, float, str) from user_kwargs.
+            # Only inject scalar values (bool, int, float, str) from the global kwargs.
             # Range tuples (e.g. lb_hz=(0, 10)) are meant for runtime sampling only.
-            scalar_kwargs = {
-                k: v for k, v in self.kwargs.items()
-                if k in init_param_names and isinstance(v, (bool, int, float, str))
-            }
+            global_kwargs = {k: v for k, v in self.kwargs.items() if k in init_param_names}
+            scalar_kwargs = {k: v for k, v in global_kwargs.items()
+                             if isinstance(v, (bool, int, float, str))}
+            step_values = {k: v for k, v in kwargs.items() if self._is_constructor_value(v)}
 
             defaults = dict(DEFAULT_PARAMS.get(name, {}))
+            given = {**global_kwargs, **kwargs}
             for group in EXCLUSIVE_GROUPS:
-                if group & set(scalar_kwargs):
-                    for key in group:
-                        defaults.pop(key, None)
+                members = group & set(given)
+                if not members:
+                    continue
+                for key in group:
+                    defaults.pop(key, None)
+                for key in members:
+                    if key not in scalar_kwargs and key not in step_values:
+                        defaults[key] = self._placeholder(given[key])
 
-            construct_params = {**defaults, **scalar_kwargs}
-            modules.append(module_class(**construct_params))
+            # Specific beats general: a step's own value over the alias's
+            # fixed configuration, and that over a global scalar.
+            construct_params = {**defaults, **scalar_kwargs, **fixed_kwargs, **step_values}
+            module = module_class(**construct_params)
+            self._check_required(name, module, set(given))
+
+            modules.append(module)
+            names.append(name)
+            step_kwargs.append(kwargs)
 
         # Pass ALL user kwargs to Pipeline — it handles parameter extraction/sampling
         return AugmentationPipeline(
             modules,
-            module_names=module_names,
+            module_names=names,
             user_kwargs=self.kwargs,
+            step_kwargs=step_kwargs,
             domain_planning=self.domain_planning,
+            seed=seed,
         )
 
     def _create_modes(self, mode, modes):
@@ -710,6 +1085,105 @@ class Augmentrum:
                     )
             self.outputs[split_name] = spec
 
+    #****************#
+    #   validation   #
+    #****************#
+    def _validate_kwargs(self) -> None:
+        """
+        Reject any kwarg that no module in any pipeline accepts.
+
+        Every unknown key used to be swallowed, so "sigma_frc=0.05" silently
+        left the noise at its default and an arm of an ablation ran without
+        the augmentation it was named after. The valid names are the union of
+        the constructor parameters of every step in every pipeline and
+        pre-pipeline, plus the sampling controls. RawProcessor's "**kwargs" is
+        not a source of names: its constructor swallows them unread.
+        """
+        accepted = set(AugmentationPipeline.GLOBAL_KEYS)
+        pipelines = list(self.pipelines.values())
+        if self.pre_pipelines is not None:
+            pipelines += [p for p in self.pre_pipelines.values() if p is not None]
+        for pipe in pipelines:
+            for step in pipe.steps:
+                accepted.update(constructor_params(step))
+
+        unknown = [key for key in self.kwargs if key not in accepted]
+        if not unknown:
+            return
+
+        hints = []
+        for key in unknown:
+            hints.append(f"{key!r}{suggest_names(key, accepted)}")
+        steps = sorted({step.__class__.__name__ for pipe in pipelines for step in pipe.steps})
+        raise ValueError(
+            f"No module in the pipelines accepts: {'; '.join(hints)}. "
+            f"Pipelines contain {steps}, which together accept {sorted(accepted)}."
+        )
+
+    #*************#
+    #   seeding   #
+    #*************#
+    def _seed_streams(self) -> None:
+        """
+        Derive every random stream from the root seed.
+
+        Per split, by position: a generator for the subject draws (and the
+        fixed-mode shuffle), one for the fixed-mode parameter draw, and a seed
+        for the split's pipeline. A pipeline shared by several splits is seeded
+        once, by the first split that holds it; a stochastic module keeps an
+        explicit seed of its own (see "AugmentationPipeline.reseed").
+        """
+        self._rngs: Dict[str, np.random.Generator] = {}
+        self._fixed_rngs: Dict[str, np.random.Generator] = {}
+        self._fixed_params: Dict[str, dict] = {}
+
+        seeded = set()
+        for index, split in enumerate(self.splits):
+            self._rngs[split] = np.random.default_rng(child_seed(self.seed, (index, 1)))
+            self._fixed_rngs[split] = np.random.default_rng(child_seed(self.seed, (index, 2)))
+
+            for role, table in ((0, self.pipelines), (3, self.pre_pipelines)):
+                pipe = (table or {}).get(split)
+                if pipe is None or id(pipe) in seeded:
+                    continue
+                seeded.add(id(pipe))
+                pipe.reseed(child_seed(self.seed, (index, role)))
+
+    def reseed(self, seed: int) -> 'Augmentrum':
+        """
+        Restart every random stream from a new root seed.
+
+        Subject draws, ranged parameters, fixed-mode values and the modules'
+        own perturbations all re-derive; the split itself stays, since
+        membership is data, not a draw. This is also what each DataLoader
+        worker calls on its copy, so workers stop producing the same batches.
+
+        Args:
+            seed: The new root seed.
+
+        Returns:
+            "self", so calls can be chained.
+        """
+        self.seed = int(seed)
+        self._seed_streams()
+        return self
+
+    def _fixed_batch_params(self, split: str) -> dict:
+        """
+        The parameters a 'fixed' split uses, drawn once and kept.
+
+        Drawn from the split's own generator rather than the pipeline's, so
+        the value does not depend on which loaders were created before, and
+        cached so every "dataloader()" call replays it. "reseed" clears it.
+
+        Args:
+            split: The split name.
+        """
+        if split not in self._fixed_params:
+            self._fixed_params[split] = self.pipelines[split].sample_batch_parameters(
+                self.batch_size, rng=self._fixed_rngs[split])
+        return self._fixed_params[split]
+
     def _get_dataloader(self, split: str = 'train', framework: str = None, shuffle: bool = None):
         """
         Get dataloader for a specific split.
@@ -739,7 +1213,8 @@ class Augmentrum:
                 water=water,
                 pipeline=pipeline,
                 batch_size=self.batch_size,
-                outputs=outputs
+                outputs=outputs,
+                rng=self._rngs[split],
             )
         elif mode == 'fixed' or mode == 'deterministic':  # Support legacy 'deterministic'
             # Fixed: use exact values (modules will use fixed params)
@@ -752,7 +1227,9 @@ class Augmentrum:
                 pipeline=pipeline,
                 batch_size=self.batch_size,
                 shuffle=shuffle_val,
-                outputs=outputs
+                outputs=outputs,
+                rng=self._rngs[split],
+                fixed_params=self._fixed_batch_params(split),
             )
         else:
             raise ValueError(f"Unknown mode: {mode}. Use 'on-the-fly' or 'fixed'")
@@ -797,6 +1274,13 @@ class Augmentrum:
         consumable by FrameworkNN.  Batch size is controlled by the
         Augmentrum batch_size parameter set at construction.
 
+        With "num_workers > 0" every worker receives a copy of this object and,
+        left alone, would replay the same seeded streams - two workers, two
+        identical batches at a time. A worker_init_fn therefore reseeds each
+        copy from the root seed, the worker id and torch's per-epoch base seed
+        (so that epochs differ too, and replay when torch is seeded). A
+        worker_init_fn of your own is called after it.
+
         Args:
             split: 'train', 'val', or 'test'
             **dataloader_kwargs: Extra args forwarded to DataLoader
@@ -806,10 +1290,7 @@ class Augmentrum:
             torch.utils.data.DataLoader
         """
         import torch
-        from torch.utils.data import DataLoader, IterableDataset
-
-        _aug   = self
-        _split = split
+        from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
         def _to_cfloat(tensor):
             if tensor is None:
@@ -819,9 +1300,14 @@ class Augmentrum:
             return tensor
 
         class _AugIterableDataset(IterableDataset):
+            def __init__(self_inner, aug, split_name):
+                self_inner.aug = aug
+                self_inner.split = split_name
+
             def __iter__(self_inner):
-                gen = _aug._get_dataloader(_split, framework='pytorch')
-                if _aug.outputs[_split] is not None:
+                aug, split_name = self_inner.aug, self_inner.split
+                gen = aug._get_dataloader(split_name, framework='pytorch')
+                if aug.outputs[split_name] is not None:
                     # Custom outputs: yield the spec's structure with complex
                     # tensors at the leaves.
                     for batch in gen:
@@ -832,7 +1318,20 @@ class Augmentrum:
                         continue
                     yield _to_cfloat(batch_data)
 
-        return DataLoader(_AugIterableDataset(), batch_size=None, **dataloader_kwargs)
+        user_init = dataloader_kwargs.pop('worker_init_fn', None)
+
+        def _worker_init(worker_id):
+            info = get_worker_info()
+            aug = info.dataset.aug
+            # info.seed is torch's base_seed + worker_id, and base_seed is
+            # drawn afresh from torch's generator every epoch: mixing it in
+            # keeps epochs distinct without a persistent worker.
+            aug.reseed(child_seed(aug.seed, (1 + worker_id, int(info.seed) & 0xFFFFFFFF)))
+            if user_init is not None:
+                user_init(worker_id)
+
+        return DataLoader(_AugIterableDataset(self, split), batch_size=None,
+                          worker_init_fn=_worker_init, **dataloader_kwargs)
 
     def visualize_pipeline(self, split: str = 'train', detailed: bool = True) -> str:
         """

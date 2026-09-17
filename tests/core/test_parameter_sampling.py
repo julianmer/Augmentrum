@@ -108,9 +108,9 @@ class TestParameterRangeSupport:
         augmenter = Augmentrum(
             data=dummy_nifti_list,
             pipeline=['water'],
-            water_ppm=(4.65, 4.75),
-            water_phase=(-45, 45),
-            water_amp=(0.05, 0.2),
+            center_ppm=(4.65, 4.75),
+            phase_deg=(-45, 45),
+            amplitude_scale=(0.05, 0.2),
             batch_size=1
         )
 
@@ -121,8 +121,8 @@ class TestParameterRangeSupport:
         augmenter = Augmentrum(
             data=dummy_nifti_list,
             pipeline=['eddy'],
-            eddy_std=(0.3, 1.0),
-            eddy_strength=(0.5, 1.5),
+            std_rad=(0.3, 1.0),
+            strength=(0.5, 1.5),
             batch_size=1
         )
 
@@ -133,7 +133,7 @@ class TestParameterRangeSupport:
         augmenter = Augmentrum(
             data=dummy_nifti_list,
             pipeline=['apod'],
-            apod_lb=(0, 10),
+            lb_hz=(0, 10),
             batch_size=1
         )
 
@@ -262,12 +262,12 @@ class TestPerParameterDistributions:
             pipeline=['noise', 'line_broadening', 'phase', 'baseline'],
             sigma_frac=(0.01, 0.05),
             lb_hz=(0, 10),
-            phase0_deg=(-180, 180),
+            zero_order_deg=(-180, 180),
             baseline_frac=(0.01, 0.1),
             param_distributions={
                 'sigma_frac': 'exponential',
                 'lb_hz': 'gaussian',
-                'phase0_deg': 'uniform',
+                'zero_order_deg': 'uniform',
                 'baseline_frac': 'beta',
             },
             batch_size=1
@@ -384,8 +384,8 @@ class TestParameterSamplingIntegration:
             sigma_frac=(0.01, 0.05),
             lb_hz=(0, 10),
             gb_hz=(0, 5),
-            phase0_deg=(-180, 180),
-            phase1_deg=(-90, 90),
+            zero_order_deg=(-180, 180),
+            first_order_deg=(-90, 90),
             baseline_frac=(0.01, 0.1),
             echoes=[
                 ((0.1, 0.3), (0.2, 0.5), 0.0, (4.0, 6.0), 0.0),
@@ -394,7 +394,7 @@ class TestParameterSamplingIntegration:
             param_distributions={
                 'sigma_frac': 'exponential',
                 'lb_hz': 'gaussian',
-                'phase0_deg': 'uniform',
+                'zero_order_deg': 'uniform',
                 'baseline_frac': 'exponential',
                 'echo_amp_0': 'uniform',
             },
@@ -413,7 +413,7 @@ class TestParameterSamplingIntegration:
             pipeline=['noise', 'line_broadening', 'phase'],
             sigma_frac=0.03,        # Scalar (old style)
             lb_hz=5.0,              # Scalar (old style)
-            phase0_deg=0.0,         # Scalar (old style)
+            zero_order_deg=0.0,     # Scalar (old style)
             batch_size=1,
             backend='numpy'
         )
@@ -427,7 +427,7 @@ class TestParameterSamplingIntegration:
             pipeline=['noise', 'line_broadening', 'phase'],
             sigma_frac=(0.01, 0.05),  # New style (range)
             lb_hz=5.0,                # Old style (scalar)
-            phase0_deg=(-180, 180),   # New style (range)
+            zero_order_deg=(-180, 180),   # New style (range)
             batch_size=1,
             backend='numpy'
         )
@@ -539,3 +539,112 @@ class TestPerSampleSampling:
 
         assert trimmed[0]['shift_hz'].shape == (3,)
         assert trimmed[0]['first_order_deg'] == 3.0
+
+
+#**************************************************************************************************#
+#                                      Class TestRangeSampling                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# What _sample_from_range does with the shapes a range can take.                                   #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestRangeSampling:
+    """
+    Four things used to go wrong here: a None bound became "(min, 2*min)", so
+    "n_coils=(1, None)" always gave one coil; "(8, 32)" was drawn as a float
+    the module cast down, so 32 never came; draws came from the global
+    np.random; and any 2-tuple was a range, so ResidualWater's tuple of peak
+    tuples raised.
+    """
+
+    @staticmethod
+    def _pipeline(**kwargs):
+        return AugmentationPipeline([], seed=kwargs.pop('seed', 0), **kwargs)
+
+    def test_none_bound_is_passed_through_for_the_module(self):
+        pipeline = self._pipeline()
+        assert pipeline._sample_from_range((1, None)) == (1, None)
+        assert pipeline._sample_from_range((None, 8)) == (None, 8)
+        assert pipeline._sample_from_range((None, None)) == (None, None)
+
+    def test_integer_range_is_inclusive_when_the_parameter_counts(self):
+        pipeline = self._pipeline()
+        draws = {pipeline._sample_from_range((8, 32), integral=True) for _ in range(2000)}
+
+        assert draws == set(range(8, 33)), sorted(draws)
+        assert all(isinstance(d, int) for d in draws)
+
+    def test_integer_literals_on_a_continuous_parameter_stay_continuous(self):
+        """lb_hz=(0, 10) means any width, not one of eleven."""
+        pipeline = self._pipeline()
+        draws = [pipeline._sample_from_range((0, 10)) for _ in range(50)]
+
+        assert all(isinstance(d, float) for d in draws)
+        assert any(d != int(d) for d in draws)
+
+    def test_sampler_counts_are_drawn_as_integers_end_to_end(self):
+        from augmentrum.sampling.dimension_sampling import AverageSampler
+
+        pipeline = AugmentationPipeline([AverageSampler()], user_kwargs={'n_averages': (8, 32)},
+                                        seed=0)
+        draws = {pipeline.sample_batch_parameters(1)[0]['n_averages'] for _ in range(2000)}
+
+        assert 32 in draws and 8 in draws
+        assert all(isinstance(d, int) for d in draws)
+
+    def test_int_typed_constructor_parameters_draw_integers(self):
+        from augmentrum.augmentation import Apodization, BaselineAugmentation
+        from augmentrum.core.pipeline import integer_params
+
+        assert 'n_pts' in integer_params(Apodization)          # Optional[int] annotation
+        assert 'order' in integer_params(BaselineAugmentation)  # int default
+        assert 'lb_hz' not in integer_params(Apodization)
+
+    def test_shaped_distributions_on_counts_stay_on_the_grid(self):
+        pipeline = self._pipeline()
+        for distribution in ('gaussian', 'exponential', 'beta'):
+            draws = [pipeline._sample_from_range((8, 32), distribution, integral=True)
+                     for _ in range(200)]
+            assert all(isinstance(d, int) and 8 <= d <= 32 for d in draws), distribution
+        vector = pipeline._sample_from_range((8, 32), 'gaussian', size=6, integral=True)
+        assert vector.shape == (6,) and vector.dtype.kind == 'i'
+
+    def test_structural_tuples_are_not_ranges(self):
+        pipeline = self._pipeline()
+        peaks = ((0.0, 0.2, 1.0), (0.12, 0.18, 0.4))
+
+        assert pipeline._sample_from_range(peaks) == peaks
+        assert pipeline._sample_from_range(('a', 'b')) == ('a', 'b')
+        assert pipeline._sample_from_range([0.0, 1.0]) == [0.0, 1.0]
+
+    def test_residual_water_peaks_range_end_to_end(self, dummy_nifti_single_coil):
+        """A 2-tuple of peak tuples used to raise inside the sampler."""
+        from augmentrum.core import NIfTI_MRS_Plus, Backend
+
+        peaks = ((0.0, 0.2, 1.0), (0.12, 0.18, 0.4))
+        aug = Augmentrum(data=[dummy_nifti_single_coil], pipeline=['residual_water'],
+                         peaks=peaks, backend='numpy', batch_size=1, seed=0)
+        batch, _ = next(aug.dataloader(framework='numpy'))
+
+        assert batch.shape[0] == 1
+        assert aug.pipelines['train'].sample_batch_parameters(1)[0]['peaks'] == peaks
+
+    def test_scalars_and_bools_pass_through_untouched(self):
+        pipeline = self._pipeline()
+        four = pipeline._sample_from_range(4)
+        assert four == 4 and isinstance(four, int)
+        assert pipeline._sample_from_range(0.5) == 0.5
+        assert pipeline._sample_from_range(True) is True
+        assert pipeline._sample_from_range(None) is None
+        assert pipeline._sample_from_range('lorentzian') == 'lorentzian'
+
+    def test_draws_come_from_the_given_generator(self):
+        pipeline = self._pipeline()
+        one = pipeline._sample_from_range((0.0, 1.0), rng=np.random.default_rng(7))
+        two = pipeline._sample_from_range((0.0, 1.0), rng=np.random.default_rng(7))
+
+        assert one == two
+        np.random.seed(0)
+        first = pipeline._sample_from_range((0.0, 1.0))
+        np.random.seed(0)
+        assert pipeline._sample_from_range((0.0, 1.0)) != first, "the global state steered the draw"

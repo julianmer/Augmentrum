@@ -380,6 +380,93 @@ class TestSubjectSplitterBackends:
 
 
 #**************************************************************************************************#
+#                                  Class TestSubjectSplitterGroups                                 #
+#**************************************************************************************************#
+#                                                                                                  #
+# Items of one group always land in the same split.                                                #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestSubjectSplitterGroups:
+    """
+    split_fractions permuted items, so the scans of one subject leaked across
+    train and val. With groups, whole groups move, and the fractions are met
+    in items as closely as the group sizes allow.
+    """
+
+    IDS = ['a', 'a', 'a', 'b', 'b', 'b', 'c', 'c', 'c']
+
+    @staticmethod
+    def _nine(dummy_nifti_list):
+        return (dummy_nifti_list * 2)[:9]
+
+    def test_groups_never_straddle_splits(self, dummy_nifti_list):
+        splitter = SubjectSplitter(data=self._nine(dummy_nifti_list), val_frac=0.2,
+                                   test_frac=0.2, seed=0, groups=self.IDS)
+        splitter.split()
+
+        for name, idx in splitter.split_indices.items():
+            assert len({self.IDS[i] for i in idx}) <= 1, f"{name} mixes groups: {idx}"
+        assert sorted(sum(splitter.split_indices.values(), [])) == list(range(9))
+
+    def test_fractions_that_cannot_be_met_are_met_as_closely_as_possible(self, dummy_nifti_list):
+        """A target of 1.8 items is nearer to one whole group of 3 than to none."""
+        splitter = SubjectSplitter(data=self._nine(dummy_nifti_list), val_frac=0.2,
+                                   test_frac=0.2, seed=0, groups=self.IDS)
+        splits = splitter.split()
+
+        assert {name: len(split[0]) for name, split in splits.items()} == \
+            {'train': 3, 'val': 3, 'test': 3}
+        assert sorted(sum(splitter.split_groups.values(), [])) == ['a', 'b', 'c']
+        assert all(len(ids) == 1 for ids in splitter.split_groups.values())
+
+    def test_small_targets_take_nothing(self, dummy_nifti_list):
+        """A target of 0.9 items is nearer to none than to a group of 3."""
+        splitter = SubjectSplitter(data=self._nine(dummy_nifti_list), val_frac=0.1,
+                                   test_frac=0.0, seed=0, groups=self.IDS)
+        splits = splitter.split()
+
+        assert len(splits['train'][0]) == 9
+        assert splitter.split_groups == {'train': ['a', 'b', 'c'], 'val': [], 'test': []}
+
+    def test_group_split_is_seeded(self, dummy_nifti_list):
+        items = self._nine(dummy_nifti_list)
+
+        def held_out(seed):
+            splitter = SubjectSplitter(data=items, val_frac=0.2, test_frac=0.2, seed=seed,
+                                       groups=self.IDS)
+            splitter.split()
+            return tuple(splitter.split_groups['val'])
+
+        assert held_out(3) == held_out(3)
+        assert len({held_out(k) for k in range(20)}) > 1, "twenty seeds held out the same group"
+
+    def test_unequal_groups_stay_whole(self, dummy_nifti_list):
+        """Sizes 5, 3, 1 over 9 items: test wants 2.7, val 1.8; groups still move whole."""
+        groups = ['x'] * 5 + ['y'] * 3 + ['z']
+        splitter = SubjectSplitter(data=self._nine(dummy_nifti_list), val_frac=0.2,
+                                   test_frac=0.3, seed=1, groups=groups)
+        splits = splitter.split()
+
+        assert sum(len(split[0]) for split in splits.values()) == 9
+        for name, idx in splitter.split_indices.items():
+            for g in {groups[i] for i in idx}:
+                assert sum(groups[i] == g for i in idx) == groups.count(g), \
+                    f"group {g} is split across {name} and another split"
+
+    def test_group_length_mismatch_raises(self, dummy_nifti_list):
+        splitter = SubjectSplitter(data=dummy_nifti_list, groups=['a', 'b'])
+        with pytest.raises(ValueError, match="one group id per item"):
+            splitter.split()
+
+    def test_item_split_records_indices_without_groups(self, dummy_nifti_list):
+        splitter = SubjectSplitter(data=dummy_nifti_list, val_frac=0.2, test_frac=0.2, seed=0)
+        splitter.split()
+
+        assert splitter.split_groups is None
+        assert sorted(sum(splitter.split_indices.values(), [])) == list(range(5))
+
+
+#**************************************************************************************************#
 #                               Class TestCoilSamplerCreation                                      #
 #**************************************************************************************************#
 #                                                                                                  #

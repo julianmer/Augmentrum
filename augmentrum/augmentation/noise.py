@@ -14,6 +14,7 @@
 #*************#
 #   imports   #
 #*************#
+import warnings
 import numpy as np
 from typing import Optional, List
 
@@ -338,58 +339,101 @@ class FromNoiseScan(NoiseProfile):
 #**************************************************************************************************#
 class Noise(BaseModule):
     """
-    Add uncorrelated complex Gaussian noise (AWGN) to MRS data.
+    Add complex Gaussian acquisition noise (AWGN) to MRS data.
 
-    **Backend-agnostic** (zea pattern): "process_tensor" works transparently
-    with NumPy, PyTorch, JAX, or TensorFlow tensors.
+    Thermal noise enters at the receiver: white, complex Gaussian, in the time
+    domain. This module can be dropped anywhere in a pipeline - time or
+    frequency domain, image space or k-space, on raw coils or on combined data,
+    SVS or MRSI - and adds that same noise wherever it finds the data, so a
+    level means one thing regardless of placement.
 
-    Parameters
-    ----------
-    snr: float, optional
-        Signal-to-noise ratio (unitless, signal_power / noise_power)
-    snr_db : float, optional
-        Signal-to-noise ratio in dB (signal_power / noise_power)
-    sigma : float, optional
-        Standard deviation per dimension (real and imaginary)
-    sigma_frac : float, optional
-        Sigma as fraction of max|FID| (alternative to sigma).
-        Note that "sigma" and "sigma_frac" are referenced to the data as it
-        reaches this module: the spectral transform is non-unitary, so the
-        same value means a different absolute noise level in time and
-        frequency domain.
-    seed : int, optional
-        Random seed for reproducibility
-    global_scale : bool, default False
-        Controls how the reference statistic for "snr" / "snr_db" /
-        "sigma_frac" is reduced.  "False" (default) measures it **per FID
-        trace**, which is the right thing for SVS.  "True" measures a single
-        statistic **per batch element**, reduced over every other axis.
+    **The level is defined in MRS terms and is domain-invariant.** "The
+    spectrum" is the unitary DFT of the FID, "fftshift(fft(fid, norm='ortho'))"
+    - the normalisation FSL-MRS reports SNR in and
+    :func:"augmentrum.processing.utils.fid_to_spec" uses, less that function's
+    half-first-point baseline correction, which shifts the peak by well under a
+    percent. Under it, white time-domain noise of per-channel SD sigma has
+    per-channel SD sigma in the spectrum as well. So:
 
-        Use "global_scale=True" for MRSI.  A per-trace statistic on a
-        "(B, X, Y, Z, T)" volume gives every voxel its own sigma, so
-        background voxels (whose signal power is ~0) receive almost no noise
-        while brain voxels receive plenty.  The resulting noise field traces the
-        anatomy and hands a network a free brain mask.  "sigma" is an absolute
-        scale and is unaffected by this flag.
+    - "sigma" is the SD of the added noise per point and per channel (real and
+      imaginary each) in the time-domain FID, which equals its SD in the
+      unitary spectrum;
+    - "snr" is the peak SNR the added noise alone gives the trace,
+      "max|spectrum| / sigma" - peak height over the SD of the real-part
+      noise, the way MRS SNR is reported;
+    - "snr_db" is the same in decibels, "20 log10(snr)": the amplitude
+      convention, because a peak height over a noise SD is a ratio of
+      amplitudes rather than of powers;
+    - "sigma_frac" is the noise SD as a fraction of the spectrum peak,
+      "sigma / max|spectrum|", which is "1 / snr".
 
-    Notes
-    -----
-    Provide EITHER snr_db, sigma, OR sigma_frac (not multiple).
-    If snr_db is used, sigma is computed from mean(|fid|^2).
+    The reference peak is measured on the data as it reaches the module, and
+    the noise already in the data is not subtracted: the parameter describes
+    the noise *added*. A spectrum with peak SNR 120 that receives "snr=20"
+    ends up near "1 / sqrt(1/120**2 + 1/20**2) = 19.7".
 
-    Examples
-    --------
-    >>> noise = Noise(snr=20.0)
-    >>> noise = Noise(snr_db=10.0)
-    >>> noise = Noise(sigma=0.01)
-    >>> noise = Noise(sigma_frac=0.02)
-    >>> noise = Noise(sigma_frac=0.02, global_scale=True)  # MRSI volumes
+    Placement decides what a level means physically, and that is intended.
+    Noise added per coil and per transient, before combination and averaging,
+    gives each raw trace the requested SNR; the combined spectrum then gains
+    roughly "sqrt(N_averages)" from averaging and the array's combination gain
+    on top, exactly as it does at the scanner. The module does not compensate
+    for that.
+
+    **Domain awareness.** In the time domain the reference peak comes from one
+    batched FFT of the data. In the frequency domain, which a pipeline reaches
+    through :class:"DomainTransform"'s "fftshift(ifft(fid))" (a "1/N"
+    normalisation), the peak is read off the data and "sigma" is scaled by
+    "1/sqrt(N)", so the same noise sits on the FID after the transform back.
+    In k-space the reference comes from the image the data transforms to: the
+    spatial transform is orthonormal and preserves the noise level but not the
+    peak. Undersampled data is taken to k-space, where receiver noise is white,
+    noised there and returned. Real (magnitude) data receives Rician noise.
+
+    **Backend-agnostic**: "process_tensor" works on NumPy, PyTorch, JAX and
+    TensorFlow tensors, with the noise drawn on the data's own device.
+
+    Args:
+        covariance: How the channels of a receive array share their noise;
+            :class:"Independent" by default.
+        profile: How loud the noise is from place to place across a volume;
+            :class:"Flat" by default. An image-domain description, so it is
+            applied in image space only.
+        snr: Peak SNR of the added noise, "max|spectrum| / sigma".
+        snr_db: The same in dB, "20 log10(snr)".
+        sigma: SD of the added noise per point and per channel, time domain.
+        sigma_frac: Noise SD as a fraction of the spectrum peak, "1 / snr".
+        seed: Random seed for reproducibility.
+        global_scale: How the reference peak for "snr" / "snr_db" /
+            "sigma_frac" is reduced. "False" measures it per trace; "True"
+            once per batch element, over every voxel, coil and transient it
+            holds. "None" (default) picks "True" whenever a batch element holds
+            more than one trace, "False" otherwise.
+
+            One reference per batch element is the physical choice for coil
+            arrays and MRSI. The noise level is a property of the receiver,
+            not of what each channel or voxel happens to see, so a per-trace
+            reference would give a far coil - or a background voxel - almost
+            no noise, and hand a network a free sensitivity map or brain mask.
+            "sigma" is absolute and unaffected by this flag.
+
+    Notes:
+        Provide exactly one of "snr", "snr_db", "sigma" or "sigma_frac".
+
+    Examples:
+        >>> noise = Noise(snr=20.0)                     # added noise alone: peak SNR 20
+        >>> noise = Noise(snr_db=26.0)                  # the same, in dB
+        >>> noise = Noise(sigma=0.01)                   # absolute time-domain SD
+        >>> noise = Noise(sigma_frac=0.05)              # noise SD 5 % of the peak
+        >>> noise = Noise(snr=5.0, global_scale=False)  # per trace, regardless
     """
 
     SUPPORTED_BACKENDS = tuple(Backend)
 
     # The level broadcasts, so a batch can carry one SNR / sigma per sample.
     PER_SAMPLE_PARAMS = ('snr', 'snr_db', 'sigma', 'sigma_frac')
+
+    #: The spatial axes of a batched array, for the k-space paths.
+    SPATIAL_AXES = (1, 2, 3)
 
     def __init__(self,
                  covariance: Optional['NoiseCovariance'] = None,
@@ -399,7 +443,7 @@ class Noise(BaseModule):
                  sigma: Optional[float] = None,
                  sigma_frac: Optional[float] = None,
                  seed: Optional[int] = None,
-                 global_scale: bool = False):
+                 global_scale: Optional[bool] = None):
         super().__init__()
 
         self.covariance = covariance or Independent()
@@ -420,126 +464,216 @@ class Noise(BaseModule):
             raise ValueError("Provide only ONE of: snr, snr_db, sigma, or sigma_frac")
 
     def process_nifti_list(self, data_list: List, water_list: Optional[List] = None, **kwargs):
-        """Add Gaussian noise to list of NIFTI_MRS objects."""
+        """
+        Add noise to a list of NIFTI_MRS objects.
+
+        One object is one batch element, so it goes through the same steps as
+        the tensor path with a batch axis in front - the level means the same
+        on either engine. A per-sample vector is read at this subject's index.
+        """
+        state = kwargs.get('state')
         processed_data = []
         for i, nifti in enumerate(data_list):
-            fid = nifti[:]
-            fid_noisy = self._add_noise_numpy(fid, index=i)
-            nifti[:] = fid_noisy
+            batch = np.asarray(nifti[:])[None]
+            sigma, snr = self._requested(index=i)
+            scale = self._shaped(self._scale(batch, sigma, snr, state), batch.shape, state)
+            nifti[:] = self._add(batch, scale, nifti.dim_tags)[0]
             processed_data.append(nifti)
         return processed_data, water_list
 
     def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
         """
-        Add Gaussian noise to tensor/array data (**any backend, natively**).
+        Add noise to tensor/array data (**any backend, natively**).
 
-        Both the scale statistics and the noise itself are computed on the
+        Both the reference statistic and the noise itself are computed on the
         tensor's own backend, so the data is never converted and the noise is
         created directly on its device. Randomness comes from
-        "nifti_mrs_plus.ops.SeedGenerator": a seeded run is reproducible while
-        still drawing fresh noise for every batch.
+        "nifti_mrs_plus.random.SeedGenerator": a seeded run is reproducible on
+        a given backend while still drawing fresh noise for every batch.
 
         Args:
-            data_array: Input tensor of shape "(batch, ..., n_points)"
-            water_array: Optional water reference tensor (unchanged)
-            backend: Backend enum (unused — ops dispatch on the tensor)
+            data_array: Input tensor in the NIfTI layout "(batch, X, Y, Z, T, ...)".
+            water_array: Optional water reference tensor (unchanged).
+            backend: Backend enum (unused - ops dispatch on the tensor).
+            **kwargs: What BaseModule injects; "state" says which domain the
+                data is in and "dim_tags" where its coil axis sits.
 
         Returns:
-            Tuple of (noisy_data, water_array)
+            Tuple of (noisy_data, water_array).
         """
         state = kwargs.get('state')
+        dim_tags = kwargs.get('dim_tags')
+        sigma, snr = self._requested()
+
         if (state is not None and state.spatial == 'image'
                 and state.sampling == 'undersampled'):
-            return self._via_kspace(data_array, water_array, **kwargs)
+            return self._via_kspace(data_array, sigma, snr, state, dim_tags), water_array
 
-        original_shape = tuple(data_array.shape)
-        ndim = len(original_shape)
+        scale = self._shaped(self._scale(data_array, sigma, snr, state),
+                             ops.shape(data_array), state)
+        return self._add(data_array, scale, dim_tags), water_array
 
-        # ── Step 1: noise scale, on the data's own backend ────────────────────
-        # `keepdims=True` throughout, so scale always broadcasts against
-        # original_shape without any further reshaping.  Reducing to a flat
-        # (n_batch, 1) and reshaping only broadcasts correctly when every axis
-        # between the batch and the points axis is singleton — true for SVS
-        # (B, 1, 1, 1, N), false for MRSI (B, X, Y, Z, T).
-        magnitude = ops.abs(data_array)
+    #**************#
+    #   how loud   #
+    #**************#
+    def _requested(self, index=None):
+        """
+        The level as "(sigma, snr)", exactly one of them set.
 
+        Four ways of stating a level reduce to two: an absolute SD, or a peak
+        SNR that needs a reference. "snr_db" and "sigma_frac" are conversions
+        of "snr". A per-sample vector is kept whole for the tensor path and
+        read at one subject's *index* for the list path.
+
+        Args:
+            index: Which subject's value to pick out of a per-sample vector,
+                or None to keep the vector.
+
+        Returns:
+            "(sigma, None)" or "(None, snr)", as float64 arrays.
+        """
+        pick = (lambda v: v) if index is None else (lambda v: self.sample_of(v, index))
         if self.sigma is not None:
-            # Fixed sigma — no data stats needed, but still built on this
-            # backend so the multiply below never crosses frameworks.
-            scale = ops.cast_like(
-                magnitude * 0.0 + self._level(self.sigma, magnitude, ndim), magnitude)
+            return np.asarray(pick(self.sigma), dtype=np.float64), None
+        if self.snr is not None:
+            return None, np.asarray(pick(self.snr), dtype=np.float64)
+        if self.snr_db is not None:
+            return None, 10.0 ** (np.asarray(pick(self.snr_db), dtype=np.float64) / 20.0)
+        return None, 1.0 / np.asarray(pick(self.sigma_frac), dtype=np.float64)
+
+    def _scale(self, data_array, sigma, snr, state, force_global: bool = False):
+        """
+        The per-channel SD of the noise to add, in the data's own domain.
+
+        Every domain the data can be in is handled here, so that the same
+        request adds the same noise wherever the module sits. A "sigma" is a
+        time-domain quantity: in the frequency domain it is divided by
+        "sqrt(N)", because the "1/N" transform the pipeline uses shrinks white
+        noise by exactly that. An SNR needs no such correction, since the peak
+        it is relative to is measured in the same domain as the noise is added.
+
+        Args:
+            data_array: The data, NIfTI layout.
+            sigma: Absolute level, or None.
+            snr: Peak SNR, or None.
+            state: Where the data is; None means the canonical time domain.
+            force_global: Reduce the reference per batch element regardless of
+                "global_scale" - for noise added in k-space, which is one level
+                per batch element by definition.
+
+        Returns:
+            The SD, shaped to broadcast against the data.
+        """
+        shape = ops.shape(data_array)
+        ndim = len(shape)
+        axis = self.SPECTRAL_AXIS if ndim > self.SPECTRAL_AXIS + 1 else ndim - 1
+        in_frequency = state is not None and state.spectral == 'frequency'
+
+        if sigma is not None:
+            level = self._level(sigma, data_array, ndim)
+            return level / float(np.sqrt(shape[axis])) if in_frequency else level
+
+        # One reference per batch element whenever there is more than one
+        # trace to share it, unless the caller decided otherwise.
+        global_scale = self.global_scale
+        if global_scale is None:
+            global_scale = int(np.prod(shape[1:axis] + shape[axis + 1:])) > 1
+
+        peak = self._peak(data_array, state, global_scale or force_global)
+        return peak / ops.cast_like(self._level(snr, peak, ndim), peak)
+
+    def _peak(self, data_array, state, global_scale: bool):
+        """
+        The spectrum peak an SNR is relative to, in the data's own domain.
+
+        In the time domain that takes one batched FFT; the unnormalised
+        transform is divided by "sqrt(N)" to give the unitary spectrum the
+        level is defined in. In the frequency domain the data *is* the
+        spectrum, in whatever normalisation the pipeline used - the ratio to
+        the noise added in the same domain does not depend on it. In k-space
+        the peak is read from the image the data transforms to, because the
+        orthonormal spatial transform preserves the noise level but not the
+        peak, which is an image-domain quantity.
+
+        Args:
+            data_array: The data, NIfTI layout.
+            state: Where the data is; None means time domain, image space.
+            global_scale: One peak per batch element rather than per trace.
+
+        Returns:
+            "max|spectrum|", with kept dimensions so it broadcasts.
+        """
+        shape = ops.shape(data_array)
+        ndim = len(shape)
+        axis = self.SPECTRAL_AXIS if ndim > self.SPECTRAL_AXIS + 1 else ndim - 1
+        axes = self.SPATIAL_AXES
+
+        x = data_array
+        if (state is not None and state.spatial == 'kspace'
+                and ndim > axis and max(shape[1:4]) > 1):
+            x = ops.fftshift(ops.ifftn(ops.ifftshift(x, axis=axes), axes, norm='ortho'),
+                             axis=axes)
+
+        if state is not None and state.spectral == 'frequency':
+            peak = ops.amax(ops.abs(x), axis=axis, keepdims=True)
         else:
-            # global_scale: one statistic per batch element; otherwise per trace.
-            # Per trace means along the spectral axis — axis 4 in the NIfTI
-            # layout, the last axis only when no higher dims trail it — never
-            # across a coil/average dimension sitting at the end.
-            spectral_axis = 4 if ndim > 4 else ndim - 1
-            red_axes = tuple(range(1, ndim)) if self.global_scale else (spectral_axis,)
+            # The backends transform their last axis only, so the spectral one
+            # is brought there when a coil or average axis sits behind it.
+            moved = axis != ndim - 1
+            if moved:
+                x = ops.transpose(x, [d for d in range(ndim) if d != axis] + [axis])
+            if not ops.is_complex(x):
+                x = ops.complex_from(x, x * 0.0)     # tf.signal.fft takes complex only
+            peak = ops.amax(ops.abs(ops.fft(x)), axis=-1, keepdims=True)
+            if moved:
+                peak = ops.transpose(peak, list(range(axis)) + [ndim - 1]
+                                     + list(range(axis, ndim - 1)))
+            peak = peak / float(np.sqrt(shape[axis]))
 
-            if self.sigma_frac is not None:
-                peak = ops.amax(magnitude, axis=red_axes, keepdims=True)
-                peak = ops.where(peak > 0, peak, ops.cast_like(peak * 0.0 + 1.0, peak))
-                scale = self._level(self.sigma_frac, peak, ndim) * peak
-            else:
-                sig_pow = ops.mean(magnitude ** 2, axis=red_axes, keepdims=True) + 1e-16
-                if self.snr is not None:
-                    snr = self.snr
-                else:
-                    snr = 10.0 ** (np.asarray(self.snr_db, dtype=np.float64) / 10.0)
-                noise_pow = sig_pow / self._level(snr, sig_pow, ndim)
-                scale = ops.sqrt(noise_pow / 2.0)  # per-channel std
+        if global_scale and ndim > 1:
+            peak = ops.amax(peak, axis=tuple(range(1, ndim)), keepdims=True)
 
-        scale = self._shaped(scale, original_shape)
+        # A silent trace has nothing to be relative to; a unit peak keeps the
+        # division finite rather than producing NaN.
+        return ops.where(peak > 0, peak, ops.cast_like(peak * 0.0 + 1.0, peak))
 
-        # ── Step 2: noise, on the data's own backend and device ───────────────
-        if not ops.is_complex(data_array):
-            # Real data is a magnitude, and the magnitude of a complex signal in
-            # complex Gaussian noise is Rice-distributed - non-central chi once
-            # coils have been combined. Adding a symmetric perturbation here
-            # would let it go negative, which no magnitude ever does.
-            real = self.rng.normal(original_shape, like=magnitude)
-            imag = self.rng.normal(original_shape, like=magnitude)
-            widened = ops.cast_like(scale, real)
-            return ops.sqrt((data_array + real * widened) ** 2
-                            + (imag * widened) ** 2), water_array
-
-        real = self.rng.normal(original_shape, like=magnitude)
-        imag = self.rng.normal(original_shape, like=magnitude)
-        noise = ops.complex_from(real * ops.cast_like(scale, real),
-                                 imag * ops.cast_like(scale, imag))
-        noise = self._correlate(noise, kwargs.get('dim_tags'))
-
-        return data_array + ops.cast_like(noise, data_array), water_array
-
-    #********************#
-    #   how loud where   #
-    #********************#
     @staticmethod
     def _level(value, like, ndim):
         """
-        A level parameter as something *like* can be multiplied or divided by.
+        A level parameter as a tensor that broadcasts against the data.
 
-        A scalar stays a plain float; a "(batch,)" per-sample vector becomes a
-        column on *like*'s backend, so each sample gets its own level.
+        A scalar becomes a single element, a "(batch,)" per-sample vector a
+        column, both on *like*'s backend and device, so nothing downstream
+        crosses frameworks.
+
+        Args:
+            value: A scalar, or a "(batch,)" vector of per-sample values.
+            like: Any tensor on the target backend.
+            ndim: Rank of the data the level will multiply.
+
+        Returns:
+            A float32 tensor of shape "(1 or batch, 1, ..., 1)".
         """
-        arr = np.asarray(value, dtype=np.float64)
-        if arr.ndim == 0:
-            return float(arr)
-        col = arr.reshape((-1,) + (1,) * (ndim - 1))
-        return ops.cast_like(ops.match_backend(col, like), like)
+        arr = np.asarray(value, dtype=np.float64).reshape((-1,) + (1,) * (ndim - 1))
+        return ops.asarray_like(like, arr, dtype='float32')
 
-    def _shaped(self, scale, shape):
+    #***************#
+    #   how where   #
+    #***************#
+    def _shaped(self, scale, shape, state):
         """
         Modulate the level by where in the volume it is.
 
         A flat profile is the common case and costs nothing, so it is skipped
         rather than multiplied by ones. Anything else needs the data to have
         real spatial extent - a single-voxel spectrum has nowhere for the level
-        to vary - so it is left alone there too.
+        to vary - and to be in image space, where position means something; in
+        k-space the noise is white receiver noise and a profile cannot apply.
 
         Args:
             scale: The level the SNR or sigma asked for.
             shape: The data's shape, NIfTI layout.
+            state: Where the data is; None means image space.
 
         Returns:
             The level, varying across the volume.
@@ -547,18 +681,53 @@ class Noise(BaseModule):
         matrix = tuple(int(n) for n in shape[1:4])
         if isinstance(self.profile, Flat) or len(shape) < 5 or max(matrix) == 1:
             return scale
+        if state is not None and state.spatial == 'kspace':
+            warnings.warn(
+                f"{self.profile.__class__.__name__} describes the noise level across the "
+                f"image, but the data is in k-space, where the noise is white by nature. "
+                f"It is added flat here; place Noise in image space for the profile to apply.",
+                RuntimeWarning)
+            return scale
 
         profile = self.profile.sigma(matrix)
 
         # open a batch axis in front and one axis per trailing dimension
         view = (1,) + matrix + (1,) * (len(shape) - 4)
-        return scale * ops.cast_like(
-            ops.match_backend(profile.reshape(view), ops.real(scale)), scale)
+        return scale * ops.match_backend(profile.reshape(view), scale)
 
     #************************#
     #   where noise enters   #
     #************************#
-    def _via_kspace(self, data_array, water_array, **kwargs):
+    def _add(self, data_array, scale, dim_tags):
+        """
+        Draw the noise at the given level and add it, on the data's own device.
+
+        Args:
+            data_array: The data, any backend.
+            scale: Per-channel SD, broadcastable against the data.
+            dim_tags: Higher-dimension tags, to find the coil axis to correlate.
+
+        Returns:
+            The data with its noise.
+        """
+        shape = ops.shape(data_array)
+        real = self.rng.normal(shape, like=data_array)
+        imag = self.rng.normal(shape, like=data_array)
+        widened = ops.cast_like(scale, real)
+
+        if not ops.is_complex(data_array):
+            # Real data is a magnitude, and the magnitude of a complex signal in
+            # complex Gaussian noise is Rice-distributed - non-central chi once
+            # coils have been combined. Adding a symmetric perturbation here
+            # would let it go negative, which no magnitude ever does.
+            return ops.sqrt((data_array + ops.cast_like(real * widened, data_array)) ** 2
+                            + ops.cast_like(imag * widened, data_array) ** 2)
+
+        noise = ops.complex_from(real * widened, imag * widened)
+        noise = self._correlate(noise, dim_tags)
+        return data_array + ops.cast_like(noise, data_array)
+
+    def _via_kspace(self, data_array, sigma, snr, state, dim_tags):
         """
         Add the noise where the scanner would have picked it up.
 
@@ -571,27 +740,29 @@ class Noise(BaseModule):
         reconstruction spreads each missing sample over the whole image, so its
         noise is correlated and adding white noise there would not resemble
         anything a scanner produces. The data is therefore taken back to
-        k-space, given its noise, and returned.
+        k-space, given its noise, and returned. The level is still referenced
+        to the image, where a spectrum peak means something, and is one value
+        per batch element because white noise has no position.
 
         Args:
             data_array: Image-domain data that has already been undersampled.
-            water_array: Passed through unchanged.
+            sigma: Absolute level, or None.
+            snr: Peak SNR, or None.
+            state: The (image-domain) state the data arrived in.
+            dim_tags: Higher-dimension tags, to find the coil axis.
 
         Returns:
-            "(noisy_data, water_unchanged)".
+            The noisy data, back in the image domain.
         """
-        axes = (1, 2, 3)
+        scale = self._scale(data_array, sigma, snr, state, force_global=True)
+
+        axes = self.SPATIAL_AXES
         kspace = ops.fftshift(
             ops.fftn(ops.ifftshift(data_array, axis=axes), axes, norm='ortho'), axis=axes)
-
-        # Say so plainly rather than let it look like ordinary image-domain noise
-        moved = dict(kwargs)
-        moved['state'] = kwargs['state'].having(spatial='kspace')
-        noisy, water_array = self.process_tensor(kspace, water_array, **moved)
+        noisy = self._add(kspace, scale, dim_tags)
 
         return ops.fftshift(
-            ops.ifftn(ops.ifftshift(noisy, axis=axes), axes, norm='ortho'),
-            axis=axes), water_array
+            ops.ifftn(ops.ifftshift(noisy, axis=axes), axes, norm='ortho'), axis=axes)
 
     #*******************#
     #   coil coupling   #
@@ -640,41 +811,3 @@ class Noise(BaseModule):
             columns.append(mixed)
 
         return ops.concatenate(columns, axis=axis)
-
-    #********************************************************************#
-    #   pure-numpy path for process_nifti_list (input is always numpy)   #
-    #********************************************************************#
-    def _add_noise_numpy(self, fid: np.ndarray, index: int = 0) -> np.ndarray:
-        """Add Gaussian noise to numpy FID data."""
-        # Draw from the module's own stream, so this path matches the tensor
-        # path: it advances between calls and reproduces from the same seed.
-        rng = self.rng.numpy_rng()
-
-        original_shape = fid.shape
-        fid_flat = fid.reshape(-1, original_shape[-1])
-        out_dtype = np.result_type(fid.dtype, np.complex64)
-        fid_flat = fid_flat.astype(out_dtype, copy=False)
-
-        # This path handles one NIFTI_MRS object at a time, so "global" means a
-        # single statistic over the whole array rather than one per FID trace —
-        # and a per-sample vector is read at this subject's *index*.
-        red_axis = None if self.global_scale else -1
-
-        if self.sigma is not None:
-            scale = float(self.sample_of(self.sigma, index))
-        elif self.sigma_frac is not None:
-            peak = np.max(np.abs(fid_flat), axis=red_axis, keepdims=True)
-            peak = np.where(peak > 0, peak, 1.0)
-            scale = float(self.sample_of(self.sigma_frac, index)) * peak
-        else:
-            sig_pow = np.mean(np.abs(fid_flat) ** 2, axis=red_axis, keepdims=True) + 1e-16
-            if self.snr is not None:
-                noise_pow = sig_pow / float(self.sample_of(self.snr, index))
-            else:
-                noise_pow = sig_pow / (10.0 ** (float(self.sample_of(self.snr_db, index)) / 10.0))
-            scale = np.sqrt(noise_pow / 2.0)
-
-        noise = (rng.normal(0.0, 1.0, size=fid_flat.shape)
-                 + 1j * rng.normal(0.0, 1.0, size=fid_flat.shape)) * scale
-
-        return (fid_flat + noise).reshape(original_shape)

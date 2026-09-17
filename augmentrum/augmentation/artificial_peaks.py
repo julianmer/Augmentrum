@@ -18,6 +18,8 @@ import numpy as np
 from typing import Optional, List, Dict
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
+from augmentrum.processing.utils import (ppm_axis, ppm_reference, batch_profile,
+                                         causal_lineshape)
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
 from nifti_mrs_plus.ops import match_backend
@@ -34,8 +36,16 @@ class ArtificialPeaks(BaseModule):
     """
     Add artificial contaminant peaks to MRS data.
 
-    Adds Lorentzian, Gaussian, or Voigt peaks at specified ppm positions
-    in the frequency domain to simulate contamination or additional metabolites.
+    Adds Lorentzian, Gaussian, or Voigt peaks at specified ppm positions to
+    simulate contamination or additional metabolites. Each peak is what a
+    resonance is in the FID - a decaying complex exponential, damped
+    exponentially for the Lorentzian width and by a Gaussian for the Gaussian
+    width, both for a Voigt - transformed to the spectrum ("causal_lineshape").
+    A lineshape drawn directly on the axis would be real, and a real spectrum
+    has a two-sided FID: half of it wraps to the end of the acquisition, where
+    it rings once the FID is zero-filled or truncated. All ppm values are on
+    the FSL-MRS / NIfTI-MRS axis (protons referenced to 4.65 ppm), so a peak
+    requested at 1.30 ppm shows at 1.30 on an FSL-MRS plot.
 
     Parameters
     ----------
@@ -46,19 +56,40 @@ class ArtificialPeaks(BaseModule):
         - phase_deg: Complex phase in degrees
         - lb_hz: Lorentzian FWHM in Hz (0 for none)
         - gb_hz: Gaussian FWHM in Hz (0 for none)
-        If both lb_hz and gb_hz > 0, creates Voigt peak
-    ref_ppm : float
-        Reference ppm for axis calculation (default: 4.7)
+        If both lb_hz and gb_hz > 0, creates Voigt peak. A peak with neither
+        width is skipped. "amp" is the peak's real height as a fraction of the
+        spectrum's own peak, whatever its width.
+        Any of these may be a "(low, high)" range instead of a number; ranges
+        are drawn uniformly, once per sample, from this module's seeded
+        generator, while numbers stay fixed for every sample. The default is
+        one randomised lipid/contaminant peak: ppm in (0.9, 1.6), amp in
+        (0.05, 0.3), lb_hz in (5, 20) - a fixed peak on top of a metabolite is
+        no augmentation.
+    ref_ppm : float, optional
+        Reference ppm of the carrier (0 Hz). None (default) is the nucleus'
+        reference from "ppm_reference" (4.65 ppm for 1H); set it only to place
+        peaks on another convention.
     amp_mode : str
         How to calculate reference amplitude: 'real' or 'abs' (default: 'real')
+    seed : int, optional
+        Seed for the per-sample draws.
 
     Examples
     --------
-    >>> # Add single Lorentzian peak at 3.0 ppm
+    >>> # A random lipid-like peak per sample (the default)
+    >>> peaks = ArtificialPeaks()
+    >>> result_data, _ = peaks(nifti_plus, None)
+
+    >>> # Add a fixed Lorentzian peak at 3.0 ppm
     >>> peaks = ArtificialPeaks(peaks=[
     ...     {'ppm': 3.0, 'amp': 0.1, 'phase_deg': 0.0, 'lb_hz': 5.0, 'gb_hz': 0.0}
     ... ])
-    >>> result_data, _ = peaks(nifti_plus, None)
+
+    >>> # Ranges: position, width and phase drawn per sample
+    >>> peaks = ArtificialPeaks(peaks=[
+    ...     {'ppm': (0.8, 1.6), 'amp': (0.05, 0.3), 'lb_hz': (5, 20),
+    ...      'phase_deg': (-30, 30)}
+    ... ], seed=0)
     """
 
     SUPPORTED_BACKENDS = tuple(Backend)
@@ -66,20 +97,100 @@ class ArtificialPeaks(BaseModule):
     # A peak is a feature of a spectrum, so that is where it is added.
     DOMAIN = Domain(spectral='frequency')
 
-    def __init__(self, peaks: List[Dict] = None, ref_ppm: float = 4.7, amp_mode: str = 'real'):
+    #: The keys of a peak dict that may be given as (low, high) ranges, with
+    #: their defaults when absent.
+    PEAK_KEYS = {'ppm': None, 'amp': 0.05, 'phase_deg': 0.0, 'lb_hz': 0.0, 'gb_hz': 0.0}
+
+    #: The default: a lipid/contaminant peak drawn afresh for every sample.
+    DEFAULT_PEAKS = ({'ppm': (0.9, 1.6), 'amp': (0.05, 0.3), 'phase_deg': 0.0,
+                      'lb_hz': (5.0, 20.0), 'gb_hz': 0.0},)
+
+    def __init__(self, peaks: List[Dict] = None, ref_ppm: Optional[float] = None,
+                 amp_mode: str = 'real', seed: Optional[int] = None):
         """Initialize artificial peaks module."""
         if peaks is None:
-            peaks = [{'ppm': 3.0, 'amp': 0.05, 'phase_deg': 0.0, 'lb_hz': 5.0, 'gb_hz': 0.0}]
+            peaks = [dict(p) for p in self.DEFAULT_PEAKS]
 
         super().__init__()
 
-        self.peaks = peaks
+        self.peaks = [self._normalize(p) for p in peaks]
         self.ref_ppm = ref_ppm
         self.amp_mode = amp_mode
+
+    @classmethod
+    def _normalize(cls, peak: Dict) -> Dict:
+        """One peak dict with canonical keys ('amplitude' is an alias of 'amp')."""
+        if 'ppm' not in peak:
+            raise ValueError(f"A peak needs a 'ppm'; got {peak!r}")
+        out = dict(peak)
+        if 'amp' not in out and 'amplitude' in out:
+            out['amp'] = out.pop('amplitude')
+        for key, default in cls.PEAK_KEYS.items():
+            if key not in out and default is not None:
+                out[key] = default
+        return out
+
+    #****************#
+    #   the draws   #
+    #****************#
+    def _draw(self, batch: int) -> List[Dict[str, np.ndarray]]:
+        """
+        This batch's peak parameters, one "(batch,)" vector per key per peak.
+
+        Ranges are drawn from a single generator taken from the module's seed
+        stream, so the same seed gives the same peaks on every backend and on
+        both processing paths; fixed values are repeated.
+        """
+        rng = self.rng.numpy_rng()
+        table = []
+        for peak in self.peaks:
+            drawn = {}
+            for key in self.PEAK_KEYS:
+                value = peak[key]
+                if isinstance(value, (tuple, list)) and len(value) == 2:
+                    drawn[key] = rng.uniform(float(value[0]), float(value[1]), size=batch)
+                else:
+                    drawn[key] = np.full(batch, float(value))
+            table.append(drawn)
+        return table
+
+    def _profile(self, index: int, ppm: np.ndarray, table: List[Dict], sf_mhz: float) -> np.ndarray:
+        """
+        Sample *index*'s contamination on *ppm*, in units of its amplitude reference.
+
+        Each peak is a causal resonance with unit peak real height, so "amp"
+        stays a fraction of the spectrum's peak; its phase rotates absorption
+        and dispersion together, as a phase error would.
+        """
+        contam = np.zeros(ppm.shape, dtype=np.complex128)
+        for drawn in table:
+            ppm0 = float(drawn['ppm'][index])
+            amp_frac = float(drawn['amp'][index])
+            phase_deg = float(drawn['phase_deg'][index])
+            lb_hz = float(drawn['lb_hz'][index])
+            gb_hz = float(drawn['gb_hz'][index])
+            if lb_hz <= 0 and gb_hz <= 0:
+                continue  # No width, skip
+
+            # Widths in Hz are widths in ppm on the same axis, one sf_mhz apart.
+            shape = causal_lineshape(ppm, ppm0, lb_hz / float(sf_mhz), gb_hz / float(sf_mhz))
+            contam += amp_frac * shape * np.exp(1j * np.deg2rad(phase_deg))
+        return contam
+
+    def _axis(self, n_points: int, sw_hz: float, sf_mhz: float, nucleus) -> np.ndarray:
+        """The ppm axis, on the nucleus' reference unless "ref_ppm" overrides it."""
+        ppm = ppm_axis(n_points, sw_hz, sf_mhz, nucleus)
+        if self.ref_ppm is not None:
+            ppm = ppm - ppm_reference(nucleus) + float(self.ref_ppm)
+        return ppm
 
     def process_nifti_list(self, data_list: List, water_list: Optional[List] = None, **kwargs):
         """
         Add artificial peaks to list of NIFTI_MRS objects.
+
+        The NIfTI-MRS format stores FIDs, so each subject is taken to a
+        spectrum here and back; a pipeline never reaches this method in the
+        wrong domain, since the declared frequency DOMAIN governs its plan.
 
         Args:
             data_list: List of NIFTI_MRS objects
@@ -89,21 +200,31 @@ class ArtificialPeaks(BaseModule):
         Returns:
             Tuple of (processed_data_list, processed_water_list)
         """
+        table = self._draw(len(data_list))
         processed_data = []
 
-        for nifti in data_list:
-            # Get FID data
+        for i, nifti in enumerate(data_list):
             fid = nifti[:]
-
-            # Get parameters
             sw_hz = 1.0 / nifti.dwelltime
             sf_mhz = nifti.spectrometer_frequency[0]
+            nucleus = nifti.nucleus[0] if nifti.nucleus else '1H'
 
-            # Add peaks
-            fid_with_peaks = self._add_peaks(fid, sw_hz, sf_mhz)
+            # The spectral axis is index 3 of a NIfTI-MRS array; bring it last
+            # so a coil or average axis behind it is not mistaken for it.
+            moved = fid.ndim > 4
+            work = np.moveaxis(fid, 3, -1) if moved else fid
+            n_points = work.shape[-1]
 
-            # Update NIFTI_MRS data
-            nifti[:] = fid_with_peaks
+            spec = np.fft.fftshift(np.fft.ifft(work, axis=-1), axes=-1)
+            profile = self._profile(i, self._axis(n_points, sw_hz, sf_mhz, nucleus),
+                                    table, sf_mhz)
+            magnitude = np.abs(spec) if self.amp_mode == 'abs' else np.abs(np.real(spec))
+            peak_ref = np.max(magnitude, axis=-1, keepdims=True)
+            peak_ref = np.where(peak_ref > 0, peak_ref, 1.0)
+            spec = spec + peak_ref * profile
+
+            out = np.fft.fft(np.fft.ifftshift(spec, axes=-1), axis=-1)
+            nifti[:] = np.moveaxis(out, -1, 3) if moved else out
             processed_data.append(nifti)
 
         return processed_data, water_list
@@ -114,14 +235,15 @@ class ArtificialPeaks(BaseModule):
 
         Everything touching the data runs on the data's own backend, so
         gradients and device placement survive. Only the peak shapes are built
-        in NumPy: they depend on the ppm axis alone, so they are constant with
-        respect to the data and identical for every FID.
+        in NumPy: they depend on the FID grid and the drawn parameters alone,
+        one profile per sample, promoted once with "match_backend".
 
         Args:
-            data_array: Input tensor of shape "(batch, ..., n_points)"
+            data_array: Input spectra of shape "(batch, ..., n_points)"
             water_array: Optional water reference (unchanged)
             backend: Backend enum (unused)
-            **kwargs: Must contain "'sw_hz'" and "'sf_mhz'"
+            **kwargs: Must contain "'sw_hz'" and "'sf_mhz'"; "'nucleus'" sets
+                the ppm reference (1H when absent)
 
         Returns:
             Tuple of (processed_data, water_array)
@@ -130,41 +252,22 @@ class ArtificialPeaks(BaseModule):
         sf_mhz = kwargs.get('sf_mhz')
         if sw_hz is None or sf_mhz is None:
             raise ValueError("ArtificialPeaks.process_tensor requires 'sw_hz' and 'sf_mhz' in kwargs")
+        nucleus = kwargs.get('nucleus', '1H')
 
-        N = data_array.shape[-1]
-
-        # 1. The data arrives as a spectrum: this module declares that it works
-        #    in the frequency domain and is put there before it runs.
         spec = data_array
+        shape = ops.shape(spec)
+        ndim = len(shape)
+        n_points = int(shape[-1])
+        batch = int(shape[0]) if ndim > 1 else 1
 
-        # 2. ppm axis (numpy — coordinate, no gradients needed)
-        dt = 1.0 / float(sw_hz)
-        freq_hz = np.fft.fftshift(np.fft.fftfreq(N, d=dt))
-        ppm = self.ref_ppm - freq_hz / float(sf_mhz)
+        # 1. ppm axis and one contamination profile per sample (NumPy)
+        ppm = self._axis(n_points, float(sw_hz), float(sf_mhz), nucleus)
+        table = self._draw(batch)
+        unit_contam = np.stack([self._profile(i, ppm, table, float(sf_mhz))
+                                for i in range(batch)])
+        unit_contam = batch_profile(unit_contam, ndim)
 
-        # 3. Peak shapes depend only on the ppm axis, so they are the same for
-        #    every FID and are built once, in NumPy, at unit amplitude.
-        unit_contam = np.zeros(N, dtype=np.complex128)
-        for p in self.peaks:
-            ppm0 = float(p['ppm'])
-            amp_frac = float(p.get('amp', p.get('amplitude', 0.05)))
-            phase_deg = float(p.get('phase_deg', 0.0))
-            lb_hz = float(p.get('lb_hz', 0.0))
-            gb_hz = float(p.get('gb_hz', 0.0))
-
-            if lb_hz > 0 and gb_hz > 0:
-                shape = self._voigt(ppm, ppm0, lb_hz, gb_hz, sf_mhz)
-            elif lb_hz > 0:
-                shape = self._lorentzian(ppm, ppm0, lb_hz, sf_mhz)
-            elif gb_hz > 0:
-                shape = self._gaussian(ppm, ppm0, gb_hz, sf_mhz)
-            else:
-                continue
-
-            unit_contam += amp_frac * shape * np.exp(1j * np.deg2rad(phase_deg))
-
-        # 4. The only data-dependent term is one amplitude per FID, taken on the
-        #    data's own backend so the spectrum is never converted.
+        # 2. One amplitude per FID, on the data's own backend
         magnitude = ops.abs(spec if self.amp_mode == 'abs' else ops.real(spec))
         peak_ref = ops.amax(magnitude, axis=-1, keepdims=True)
         peak_ref = ops.where(peak_ref > 0, peak_ref, ops.cast_like(peak_ref * 0.0 + 1.0, peak_ref))
@@ -172,174 +275,5 @@ class ArtificialPeaks(BaseModule):
         contam = ops.cast_like(match_backend(unit_contam, spec), spec) \
             * ops.cast_like(peak_ref, spec)
 
-        # 5. Add contamination in spectral domain (backend-native)
+        # 3. Add contamination in the spectral domain (backend-native)
         return spec + contam, water_array
-
-    def _add_peaks(self, fid: np.ndarray, sw_hz: float, sf_mhz: float) -> np.ndarray:
-        """
-        Add artificial peaks to FID data.
-
-        Args:
-            fid: Input FID data (shape: x, y, z, points, [coils], [averages], ...)
-            sw_hz: Spectral width in Hz
-            sf_mhz: Spectrometer frequency in MHz
-
-        Returns:
-            FID with peaks added
-        """
-        # In MRS data, dimension 3 (index 3) is typically the FID points
-        # Shape is typically: (x, y, z, points, coils, averages, ...)
-        original_shape = fid.shape
-
-        # Find the FID points dimension (should be dim 3, index 3)
-        # For standard MRS: shape is (1, 1, 1, points, coils, averages)
-        if len(original_shape) >= 4:
-            # FID points are at index 3 (4th dimension)
-            n_points = original_shape[3]
-
-            # Move FID dimension to the end for easier processing
-            # From: (x, y, z, points, coils, avg) -> (x, y, z, coils, avg, points)
-            fid_moved = np.moveaxis(fid, 3, -1)
-            moved_shape = fid_moved.shape
-
-            # Reshape to 2D: (all_other_dims, points)
-            fid_2d = fid_moved.reshape(-1, n_points)
-            result = np.zeros_like(fid_2d)
-
-            # Process each FID
-            for i in range(fid_2d.shape[0]):
-                fid_1d = fid_2d[i]
-                fid_with_peaks = self._add_peaks_1d(fid_1d, sw_hz, sf_mhz)
-                result[i] = fid_with_peaks
-
-            # Reshape back and move FID dimension back to position 3
-            result_moved = result.reshape(moved_shape)
-            result_final = np.moveaxis(result_moved, -1, 3)
-
-            return result_final
-        else:
-            # Simple 1D case or legacy format - last dimension is FID points
-            N = original_shape[-1]
-            fid_2d = fid.reshape(-1, N)
-            result = np.zeros_like(fid_2d)
-
-            for i in range(fid_2d.shape[0]):
-                fid_1d = fid_2d[i]
-                fid_with_peaks = self._add_peaks_1d(fid_1d, sw_hz, sf_mhz)
-                result[i] = fid_with_peaks
-
-            return result.reshape(original_shape)
-
-    def _add_peaks_1d(self, fid: np.ndarray, sw_hz: float, sf_mhz: float) -> np.ndarray:
-        """
-        Add peaks to 1D FID.
-
-        Args:
-            fid: 1D FID data
-            sw_hz: Spectral width in Hz
-            sf_mhz: Spectrometer frequency in MHz
-
-        Returns:
-            FID with peaks
-        """
-        # The NIfTI-MRS format stores FIDs, so the list path converts at this
-        # boundary and back; the declared frequency DOMAIN governs the tensor
-        # path, and a pipeline never reaches this method in the wrong domain.
-        spec = np.fft.fftshift(np.fft.ifft(fid))
-
-        # Create ppm axis
-        n = fid.size
-        dt = 1.0 / float(sw_hz)
-        freq_hz = np.fft.fftshift(np.fft.fftfreq(n, d=dt))
-        # Legacy formula: ppm_offset = freq_hz_offset / larmor_freq_MHz
-        ppm = self.ref_ppm - freq_hz / float(sf_mhz)
-
-        # Calculate reference amplitude
-        if self.amp_mode == 'abs':
-            peak_ref = np.max(np.abs(spec)) or 1.0
-        else:
-            peak_ref = np.max(np.abs(spec.real)) or 1.0
-
-        # Generate contamination
-        contam = np.zeros_like(spec, dtype=np.complex128)
-
-        for p in self.peaks:
-            ppm0 = float(p['ppm'])
-            # Support both 'amp' and 'amplitude' keys
-            amp_frac = float(p.get('amp', p.get('amplitude', 0.05)))
-            phase_deg = float(p.get('phase_deg', 0.0))
-            lb_hz = float(p.get('lb_hz', 0.0))
-            gb_hz = float(p.get('gb_hz', 0.0))
-
-            # Generate peak shape
-            if lb_hz > 0 and gb_hz > 0:
-                shape = self._voigt(ppm, ppm0, lb_hz, gb_hz, sf_mhz)
-            elif lb_hz > 0:
-                shape = self._lorentzian(ppm, ppm0, lb_hz, sf_mhz)
-            elif gb_hz > 0:
-                shape = self._gaussian(ppm, ppm0, gb_hz, sf_mhz)
-            else:
-                continue  # No width, skip
-
-            # Add to contamination
-            phase = np.exp(1j * np.deg2rad(phase_deg))
-            peak_contam = (amp_frac * peak_ref) * shape * phase
-            contam += peak_contam
-
-        # Add contamination to spectrum
-        spec_aug = spec + contam
-
-        # Back to time domain (FFT to invert IFFT)
-        return np.fft.fft(np.fft.ifftshift(spec_aug))
-
-    @staticmethod
-    def _lorentzian(ppm: np.ndarray, ppm0: float, fwhm_hz: float, sf_mhz: float) -> np.ndarray:
-        """Generate Lorentzian peak shape."""
-        if fwhm_hz <= 0:
-            return np.zeros_like(ppm)
-
-        # Convert Hz to ppm: divide by sf_mhz (which is in MHz)
-        # This gives: Hz / MHz = ppm (since 1 MHz = 1e6 Hz, the ratio is in ppm)
-        fwhm_ppm = fwhm_hz / float(sf_mhz)
-        x = ppm - ppm0
-        hw = 0.5 * fwhm_ppm
-        L = (hw / (x**2 + hw**2)) / np.pi
-        return L / (L.max() if L.max() > 0 else 1.0)
-
-    @staticmethod
-    def _gaussian(ppm: np.ndarray, ppm0: float, fwhm_hz: float, sf_mhz: float) -> np.ndarray:
-        """Generate Gaussian peak shape."""
-        if fwhm_hz <= 0:
-            return np.zeros_like(ppm)
-
-        # Convert Hz to ppm: divide by sf_mhz (which is in MHz)
-        fwhm_ppm = fwhm_hz / float(sf_mhz)
-        x = ppm - ppm0
-        G = np.exp(-4.0 * np.log(2.0) * (x**2) / (fwhm_ppm**2))
-        return G
-
-    @staticmethod
-    def _voigt(ppm: np.ndarray, ppm0: float, lb_hz: float, gb_hz: float, sf_mhz: float) -> np.ndarray:
-        """Generate Voigt peak shape (product of Lorentzian and Gaussian)."""
-        if lb_hz <= 0 and gb_hz <= 0:
-            return np.zeros_like(ppm)
-
-        # Don't call the normalized functions - build them here
-        if lb_hz > 0:
-            fwhm_ppm_l = lb_hz / float(sf_mhz)
-            x = ppm - ppm0
-            hw = 0.5 * fwhm_ppm_l
-            L = (hw / (x**2 + hw**2)) / np.pi
-        else:
-            L = 1.0
-
-        if gb_hz > 0:
-            fwhm_ppm_g = gb_hz / float(sf_mhz)
-            x = ppm - ppm0
-            G = np.exp(-4.0 * np.log(2.0) * (x**2) / (fwhm_ppm_g**2))
-        else:
-            G = 1.0
-
-        V = L * G
-        vmax = V.max() if isinstance(V, np.ndarray) else V
-        return V / (vmax if vmax > 0 else 1.0)

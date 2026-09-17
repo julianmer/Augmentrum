@@ -22,9 +22,12 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
+from scipy.signal import hilbert
 
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
+from augmentrum.processing.utils import (ppm_axis, batch_profile, per_sample_factor,
+                                         causal_lineshape)
 from nifti_mrs_plus import Backend
 from nifti_mrs_plus import ops
 from nifti_mrs_plus.ops import match_backend
@@ -67,12 +70,30 @@ class MMSource(ABC):
     to unit maximum of its real part, so the module can scale it against the
     data. Randomizable sources draw from the generator they are handed, which
     keeps every draw reproducible from the module's seed.
+
+    Every profile is the spectrum of a causal signal - one that starts at the
+    first point of the FID and decays, rather than wrapping half of itself to
+    the end of the acquisition, where it would ring once the FID is zero-
+    filled or truncated. The parametrized sources build their components in
+    the FID ("causal_lineshape"); a supplied real curve gets the dispersion
+    part a causal signal must have by Hilbert transform; a measured spectrum
+    is causal by acquisition and is passed through.
     """
 
     @abstractmethod
     def profile(self, ppm_axis: np.ndarray, rng: np.random.Generator,
                 sf_mhz: Optional[float] = None) -> np.ndarray:
         """The unit-normalized complex MM spectrum on *ppm_axis*."""
+
+    @property
+    def varies(self) -> bool:
+        """
+        Whether two calls can give different profiles.
+
+        A randomizable source is drawn once per sample; a fixed one is built
+        once per batch and shared, since building it again would only repeat it.
+        """
+        return False
 
     @staticmethod
     def _normalize(spectrum: np.ndarray) -> np.ndarray:
@@ -98,14 +119,13 @@ class MMSource(ABC):
 
     @staticmethod
     def _fid_to_spectrum(fid: np.ndarray, sw_hz: float, sf_mhz: float,
-                         ref_ppm: float = 4.7) -> Tuple[np.ndarray, np.ndarray]:
-        """A measured FID as (spectrum, ppm_axis), MRS convention."""
+                         nucleus: str = '1H') -> Tuple[np.ndarray, np.ndarray]:
+        """A measured FID as (spectrum, ppm_axis), MRS convention on the FSL-MRS axis."""
         fid = np.asarray(fid).squeeze()
         if fid.ndim > 1:                       # average any dynamics
             fid = fid.reshape(fid.shape[0], -1).mean(axis=1)
         spectrum = np.fft.fftshift(np.fft.ifft(fid))
-        freq_hz = np.fft.fftshift(np.fft.fftfreq(fid.shape[0], d=1.0 / sw_hz))
-        return spectrum, ref_ppm - freq_hz / sf_mhz
+        return spectrum, ppm_axis(fid.shape[0], sw_hz, sf_mhz, nucleus)
 
 
 #**************************************************************************************************#
@@ -122,7 +142,9 @@ class Parametrized(MMSource):
     Each component is (ppm, FWHM_ppm, rel_amp); the defaults are the
     "MM_CONSENSUS" table. The jitters are fractional (amplitude, width) or
     absolute in ppm (position) half-ranges drawn uniformly per call, which is
-    what turns a fixed template into an augmentation.
+    what turns a fixed template into an augmentation. A component is a
+    Gaussian-damped resonance in the FID, so rel_amp is its peak height in the
+    spectrum, whatever its width.
     """
 
     def __init__(self, components: Tuple = MM_CONSENSUS,
@@ -134,9 +156,13 @@ class Parametrized(MMSource):
         self.ppm_jitter = float(ppm_jitter)
         self.fwhm_jitter = float(fwhm_jitter)
 
+    @property
+    def varies(self) -> bool:
+        return bool(self.amp_jitter or self.ppm_jitter or self.fwhm_jitter)
+
     def profile(self, ppm_axis, rng, sf_mhz=None):
         ppm = np.asarray(ppm_axis, float)
-        spectrum = np.zeros_like(ppm)
+        spectrum = np.zeros(ppm.shape, dtype=complex)
 
         for center, fwhm, amp in self.components:
             if self.ppm_jitter:
@@ -146,10 +172,9 @@ class Parametrized(MMSource):
             if self.amp_jitter:
                 amp = amp * (1.0 + rng.uniform(-self.amp_jitter, self.amp_jitter))
 
-            sigma = fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
-            spectrum += amp * np.exp(-0.5 * ((ppm - center) / sigma) ** 2)
+            spectrum += amp * causal_lineshape(ppm, center, gauss_ppm=fwhm)
 
-        return self._normalize(spectrum.astype(complex))
+        return self._normalize(spectrum)
 
 
 #**************************************************************************************************#
@@ -169,6 +194,14 @@ class Supplied(MMSource):
     - "path" to a ".npy" holding "[ppm, real, imag]" rows or a complex spectrum
       (then "ppm" must be given), or to a MATLAB ".mat" with an "exptDat"
       struct carrying "fid" / "sf" / "sw_h" — the layout the COWS release uses.
+
+    A complex spectrum is taken to come from a causal acquisition - an FID
+    transformed the way FSL-MRS or this package does, plotted on its own ppm
+    axis - and is passed through as it is. A real one (no imaginary part) is
+    read as the absorption part of such a signal, and the dispersion part it
+    must then have is its Hilbert transform (Kramers-Kronig), taken on the
+    data's axis after regridding, since the transform's sign follows the
+    direction of the axis it runs along.
     """
 
     def __init__(self, spectrum=None, ppm=None, path: Optional[str] = None):
@@ -178,6 +211,7 @@ class Supplied(MMSource):
             raise ValueError("Supplied needs spectrum+ppm, or a readable path.")
         self._spectrum = self._normalize(np.asarray(spectrum, complex))
         self._ppm = np.asarray(ppm, float)
+        self._absorption_only = not np.any(np.imag(self._spectrum))
 
     @staticmethod
     def _load(path: Path, ppm):
@@ -200,7 +234,10 @@ class Supplied(MMSource):
         raise ValueError(f"Unsupported MM file type: {path}")
 
     def profile(self, ppm_axis, rng, sf_mhz=None):
-        return self._regrid(self._spectrum, self._ppm, np.asarray(ppm_axis, float))
+        spectrum = self._regrid(self._spectrum, self._ppm, np.asarray(ppm_axis, float))
+        if self._absorption_only:
+            spectrum = hilbert(np.real(spectrum))
+        return spectrum
 
 
 #**************************************************************************************************#
@@ -219,7 +256,9 @@ class Measured(MMSource):
     FID sets named "{field}T_MM_{species}_{sequence}_{site}.fid"; the source
     picks the entry whose field strength is closest to the data's (from
     "sf_mhz" at call time, or "field_t" if given), preferring the requested
-    species.
+    species. The FID is transformed as this package transforms its own, so
+    the profile is causal because the acquisition was; it is regridded onto
+    the data's axis and otherwise passed through.
 
     Args:
         field_t: Field strength to match. None reads it off the data.
@@ -335,7 +374,10 @@ class SemiParametrized(MMSource):
     trusted (measured, or the parametrized template by default) while width and
     regional amplitude stay free. Per call the base profile is Gaussian-
     broadened by a draw from "broaden_ppm" and modulated by a smooth random
-    envelope of relative depth "amp_mod".
+    envelope of relative depth "amp_mod". Both keep the profile causal: the
+    broadening is a real kernel, which only damps the FID, and the envelope
+    shapes the absorption part, whose dispersion part is then re-derived by
+    Hilbert transform.
     """
 
     def __init__(self, base: Optional[MMSource] = None,
@@ -345,15 +387,21 @@ class SemiParametrized(MMSource):
         self.broaden_ppm = tuple(broaden_ppm)
         self.amp_mod = float(amp_mod)
 
+    @property
+    def varies(self) -> bool:
+        return bool(self.base.varies or self.broaden_ppm[1] > 0 or self.amp_mod > 0)
+
     def profile(self, ppm_axis, rng, sf_mhz=None):
         ppm = np.asarray(ppm_axis, float)
         spectrum = self.base.profile(ppm, rng, sf_mhz=sf_mhz)
 
         # Broaden by convolution with a Gaussian of the drawn width. The axis
-        # is uniform (it comes from an FFT grid), so the kernel is one stencil.
+        # is uniform (it comes from an FFT grid), so the kernel is one stencil;
+        # the median step rather than the first, since the Nyquist bin of an
+        # FSL-referenced axis may carry its alias.
         width = rng.uniform(*self.broaden_ppm)
         if width > 0:
-            dppm = abs(ppm[1] - ppm[0])
+            dppm = float(np.median(np.abs(np.diff(ppm))))
             sigma = width / (2.0 * np.sqrt(2.0 * np.log(2.0))) / dppm
             half = int(np.ceil(4 * sigma))
             kernel = np.exp(-0.5 * (np.arange(-half, half + 1) / sigma) ** 2)
@@ -362,14 +410,17 @@ class SemiParametrized(MMSource):
                         + 1j * np.convolve(np.imag(spectrum), kernel, mode='same'))
 
         # A slow cosine-series envelope: smooth regional amplitude freedom
-        # without introducing new peaks.
+        # without introducing new peaks. It is amplitude freedom of the
+        # components, so it acts on the absorption part, and the dispersion
+        # part follows from that (Kramers-Kronig) rather than being scaled
+        # alongside, which would leak a little of the FID to its end.
         if self.amp_mod > 0:
             x = np.linspace(0.0, np.pi, ppm.size)
             envelope = np.ones_like(x)
             for k in (1, 2, 3):
                 envelope += rng.uniform(-1.0, 1.0) * np.cos(k * x) / k
             envelope = 1.0 + self.amp_mod * (envelope - envelope.mean())
-            spectrum = spectrum * np.clip(envelope, 0.0, None)
+            spectrum = hilbert(np.real(spectrum) * np.clip(envelope, 0.0, None))
 
         return self._normalize(spectrum)
 
@@ -399,9 +450,16 @@ class Macromolecules(BaseModule):
         instance for full control.
     mm_scale : float
         MM amplitude relative to the spectrum's real max (default 0.15).
-        Pass a (min, max) range to Augmentrum to sample it per batch.
+        Pass a (min, max) range to Augmentrum to draw it per sample.
     source_params : dict
         Forwarded to the source's constructor when *mm_source* is a name.
+
+    A randomizable source (jittered, semi-parametrized) is drawn afresh for
+    every sample of a batch from this module's seeded generator; a fixed one
+    is shared. Peak positions are on the FSL-MRS / NIfTI-MRS ppm axis (protons
+    referenced to 4.65 ppm). Every source yields the spectrum of a causal
+    signal (see "MMSource"), so what is added starts at the first point of
+    the FID and decays, as tissue signal does.
 
     Examples
     --------
@@ -418,6 +476,9 @@ class Macromolecules(BaseModule):
 
     # An MM profile lives at ppm positions, which only exist in a spectrum.
     DOMAIN = Domain(spectral='frequency')
+
+    # The profile is scaled per sample, so the scale can differ per sample.
+    PER_SAMPLE_PARAMS = ('mm_scale',)
 
     SOURCES = {
         'parametrized': Parametrized,
@@ -442,30 +503,54 @@ class Macromolecules(BaseModule):
                 f"got {mm_source!r}."
             )
 
+    def _profiles(self, batch: int, ppm: np.ndarray, sf_mhz: float) -> np.ndarray:
+        """
+        One unit MM profile per sample, "(batch, N)".
+
+        A randomizable source is drawn per sample from one generator taken off
+        the module's seed stream, so a seed reproduces the whole batch; a fixed
+        source is built once and repeated.
+        """
+        rng = self.rng.numpy_rng()
+        if not self.source.varies:
+            return np.broadcast_to(self.source.profile(ppm, rng, sf_mhz=sf_mhz),
+                                   (batch, ppm.size)).copy()
+        return np.stack([self.source.profile(ppm, rng, sf_mhz=sf_mhz) for _ in range(batch)])
+
     def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
         """
         Add the MM profile to spectra on any tensor backend.
 
-        The profile is built once per batch in NumPy (drawing any source
-        randomness from this module's seeded generator) and promoted to the
-        data's backend; only the per-FID amplitude touches the data itself, so
-        gradients and device placement survive.
+        The profiles are built in NumPy, one per sample (drawing any source
+        randomness from this module's seeded generator), and promoted once to
+        the data's backend; only the per-FID amplitude touches the data itself,
+        so gradients and device placement survive.
+
+        Args:
+            data_array: Input spectra of shape "(batch, ..., n_points)"
+            water_array: Optional water reference (unchanged)
+            backend: Backend enum (unused)
+            **kwargs: Must contain "'sw_hz'" and "'sf_mhz'"; "'nucleus'" sets
+                the ppm reference (1H when absent)
         """
         sw_hz = kwargs.get('sw_hz')
         sf_mhz = kwargs.get('sf_mhz')
         if sw_hz is None or sf_mhz is None:
             raise ValueError("Macromolecules.process_tensor requires 'sw_hz' and "
                              "'sf_mhz' in kwargs")
+        nucleus = kwargs.get('nucleus', '1H')
 
         spec = data_array
-        n_points = spec.shape[-1]
+        shape = ops.shape(spec)
+        ndim = len(shape)
+        n_points = int(shape[-1])
+        batch = int(shape[0]) if ndim > 1 else 1
 
-        freq_hz = np.fft.fftshift(np.fft.fftfreq(n_points, d=1.0 / float(sw_hz)))
-        ppm = 4.7 - freq_hz / float(sf_mhz)
+        ppm = ppm_axis(n_points, float(sw_hz), float(sf_mhz), nucleus)
+        unit = batch_profile(self._profiles(batch, ppm, float(sf_mhz)), ndim)
 
-        unit = self.source.profile(ppm, self.rng.numpy_rng(), sf_mhz=float(sf_mhz))
-
-        amp = self.mm_scale * ops.amax(ops.abs(ops.real(spec)), axis=-1, keepdims=True)
+        amp_ref = ops.amax(ops.abs(ops.real(spec)), axis=-1, keepdims=True)
+        amp = per_sample_factor(self.mm_scale, ndim, amp_ref) * amp_ref
         mm_add = ops.cast_like(match_backend(unit, spec), spec) * ops.cast_like(amp, spec)
 
         return spec + mm_add, water_array

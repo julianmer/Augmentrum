@@ -43,10 +43,12 @@ augmenter2 = Augmentrum(
         'line_broadening',
         'baseline',
         'residual_water',
-        'eddy_current',
+        # a step's own kwargs reach that step only (lb_hz would otherwise
+        # also reach LineBroadening, and mode is a name every module has)
+        {'eddy_current': {'mode': 'synthetic'}},
         'spurious_echoes',
         'noise',
-        'apodization'
+        {'apodization': {'mode': 'exponential', 'lb_hz': 1.0}},
     ],
     backend='pytorch',
     batch_size=8,
@@ -56,10 +58,8 @@ augmenter2 = Augmentrum(
     lb_hz=4.0,
     gb_hz=2.5,
     baseline_frac=0.08,
-    water_amp=0.15,
-    eddy_mode='synthetic',
+    amplitude_scale=0.15,
     sigma_frac=0.025,
-    apod_mode='exponential'
 )
 augmenter2.show_pipeline(detailed=True)
 print()

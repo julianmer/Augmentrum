@@ -62,13 +62,10 @@ class TestNIfTIMRSExport:
             data=[dummy_nifti_mrs],
             pipeline=['coil_sampling', 'processing', 'phase', 'noise'],
             n_coils=(None, None),  # Use all coils
-            n_averages=(None, None),  # Use all averages
             zero_order_deg=10.0,
-            noise_amp=0.05,
+            sigma_frac=0.05,
             backend='numpy',
             batch_size=3,
-            val_frac=0.0,
-            test_frac=0.0,
             volatile=True
         )
 
@@ -107,12 +104,9 @@ class TestNIfTIMRSExport:
             water=[water],
             pipeline=['coil_sampling', 'processing', 'phase'],
             n_coils=(None, None),
-            n_averages=(None, None),
             zero_order_deg=10.0,
             backend='numpy',
             batch_size=2,
-            val_frac=0.0,
-            test_frac=0.0,
             volatile=True
         )
 
@@ -213,13 +207,10 @@ class TestHDF5Export:
             data=[dummy_nifti_mrs],
             pipeline=['coil_sampling', 'processing', 'phase', 'noise'],
             n_coils=(None, None),
-            n_averages=(None, None),
             zero_order_deg=10.0,
-            noise_amp=0.05,
+            sigma_frac=0.05,
             backend='numpy',
             batch_size=4,
-            val_frac=0.0,
-            test_frac=0.0,
             volatile=True
         )
 
@@ -268,12 +259,9 @@ class TestHDF5Export:
             water=[water],
             pipeline=['coil_sampling', 'processing', 'phase'],
             n_coils=(None, None),
-            n_averages=(None, None),
             zero_order_deg=10.0,
             backend='numpy',
             batch_size=2,
-            val_frac=0.0,
-            test_frac=0.0,
             volatile=True
         )
 
@@ -431,7 +419,6 @@ class TestExportErrors:
             data=[dummy_nifti_mrs],
             pipeline=['coil_sampling', 'processing'],
             n_coils=(None, None),
-            n_averages=(None, None),
             backend='numpy',
             batch_size=2,
             volatile=True
@@ -450,7 +437,6 @@ class TestExportErrors:
             data=[dummy_nifti_mrs],
             pipeline=['coil_sampling', 'processing'],
             n_coils=(None, None),
-            n_averages=(None, None),
             backend='numpy',
             batch_size=2,
             volatile=True

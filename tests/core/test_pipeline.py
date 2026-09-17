@@ -466,5 +466,149 @@ class TestPipelineIntegration:
         assert result_data.metadata_common == {}
 
 
+#**************************************************************************************************#
+#                                     Class TestPipelineSeeding                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# One seed derives the pipeline's own generator and every unseeded step's generator.               #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestPipelineSeeding:
+    """
+    Ranged parameters used to come from the global np.random state and every
+    module built by name from OS entropy, so nothing short of seeding the
+    world made a pipeline replay.
+    """
+
+    @staticmethod
+    def _steps():
+        from augmentrum.augmentation import LineBroadening, Noise
+        return [Noise(sigma_frac=0.02), LineBroadening()]
+
+    def test_seed_argument_fixes_ranged_draws(self):
+        kwargs = dict(user_kwargs={'lb_hz': (0.0, 10.0), 'sigma_frac': (0.0, 0.1)}, seed=3)
+        a = AugmentationPipeline(self._steps(), **kwargs)
+        b = AugmentationPipeline(self._steps(), **kwargs)
+
+        for _ in range(3):
+            pa, pb = a.sample_batch_parameters(4), b.sample_batch_parameters(4)
+            assert np.array_equal(pa[1]['lb_hz'], pb[1]['lb_hz'])
+            assert np.array_equal(pa[0]['sigma_frac'], pb[0]['sigma_frac'])
+
+    def test_seed_reaches_unseeded_steps_only(self):
+        from augmentrum.augmentation import Noise
+
+        pipeline = AugmentationPipeline([Noise(sigma_frac=0.02), Noise(sigma_frac=0.02, seed=11)],
+                                        seed=5)
+        derived, pinned = pipeline.steps
+
+        assert pinned.rng.seed == 11, "an explicit module seed must survive the pipeline seed"
+        assert derived.rng.seed != 11
+        assert derived.rng.seed == AugmentationPipeline(self._steps(), seed=5).steps[0].rng.seed
+
+    def test_reseed_restarts_the_streams(self):
+        pipeline = AugmentationPipeline(self._steps(), user_kwargs={'lb_hz': (0.0, 10.0)})
+        assert pipeline.seed is None
+
+        pipeline.reseed(8)
+        first = [pipeline.sample_batch_parameters(1)[1]['lb_hz'] for _ in range(3)]
+        pipeline.reseed(8)
+        again = [pipeline.sample_batch_parameters(1)[1]['lb_hz'] for _ in range(3)]
+        pipeline.reseed(9)
+        other = [pipeline.sample_batch_parameters(1)[1]['lb_hz'] for _ in range(3)]
+
+        assert first == again
+        assert first != other
+        assert pipeline.seed == 9 and 'seed=9' in repr(pipeline)
+
+    def test_unseeded_pipelines_do_not_share_the_global_state(self):
+        """Two unseeded pipelines differ, and np.random.seed does not steer them."""
+        np.random.seed(0)
+        a = AugmentationPipeline(self._steps(), user_kwargs={'lb_hz': (0.0, 10.0)})
+        np.random.seed(0)
+        b = AugmentationPipeline(self._steps(), user_kwargs={'lb_hz': (0.0, 10.0)})
+        draws_a = [a.sample_batch_parameters(1)[1]['lb_hz'] for _ in range(4)]
+        draws_b = [b.sample_batch_parameters(1)[1]['lb_hz'] for _ in range(4)]
+
+        assert draws_a != draws_b
+
+    def test_explicit_rng_is_used_instead_of_the_pipelines(self):
+        pipeline = AugmentationPipeline(self._steps(), user_kwargs={'lb_hz': (0.0, 10.0)}, seed=1)
+
+        own = pipeline.sample_batch_parameters(1, rng=np.random.default_rng(42))[1]['lb_hz']
+        again = pipeline.sample_batch_parameters(1, rng=np.random.default_rng(42))[1]['lb_hz']
+
+        assert own == again
+
+
+#**************************************************************************************************#
+#                                    Class TestPipelineStepKwargs                                  #
+#**************************************************************************************************#
+#                                                                                                  #
+# Per-step kwargs are stored aligned with the steps and override the globals for that step.        #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestPipelineStepKwargs:
+    """One global kwarg reached every step naming it; step kwargs reach one."""
+
+    @staticmethod
+    def _steps():
+        from augmentrum.augmentation import Apodization, LineBroadening
+        return [LineBroadening(), Apodization(mode='exponential', lb_hz=1.0)]
+
+    def test_step_kwargs_are_aligned_and_defaulted(self):
+        pipeline = AugmentationPipeline(self._steps())
+        assert pipeline.step_kwargs == [{}, {}]
+
+        pipeline = AugmentationPipeline(self._steps(), step_kwargs=[None, {'lb_hz': (1.0, 2.0)}])
+        assert pipeline.step_kwargs == [{}, {'lb_hz': (1.0, 2.0)}]
+
+    def test_misaligned_step_kwargs_raise(self):
+        with pytest.raises(ValueError, match="aligned with the steps"):
+            AugmentationPipeline(self._steps(), step_kwargs=[{}])
+
+    def test_step_kwargs_override_globals_for_their_step_only(self):
+        pipeline = AugmentationPipeline(self._steps(), user_kwargs={'lb_hz': (0.0, 10.0)},
+                                        step_kwargs=[{}, {'lb_hz': 3.0}], seed=0)
+
+        assert pipeline.module_params == {0: {'lb_hz': (0.0, 10.0)}, 1: {'lb_hz': 3.0}}
+        params = pipeline.sample_batch_parameters(2)
+        assert np.all((0.0 <= params[0]['lb_hz']) & (params[0]['lb_hz'] <= 10.0))
+        assert params[1]['lb_hz'] == 3.0
+
+    def test_global_on_two_steps_warns_naming_both(self):
+        with pytest.warns(UserWarning,
+                           match="LineBroadening \(step 0\) and Apodization \(step 1\)"):
+            AugmentationPipeline(self._steps(), user_kwargs={'lb_hz': (0.0, 10.0)})
+
+    def test_no_warning_once_one_step_overrides(self):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            AugmentationPipeline(self._steps(), user_kwargs={'lb_hz': (0.0, 10.0)},
+                                 step_kwargs=[{}, {'lb_hz': 3.0}])
+
+    def test_step_values_are_injected_per_batch_and_restored(self, dummy_nifti_single_coil):
+        pipeline = AugmentationPipeline(self._steps(), step_kwargs=[{'lb_hz': 4.0}, {}])
+        broadening = pipeline.steps[0]
+        assert broadening.lb_hz == 0.0
+
+        plus = NIfTI_MRS_Plus(nifti_list=[dummy_nifti_single_coil], backend=Backend.NUMPY,
+                              volatile=True)
+        seen = {}
+        original = broadening.process_tensor
+
+        def spy(*args, **kwargs):
+            seen['lb_hz'] = broadening.lb_hz
+            return original(*args, **kwargs)
+
+        broadening.process_tensor = spy
+        pipeline(plus, None, batch_params=pipeline.sample_batch_parameters(1))
+
+        assert seen['lb_hz'] == 4.0, "the step value did not reach the module"
+        assert broadening.lb_hz == 0.0, "the injected value was not restored"
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

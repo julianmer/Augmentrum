@@ -24,7 +24,7 @@ Here the *discovery* is automatic and only the per-variant detail is written by
 hand. "uncovered_classes" is what closes the gap: a class in the registry
 with no spec is a test failure, not silence.
 
-A module may need several specs — "Noise" has three ways of stating a
+A module may need several specs — "Noise" has four ways of stating a
 noise level, "BaselineAugmentation" three baseline models — so specs are a flat
 list of variants, not one per class.
 """
@@ -138,6 +138,7 @@ SPECS: List[ModuleSpec] = [
     ModuleSpec("FrequencyShift", None, {"shift_hz": 5.0}),
 
     ModuleSpec("Noise[sigma]", None, {"sigma": 0.01}),
+    ModuleSpec("Noise[snr]", None, {"snr": 20.0}),
     ModuleSpec("Noise[snr_db]", None, {"snr_db": 20.0}),
     ModuleSpec("Noise[sigma_frac]", None, {"sigma_frac": 0.02}),
 
@@ -183,6 +184,7 @@ SPECS: List[ModuleSpec] = [
     ModuleSpec("SpatialAugmentations", None, {"dim": 2, "prob": 1.0}, spatial=True,
                nifti_kwargs={"dim": 3}),
 
+    ModuleSpec("SpuriousEchoes[echo]", None, {"seed": 0}),
     ModuleSpec("SpuriousEchoes[replica]", None, {"mode": "replica"}),
     # The default echo (tau=0.1 s) falls beyond the short FIDs the sweeps use
     # and a shifted copy of nothing is exactly zero, so the sweep would skip
@@ -206,8 +208,17 @@ SPECS: List[ModuleSpec] = [
 #   discovery   #
 #***************#
 def registered_classes() -> Dict[str, Type[BaseModule]]:
-    """Distinct module classes reachable through "Augmentrum.AVAILABLE_MODULES"."""
-    return {c.__name__: c for c in Augmentrum.AVAILABLE_MODULES.values()}
+    """
+    Distinct module classes reachable through "Augmentrum.AVAILABLE_MODULES".
+
+    A registry value is a class or a "(class, fixed_kwargs)" alias; both are
+    resolved through "Augmentrum.resolve_module" so this cannot drift from it.
+    """
+    classes = {}
+    for name in Augmentrum.AVAILABLE_MODULES:
+        cls, _ = Augmentrum.resolve_module(name)
+        classes[cls.__name__] = cls
+    return classes
 
 
 def specs_for(name: str) -> List[ModuleSpec]:

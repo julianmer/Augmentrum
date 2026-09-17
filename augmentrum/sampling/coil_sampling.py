@@ -552,7 +552,10 @@ class CoilSampler(DimensionSampler):
     "deterministic"
         Keep every coil, or exactly the indices passed to the call.
 
-    Averages are a separate acquisition axis and have their own sampler; see
+    A drawn subset is kept on the water reference too: both acquisitions come
+    off the same receive elements, and a combination weighted by the water
+    needs the same coils on both sides. Averages are a separate acquisition
+    axis and have their own sampler; see
     :class:"augmentrum.sampling.AverageSampler".
 
     Args:
@@ -583,6 +586,10 @@ class CoilSampler(DimensionSampler):
     DIM_TAG = 'DIM_COIL'
     OPERATION = 'Coil Sampling'
     MODES = ('synthesize', 'reweight', 'random', 'deterministic')
+
+    # The receive array is shared hardware: drawing coils from the data draws
+    # the same ones from the water, along the water's own coil axis.
+    WATER_SHARES_DIM = True
 
     # Every mode runs natively on every backend: the tensor paths multiply
     # maps into a batch, the NIfTI-list paths do the same per subject — which
@@ -653,13 +660,17 @@ class CoilSampler(DimensionSampler):
         Args:
             data_array: "(batch, X, Y, Z, T)" to synthesize onto, or a batch
                 carrying DIM_COIL to draw from.
-            water_array: Passed through unchanged - a water reference is a
+            water_array: When drawing, the same coil subset is kept along the
+                water's own coil axis (found via "water_dim_tags"), since both
+                acquisitions share the receive array. Synthesis and
+                reweighting pass it through unchanged - a water reference is a
                 separate acquisition and gets its own coils if it needs them.
             backend: Backend enum (unused; kept for the BaseModule signature).
-            **kwargs: Absorbs what BaseModule injects, including "dim_tags".
+            **kwargs: Absorbs what BaseModule injects, including "dim_tags"
+                and "water_dim_tags".
 
         Returns:
-            "(data, water_unchanged)".
+            "(data, water)".
         """
         if self.mode == 'reweight':
             return self._reweight(data_array, water_array, **kwargs)
@@ -799,7 +810,8 @@ class CoilSampler(DimensionSampler):
 
         Args:
             data_list: List of NIFTI_MRS objects.
-            water_list: Passed through unchanged.
+            water_list: Drawn from along its coil axis when drawing; passed
+                through unchanged by synthesis and reweighting.
             indices: For the drawing modes — exactly what to keep.
             **kwargs: Additional arguments.
 
