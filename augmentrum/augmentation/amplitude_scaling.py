@@ -22,8 +22,8 @@ from typing import List, Optional, Union, Tuple
 import numpy as np
 
 from augmentrum.core.base_module import BaseModule
+from augmentrum.processing.utils import to_backend
 from nifti_mrs_plus import Backend
-from nifti_mrs_plus.ops import match_backend
 
 
 #**************************************************************************************************#
@@ -173,7 +173,7 @@ class AmplitudeScaling(BaseModule):
         scales = scales.reshape(scale_shape)
 
         # Apply scaling
-        data_scaled = data * match_backend(scales, data)
+        data_scaled = data * to_backend(scales, data)
 
         return data_scaled, water
 

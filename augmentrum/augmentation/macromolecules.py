@@ -27,10 +27,9 @@ from scipy.signal import hilbert
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from augmentrum.processing.utils import (ppm_axis, batch_profile, per_sample_factor,
-                                         causal_lineshape)
+                                         causal_lineshape, to_backend)
 from nifti_mrs_plus import Backend
 from nifti_mrs_plus import ops
-from nifti_mrs_plus.ops import match_backend
 
 
 #: Approximate consensus macromolecular components as (ppm, FWHM_ppm, rel_amp).
@@ -551,6 +550,6 @@ class Macromolecules(BaseModule):
 
         amp_ref = ops.amax(ops.abs(ops.real(spec)), axis=-1, keepdims=True)
         amp = per_sample_factor(self.mm_scale, ndim, amp_ref) * amp_ref
-        mm_add = ops.cast_like(match_backend(unit, spec), spec) * ops.cast_like(amp, spec)
+        mm_add = ops.cast_like(to_backend(unit, spec), spec) * ops.cast_like(amp, spec)
 
         return spec + mm_add, water_array

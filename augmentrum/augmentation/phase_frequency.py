@@ -20,8 +20,9 @@ from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
+from augmentrum.processing.utils import to_backend
 from nifti_mrs_plus import Backend
-from nifti_mrs_plus.ops import fft, ifft, fftshift, ifftshift, match_backend
+from nifti_mrs_plus.ops import fft, ifft, fftshift, ifftshift
 
 
 #**************************************************************************************************#
@@ -157,7 +158,7 @@ class PhaseShift(BaseModule):
                                              len(fid.shape)))
             # complex factor * any-backend tensor — works everywhere
             phase_factor = np.exp(-1j * phi)
-            fid = fid * match_backend(np.asarray(phase_factor), fid)
+            fid = fid * to_backend(np.asarray(phase_factor), fid)
 
         # First-order: needs spectral domain
         if self.first_order_deg != 0.0:
@@ -170,7 +171,7 @@ class PhaseShift(BaseModule):
         """Apply zero-order phase shift (any backend tensor)."""
         phi_rad = math.radians(phase_deg)
         factor = np.array(np.exp(-1j * phi_rad))
-        return fid * match_backend(factor, fid)
+        return fid * to_backend(factor, fid)
 
     @staticmethod
     def _first_order_phase(fid, phc1_deg: float):
@@ -192,7 +193,7 @@ class PhaseShift(BaseModule):
         ramp = np.exp(1j * np.deg2rad(phc1_deg * u)).reshape(ramp_shape)
 
         # Apply the ramp; the caller puts the data back where it was
-        return spec * match_backend(ramp, spec)
+        return spec * to_backend(ramp, spec)
 
 
 #**************************************************************************************************#
@@ -316,4 +317,4 @@ class FrequencyShift(BaseModule):
         shift_factor = np.exp(1j * 2.0 * math.pi * shift * t)
 
         # Multiply: convert phasor to same backend, preserves gradients
-        return fid * match_backend(shift_factor, fid)
+        return fid * to_backend(shift_factor, fid)

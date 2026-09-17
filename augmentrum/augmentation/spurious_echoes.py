@@ -25,7 +25,6 @@ from augmentrum.processing.domain import Domain
 from augmentrum.processing.utils import batch_profile, ppm_reference, to_backend
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
-from nifti_mrs_plus.ops import match_backend
 
 
 #**************************************************************************************************#
@@ -495,25 +494,25 @@ class SpuriousEchoes(BaseModule):
                 envelope = np.stack([self._replica_envelope(e, t) for e in per_sample])
                 delayed = self._delayed(data_array, drawn['shift'])
                 ghost = delayed * ops.cast_like(
-                    match_backend(batch_profile(envelope, ndim), data_array), data_array)
+                    to_backend(batch_profile(envelope, ndim), data_array), data_array)
 
             else:  # hybrid: the delayed copy under the localized envelope
                 modulation = np.stack([self._hybrid_modulation(e, t) for e in per_sample])
                 delayed = self._delayed(data_array, drawn['shift'])
-                mod = ops.cast_like(match_backend(batch_profile(modulation, ndim), data_array),
+                mod = ops.cast_like(to_backend(batch_profile(modulation, ndim), data_array),
                                     data_array)
 
                 alpha = batch_profile(drawn['amp'][:, None], ndim)
                 if np.all(np.asarray(drawn['T2']) >= 1e4):
                     ghost = delayed * mod * ops.cast_like(
-                        match_backend(alpha.astype(np.complex128), data_array), data_array)
+                        to_backend(alpha.astype(np.complex128), data_array), data_array)
                 else:
                     max_abs = ops.amax(ops.abs(data_array), axis=-1, keepdims=True) + 1e-30
                     if self.alpha_reference == 'tau':
                         amp_ref = self._at_delay(data_array, drawn['shift'])
                     else:  # 'max'
                         amp_ref = max_abs
-                    scale = ops.cast_like(match_backend(alpha, amp_ref), amp_ref) * amp_ref
+                    scale = ops.cast_like(to_backend(alpha, amp_ref), amp_ref) * amp_ref
                     ghost = (ops.cast_like(scale, data_array)
                              * (delayed / ops.cast_like(max_abs, delayed)) * mod)
 
@@ -522,7 +521,7 @@ class SpuriousEchoes(BaseModule):
         if ghost_total is None:
             return data_array, water_array
         if mask is not None:
-            ghost_total = ghost_total * ops.cast_like(match_backend(mask, data_array),
+            ghost_total = ghost_total * ops.cast_like(to_backend(mask, data_array),
                                                       data_array)
         return data_array + ghost_total, water_array
 

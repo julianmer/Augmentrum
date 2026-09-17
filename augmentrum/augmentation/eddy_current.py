@@ -19,10 +19,10 @@ from typing import Optional, List, Tuple
 from scipy.signal import butter, filtfilt
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import batch_profile
+from augmentrum.processing.utils import batch_profile, to_backend
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
-from nifti_mrs_plus.ops import to_numpy, match_backend
+from nifti_mrs_plus.ops import to_numpy
 
 
 #**************************************************************************************************#
@@ -386,7 +386,7 @@ class EddyCurrent(BaseModule):
 
         The phase trajectories are generated in NumPy (SciPy filters), one
         per sample, then applied as a complex phasor multiplication which
-        stays in the native backend — "data * match_backend(phasor, data)".
+        stays in the native backend — "data * to_backend(phasor, data)".
 
         Args:
             data_array: Input tensor of shape "(batch, ..., n_points)"
@@ -409,8 +409,10 @@ class EddyCurrent(BaseModule):
         n_points = int(shape[-1])
         batch = int(shape[0]) if ndim > 1 else 1
 
+        # Only a water-mode draw without a library reads the water: fetching it
+        # from a device otherwise costs a wait for nothing.
         water_of = None
-        if water_array is not None:
+        if water_array is not None and self.mode == 'water' and not self._library:
             rows = self._water_rows(to_numpy(water_array), batched=True)
             # The water shares the data's dwell time; only its length may differ
             water_of = lambda i: (rows[min(i, rows.shape[0] - 1)], float(sw_hz))
@@ -420,5 +422,5 @@ class EddyCurrent(BaseModule):
         phasor = batch_profile(self._phasors(phases), ndim)
 
         # Apply phasor: backend-native multiply (preserves gradients for data)
-        return data_array * ops.cast_like(match_backend(phasor, data_array), data_array), \
+        return data_array * ops.cast_like(to_backend(phasor, data_array), data_array), \
             water_array

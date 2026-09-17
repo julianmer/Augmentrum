@@ -19,10 +19,9 @@ from typing import Optional, List, Dict
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from augmentrum.processing.utils import (ppm_axis, ppm_reference, batch_profile,
-                                         causal_lineshape)
+                                         causal_lineshape, to_backend)
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
-from nifti_mrs_plus.ops import match_backend
 
 
 #**************************************************************************************************#
@@ -236,7 +235,7 @@ class ArtificialPeaks(BaseModule):
         Everything touching the data runs on the data's own backend, so
         gradients and device placement survive. Only the peak shapes are built
         in NumPy: they depend on the FID grid and the drawn parameters alone,
-        one profile per sample, promoted once with "match_backend".
+        one profile per sample, promoted once with "to_backend".
 
         Args:
             data_array: Input spectra of shape "(batch, ..., n_points)"
@@ -272,7 +271,7 @@ class ArtificialPeaks(BaseModule):
         peak_ref = ops.amax(magnitude, axis=-1, keepdims=True)
         peak_ref = ops.where(peak_ref > 0, peak_ref, ops.cast_like(peak_ref * 0.0 + 1.0, peak_ref))
 
-        contam = ops.cast_like(match_backend(unit_contam, spec), spec) \
+        contam = ops.cast_like(to_backend(unit_contam, spec), spec) \
             * ops.cast_like(peak_ref, spec)
 
         # 3. Add contamination in the spectral domain (backend-native)
