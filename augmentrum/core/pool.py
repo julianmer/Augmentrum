@@ -388,8 +388,16 @@ class TensorPool:
         return self.key == self.fingerprint(data, water) and self.source[0] is data
 
     def _stack(self, group):
-        """The group's values as one tensor on the pool's backend and device."""
-        arr = np.stack([nifti[:] for nifti in group.nifti_list], axis=0)
+        """
+        The group's values as one tensor on the pool's backend and device.
+
+        Stacked into C order: NIfTI arrays come in Fortran order, and a pool
+        that kept it would make every gather stride across the whole array.
+        """
+        first = group.nifti_list[0][:]
+        arr = np.empty((len(group),) + first.shape, dtype=first.dtype)
+        for i, nifti in enumerate(group.nifti_list):
+            arr[i] = first if i == 0 else nifti[:]
         if self.backend == Backend.PYTORCH:
             import torch
             tensor = torch.from_numpy(arr)
