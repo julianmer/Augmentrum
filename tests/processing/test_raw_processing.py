@@ -1039,3 +1039,102 @@ class TestTensorGradients:
             met_t.copy(), wat_t.copy(), sw_hz=SW, sf_mhz=SF, dim_tags=TAGS)
         err = np.abs(out_met.detach().numpy() - ref_met).max() / np.abs(ref_met).max()
         assert err < 1e-6
+
+
+#**************************************************************************************************#
+#                                  Class TestPerSampleFrequency                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# A batch of scans acquired at slightly different centre frequencies: each is processed at its     #
+# own, so what a scan comes out as does not depend on who shares its batch.                        #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestPerSampleFrequency:
+    """Scans of different sessions keep their own spectrometer frequency in a batch."""
+
+    OFFSET = 7e-6                      # the spread of one scanner's referencing (COWS: 905 Hz)
+
+    def _batch(self, seed=3):
+        """Two subjects and the frequencies they were acquired at."""
+        mets, wats, met_t, wat_t = _synth_batch(seed)
+        return mets, wats, met_t, wat_t, np.array([SF, SF * (1 + self.OFFSET)])
+
+    @pytest.mark.parametrize('method', ['fsl-mrs', 'torch'])
+    @pytest.mark.parametrize('remove_water', [False, True])
+    def test_a_sample_is_processed_at_its_own_frequency(self, remove_water, method):
+        """
+        Each sample equals what it gives alone, whatever its position in the batch.
+
+        Exactly on the NumPy engine, except with water removal: its truncated SVD
+        starts from a random vector, so that path only repeats itself to about 1e-13,
+        run to run. The torch engine's batched arithmetic rounds differently for one
+        sample and for two (1e-16, with one frequency too); a sample processed at
+        another's frequency is off by about 1e-3.
+        """
+        _, _, met_t, wat_t, sf = self._batch()
+        flags = dict(volatile=True, remove_water=remove_water, registration_method=method)
+        tolerance = 1e-10 if remove_water else (0.0 if method == 'fsl-mrs' else 1e-12)
+
+        alone = [RawProcessor(**flags).process_tensor(
+            met_t[i:i + 1], wat_t[i:i + 1], sw_hz=SW, sf_mhz=float(sf[i]), dim_tags=TAGS)[0]
+            for i in range(len(sf))]
+
+        for order in ([0, 1], [1, 0]):
+            got, _ = RawProcessor(**flags).process_tensor(
+                met_t[order], wat_t[order], sw_hz=SW, sf_mhz=float(sf[order[0]]),
+                sf_mhz_samples=sf[order], dim_tags=TAGS)
+            for position, subject in enumerate(order):
+                assert _rel(got[position], alone[subject][0]) <= tolerance, \
+                    f'subject {subject} differs when processed at position {position}'
+
+    def test_one_frequency_for_the_batch_is_unchanged(self):
+        """Equal per-sample values are the scalar path, bit for bit."""
+        _, _, met_t, wat_t, _ = self._batch()
+
+        ref, _ = RawProcessor(volatile=True).process_tensor(
+            met_t, wat_t, sw_hz=SW, sf_mhz=SF, dim_tags=TAGS)
+        got, _ = RawProcessor(volatile=True).process_tensor(
+            met_t, wat_t, sw_hz=SW, sf_mhz=SF, sf_mhz_samples=np.full(len(met_t), SF),
+            dim_tags=TAGS)
+        assert np.array_equal(got, ref)
+
+    def test_frequencies_that_move_a_window_are_refused(self):
+        """A batch mixing fields or nuclei cannot share one set of ppm bounds."""
+        _, _, met_t, wat_t, _ = self._batch()
+        with pytest.raises(ValueError, match='different ppm windows'):
+            RawProcessor(volatile=True).process_tensor(
+                met_t, wat_t, sw_hz=SW, sf_mhz=SF, sf_mhz_samples=np.array([SF, 2 * SF]),
+                dim_tags=TAGS)
+
+    def test_the_dispatch_reads_the_frequencies_off_the_headers(self):
+        """Through NIfTI_MRS_Plus the values come from the scans themselves."""
+        mets, wats, met_t, wat_t, sf = self._batch()
+        mets = [gen_nifti_mrs(m[:], 1 / SW, float(f)) for m, f in zip(mets, sf)]
+        wats = [gen_nifti_mrs(w[:], 1 / SW, float(f)) for w, f in zip(wats, sf)]
+        for nifti in mets + wats:
+            nifti.set_dim_tag(4, 'DIM_COIL')
+            nifti.set_dim_tag(5, 'DIM_DYN')
+
+        data = NIfTI_MRS_Plus(nifti_list=[m.copy() for m in mets], backend=Backend.NUMPY)
+        water = NIfTI_MRS_Plus(nifti_list=[w.copy() for w in wats], backend=Backend.NUMPY)
+        got, _ = RawProcessor(volatile=True)(data, water)
+
+        for i, frequency in enumerate(sf):
+            alone, _ = RawProcessor(volatile=True).process_tensor(
+                met_t[i:i + 1], wat_t[i:i + 1], sw_hz=SW, sf_mhz=float(frequency), dim_tags=TAGS)
+            assert np.array_equal(np.squeeze(got.get_data(Backend.NUMPY)[i]),
+                                  np.squeeze(alone[0]))
+
+    def test_masked_samples_keep_their_own_frequency(self):
+        """The NumPy engines' per-sample path (drawn coils) processes each sample at its own."""
+        _, _, met_t, wat_t, sf = self._batch()
+        keep = np.array([[True, False, True], [True, True, False]])
+        got, _ = RawProcessor(volatile=True).process_tensor(
+            met_t, wat_t, sw_hz=SW, sf_mhz=float(sf[0]), sf_mhz_samples=sf, dim_tags=TAGS,
+            dim_masks={'DIM_COIL': keep})
+        for i, frequency in enumerate(sf):
+            coils = np.flatnonzero(keep[i])
+            alone, _ = RawProcessor(volatile=True).process_tensor(
+                met_t[i:i + 1].take(coils, axis=4), wat_t[i:i + 1].take(coils, axis=5),
+                sw_hz=SW, sf_mhz=float(frequency), dim_tags=TAGS)
+            assert _rel(got[i], alone[0]) == 0.0

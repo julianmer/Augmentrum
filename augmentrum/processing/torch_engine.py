@@ -28,14 +28,14 @@ import numpy as np
 import torch
 
 # own
-from augmentrum.processing.utils import ppm_shift_axis, ppm_window
+from augmentrum.processing.utils import ppm_reference, ppm_shift_axis, ppm_window
 
 
 __all__ = ['real_of', 'complex_of', 'tiny', 'fid_to_spec', 'masked_median', 'noise_moments', 'noise_covariance', 'reference_gram',
            'combine_coils', 'principal_vector', 'wsvd_weights', 'align', 'alignment_phasor',
            'unlike_mask', 'unwrap', 'ecc_phase', 'peak_phase', 'peak_shift_hz', 'shift_phasor',
            'first_true', 'upload', 'constant', 'window_spans', 'Step', 'run_steps', 'GraphedSteps',
-           'wsvd_weight_steps', 'peak_shift_steps']
+           'wsvd_weight_steps', 'peak_shift_steps', 'peak_shift_each']
 
 
 #: FSL-MRS estimate_noise_cov: the last tenth of every FID is noise.
@@ -1145,6 +1145,22 @@ def _peak_hz(peak, n, sw_hz, spans, reference_ppm, sf_mhz):
     axis = constant(('ppm axis', n, sw_hz, sf_mhz, first, last),
                     lambda: ppm_shift_axis(n, sw_hz, sf_mhz)[first:last], peak.device)
     return (axis[peak] - reference_ppm) * sf_mhz
+
+
+def peak_shift_each(fids, sw_hz, spans, reference_ppm, sf_mhz):
+    """
+    "peak_shift_hz" with every FID read against its own spectrometer frequency,
+    *sf_mhz* a (...) tensor on the FIDs' device: a batch of scans from different
+    sessions, whose ppm windows "RawProcessor._sf_samples" has checked to be the
+    same. The arithmetic is "_peak_hz"'s, in its order, on device values, so it
+    needs no step and runs inside a graph.
+    """
+    spec, first, last = _padded_window(fids, sw_hz, None, None, spans)
+    peak = spec.abs().argmax(dim=-1)
+    n = 4 * fids.shape[-1]
+    hz = constant(('shift axis hz', n, sw_hz, first, last),
+                  lambda: np.linspace(-sw_hz / 2, sw_hz / 2, n)[first:last], fids.device)
+    return (hz[peak] / sf_mhz + ppm_reference('1H') - reference_ppm) * sf_mhz
 
 
 def shift_phasor(shift_hz, n, sw_hz, dtype):

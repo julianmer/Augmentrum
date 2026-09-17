@@ -406,6 +406,22 @@ class BaseModule(ABC):
             if sf is not None:
                 kwargs['sf_mhz'] = sf[0] if hasattr(sf, '__getitem__') else sf
 
+        # One batch can hold scans of different sessions, whose centre frequencies
+        # differ by the scanner's own referencing (COWS: 905 Hz over 90 scans). The
+        # scalar above is the first scan's, so without this every other sample would
+        # be processed at a frequency that is not its own, and what a scan comes out
+        # as would depend on who shares its batch. Modules that care read the
+        # per-sample values; the scalar stays for everything else.
+        if 'sf_mhz_samples' not in kwargs and data.n_subjects > 1:
+            try:
+                values = np.asarray(
+                    [float(v[0] if hasattr(v, '__getitem__') else v)
+                     for v in (n.spectrometer_frequency for n in data.nifti_list)], dtype=float)
+            except Exception:
+                values = None
+            if values is not None and values.size and not np.all(values == values[0]):
+                kwargs['sf_mhz_samples'] = values
+
         # Inject spatial geometry (matrix, voxel size, FOV) the same way, so
         # modules that need to reason about k-space read it off the NIfTI-MRS
         # data rather than having it passed in by hand and drifting from it.

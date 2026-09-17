@@ -547,6 +547,66 @@ class TestGraphedEngine:
         for graphed, eager in zip(batches(True), batches(False)):
             assert torch.equal(graphed, eager)
 
+    def test_per_sample_frequencies_replay_exactly(self):
+        """Each scan's own frequency is an input of the graphs: one signature, eager results."""
+        _, _, met_t, wat_t = _synth_batch()
+        met, wat = torch.from_numpy(met_t).cuda(), torch.from_numpy(wat_t[..., 0]).cuda()
+        eager, graphed = self._processors()
+        for k in range(5):
+            sf = SF * (1 + 1e-6 * np.array([k, -k - 1.0]))
+            call = dict(sw_hz=SW, sf_mhz=float(sf[0]), sf_mhz_samples=sf, dim_tags=TAGS,
+                        water_dim_tags=WATER_TAGS)
+            ref, ref_water = eager.process_tensor(met, wat, **call)
+            got, got_water = graphed.process_tensor(met, wat, **call)
+            assert torch.equal(got, ref) and torch.equal(got_water, ref_water)
+            for i, frequency in enumerate(sf):
+                alone, _ = eager.process_tensor(met[i:i + 1], wat[i:i + 1], sw_hz=SW,
+                                                sf_mhz=float(frequency), dim_tags=TAGS,
+                                                water_dim_tags=WATER_TAGS)
+                assert _rel(got[i].cpu().numpy(), alone[0].cpu().numpy()) < 1e-12
+        assert len(graphed._graphs) == 1, 'the calls share one signature'
+
+    def test_a_pooled_pipeline_takes_every_scans_frequency(self):
+        """Through Augmentrum: the pool's cached frequencies, each scan processed at its own."""
+        from augmentrum import Augmentrum
+        from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+        from tests.processing.test_raw_processing import _synth_niftis as _niftis
+
+        sfs = SF * (1 + 1e-6 * np.arange(4))
+        mets, wats = [], []
+        for met, wat, frequency in zip(*_niftis(4), sfs):
+            mets.append(gen_nifti_mrs(met[:], 1 / SW, float(frequency)))
+            mets[-1].set_dim_tag(4, 'DIM_COIL')
+            mets[-1].set_dim_tag(5, 'DIM_DYN')
+            wats.append(gen_nifti_mrs(wat[:][..., 0], 1 / SW, float(frequency)))
+            wats[-1].set_dim_tag(4, 'DIM_COIL')
+
+        def batches(graphs):
+            aug = Augmentrum(mets, wats, pipeline=['processing'], registration_method='torch',
+                             backend='pytorch', device='cuda', batch_size=3, volatile=True,
+                             seed=5)
+            for step in aug.pipelines['train'].steps:
+                if isinstance(step, RawProcessor):
+                    step.CUDA_GRAPHS = graphs
+            loader = aug.dataloader()
+            out = [next(loader)[0] for _ in range(6)]
+            pools = [held[1] for held in aug._pools.values() if held[1] is not None]
+            assert any('RawProcessor.sf_mhz' in pool._cache for pool in pools)
+            return out
+
+        def alone(i, frequency):
+            return RawProcessor(registration_method='torch', volatile=True).process_tensor(
+                torch.from_numpy(np.moveaxis(mets[i][:], 3, -1)[None]).cuda(),
+                torch.from_numpy(wats[i][:][None]).cuda(), sw_hz=SW, sf_mhz=float(frequency),
+                dim_tags=TAGS, water_dim_tags=WATER_TAGS)[0][0].cpu().numpy()
+
+        own = [alone(i, frequency) for i, frequency in enumerate(sfs)]
+        assert _rel(alone(0, sfs[1]), own[0]) > 1e-6, 'the offsets must matter'
+        for graphed, eager in zip(batches(True), batches(False)):
+            assert torch.equal(graphed, eager)
+            for sample in graphed:           # the subject it is, at that subject's frequency
+                assert min(_rel(sample.cpu().numpy(), ref) for ref in own) < 1e-12
+
 
 def test_uploads_match_the_backend_conversion():
     """to_backend is ops.match_backend (or asarray_like) in values, dtype and device."""

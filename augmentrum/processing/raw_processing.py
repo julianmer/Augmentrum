@@ -24,7 +24,7 @@ import warnings
 from nifti_mrs_plus import ops
 
 # own
-from augmentrum.processing.utils import (safe_squeeze, fid_to_spec,
+from augmentrum.processing.utils import (safe_squeeze, fid_to_spec, ppm_reference,
                                          ppm_shift_axis, ppm_window, move_axis)
 from augmentrum.processing.domain import Domain
 from augmentrum.core.base_module import BaseModule
@@ -576,6 +576,49 @@ class RawProcessor(BaseModule):
                           'needs ten per coil); combining coils without prewhitening.',
                           RuntimeWarning)
 
+    @staticmethod
+    def _per_sample(values, ndim):
+        """Per-sample values shaped to broadcast against a tensor's leading axis."""
+        return np.asarray(values, dtype=float).reshape((-1,) + (1,) * (ndim - 1))
+
+    @staticmethod
+    def _sf_samples(values, batch, n_points, sw_hz):
+        """
+        The per-sample spectrometer frequencies, or None when one value serves the batch.
+
+        A batch is sliced with one pair of ppm bounds, so the frequencies may differ
+        only by less than a bin - which is what a scanner's own referencing does (parts
+        per million), not what a different field or nucleus does. The latter is refused
+        rather than silently processed at one scan's frequency.
+
+        Args:
+            values: The batch's frequencies in MHz, or None.
+            batch: How many samples the batch has.
+            n_points: Points per FID; the windows are also checked zero-filled and
+                truncated by a point, as the engines slice them.
+            sw_hz: Spectral width in Hz.
+
+        Returns:
+            (batch,) array of frequencies, or None when they agree.
+        """
+        if values is None:
+            return None
+        sf = np.atleast_1d(np.asarray(values, dtype=float)).ravel()
+        if sf.size == 1 or bool(np.all(sf == sf[0])):
+            return None
+        if sf.size != batch:
+            raise ValueError(f"'sf_mhz_samples' has {sf.size} values for a batch of {batch}.")
+        for n in (n_points, 4 * n_points, n_points - 1, 4 * (n_points - 1)):
+            for lim in ((2.9, 3.1), (4.55, 4.7), (0.2, 4.2), (0.0, 8.0), (-0.15, 0.15)):
+                # the bounds move monotonically with the frequency, so the extremes decide
+                if ppm_window(n, sw_hz, float(sf.min()), lim) != \
+                        ppm_window(n, sw_hz, float(sf.max()), lim):
+                    raise ValueError(
+                        'RawProcessor got scans whose spectrometer frequencies resolve '
+                        f'different ppm windows ({sf.min():.6f}-{sf.max():.6f} MHz moves '
+                        f'{lim} ppm across a bin): process them in separate batches.')
+        return sf
+
     def process_tensor(self, data_array, water_array=None, backend=Backend.NUMPY, **kwargs):
         """
         Runs the processing pipeline on a batched tensor, spectral axis last.
@@ -602,11 +645,17 @@ class RawProcessor(BaseModule):
             raise ValueError("RawProcessor needs 'sw_hz' and 'sf_mhz' — provide them or process "
                              "data with header metadata attached.")
 
+        sf_samples = self._sf_samples(kwargs.get('sf_mhz_samples'), ops.shape(data_array)[0],
+                                      ops.shape(data_array)[-1], sw_hz)
+        if sf_samples is not None:
+            sf_mhz = float(sf_samples[0])       # every sample resolves the same ppm windows
+
         masks = {tag: mask for tag, mask in (kwargs.get('dim_masks') or {}).items()
                  if mask is not None}
         self.dim_masks_ = {}
         if masks and self.registration_method != 'torch':
-            return self._process_per_sample(data_array, water_array, backend, masks, **kwargs)
+            return self._process_per_sample(data_array, water_array, backend, masks, sf_samples,
+                                            **kwargs)
 
         met, wat = data_array, water_array
         self._warned_no_prewhiten = False
@@ -631,7 +680,7 @@ class RawProcessor(BaseModule):
         if self.registration_method == 'torch':
             met, wat = self._process_torch(met, wat, tags, wtags, sw_hz, sf_mhz, masks,
                                            kwargs.get('pool_origin'),
-                                           kwargs.get('water_pool_origin'))
+                                           kwargs.get('water_pool_origin'), sf_samples)
             if wat is not None and len(ops.shape(wat)) > 5:
                 wat = move_axis(wat, -1, self.SPECTRAL_AXIS)
             return met, wat
@@ -667,10 +716,10 @@ class RawProcessor(BaseModule):
             wat = wat[..., 1:] if wat is not None else None
 
         if self.remove_water:
-            met = self.water_removal(met, sw_hz, sf_mhz)
+            met = self.water_removal(met, sw_hz, sf_mhz, sf_samples)
 
         if self.shift_ref:
-            met = self.shift_to_reference(met, sw_hz, sf_mhz)
+            met = self.shift_to_reference(met, sw_hz, sf_mhz, sf_samples)
 
         if self.phase_correct:
             met, wat = self.phase_correction(met, wat, sw_hz, sf_mhz)
@@ -1080,7 +1129,7 @@ class RawProcessor(BaseModule):
         wat = wat * ops.match_backend(phasor, wat) if wat is not None else None
         return met, wat
 
-    def water_removal(self, met, sw_hz, sf_mhz):
+    def water_removal(self, met, sw_hz, sf_mhz, sf_samples=None):
         """
         Removes the residual water peak, the tensor form of HLSVD.
 
@@ -1095,6 +1144,7 @@ class RawProcessor(BaseModule):
             met: Metabolite tensor, spectral axis last.
             sw_hz: Spectral width in Hz.
             sf_mhz: Spectrometer frequency in MHz.
+            sf_samples: Per-sample frequencies, when the batch's scans differ.
 
         Returns:
             Metabolite tensor with the water model subtracted.
@@ -1113,10 +1163,11 @@ class RawProcessor(BaseModule):
             hankel = np.lib.stride_tricks.sliding_window_view(fid, m + 1)   # (n-m, m+1)
             uk[i] = svds(hankel, k=k)[0]
         uk = uk.reshape(arr.shape[:-1] + (n - m, k))
-        model = self._hlsvd_water_model(uk, arr, sw_hz, sf_mhz, (-0.15, 0.15), k=k)
+        sf = sf_mhz if sf_samples is None else self._per_sample(sf_samples, arr.ndim)
+        model = self._hlsvd_water_model(uk, arr, sw_hz, sf, (-0.15, 0.15), k=k)
         return met - ops.match_backend(model, met)
 
-    def shift_to_reference(self, met, sw_hz, sf_mhz):
+    def shift_to_reference(self, met, sw_hz, sf_mhz, sf_samples=None):
         """
         Shifts the peak found in (2.9, 3.1) ppm to the tCr reference 3.027 ppm.
 
@@ -1127,6 +1178,7 @@ class RawProcessor(BaseModule):
             met: Metabolite tensor, spectral axis last.
             sw_hz: Spectral width in Hz.
             sf_mhz: Spectrometer frequency in MHz.
+            sf_samples: Per-sample frequencies, when the batch's scans differ.
 
         Returns:
             Frequency-shifted metabolite tensor.
@@ -1139,7 +1191,12 @@ class RawProcessor(BaseModule):
             [arr, np.zeros(arr.shape[:-1] + (3 * n,), dtype=arr.dtype)], axis=-1))
         first, last = ppm_window(4 * n, sw_hz, sf_mhz, (2.9, 3.1))
         peak = np.argmax(np.abs(spec[..., first:last]), axis=-1)
-        shift_hz = (ppm_shift_axis(4 * n, sw_hz, sf_mhz)[first:last][peak] - 3.027) * sf_mhz
+        if sf_samples is None:
+            shift_hz = (ppm_shift_axis(4 * n, sw_hz, sf_mhz)[first:last][peak] - 3.027) * sf_mhz
+        else:                        # "ppm_shift_axis" per sample, written out to stay vectorized
+            sf = self._per_sample(sf_samples, peak.ndim)
+            hz = np.linspace(-sw_hz / 2, sw_hz / 2, 4 * n)[first:last][peak]
+            shift_hz = (hz / sf + ppm_reference('1H') - 3.027) * sf
         t = np.linspace(0, n / sw_hz, n)                            # FSL freqshift time axis
         return met * ops.match_backend(np.exp(-2j * np.pi * t * shift_hz[..., None]), met)
 
@@ -1181,7 +1238,8 @@ class RawProcessor(BaseModule):
     #*************************#
     #   per-sample fallback   #
     #*************************#
-    def _process_per_sample(self, data_array, water_array, backend, masks, **kwargs):
+    def _process_per_sample(self, data_array, water_array, backend, masks, sf_samples=None,
+                            **kwargs):
         """
         Per-sample masks on the NumPy-estimate engines: every sample's drawn
         subset is gathered and processed on its own, which is exactly what the
@@ -1193,6 +1251,8 @@ class RawProcessor(BaseModule):
             water_array: Water in its untransposed layout, or None.
             backend: The array backend.
             masks: {tag: (batch, n) bool} over the data's dimensions.
+            sf_samples: Every sample's frequency where the batch's scans
+                differ, else None; each sample is processed at its own.
             **kwargs: As for process_tensor.
 
         Returns:
@@ -1207,11 +1267,14 @@ class RawProcessor(BaseModule):
                 "registration_method='torch', which carries them through.")
 
         inner = {key: value for key, value in kwargs.items()
-                 if key not in ('dim_masks', 'pool_origin', 'water_pool_origin')}
+                 if key not in ('dim_masks', 'pool_origin', 'water_pool_origin',
+                                'sf_mhz_samples')}
         outs, water_outs, layout = [], [], None
         for i in range(ops.shape(data_array)[0]):
             sample = data_array[i:i + 1]
             water = water_array[i:i + 1] if water_array is not None else None
+            if sf_samples is not None:
+                inner['sf_mhz'] = float(sf_samples[i])
             for tag, mask in masks.items():
                 keep = np.flatnonzero(np.asarray(ops.to_numpy(mask))[i])
                 sample = ops.take(sample, keep, axis=4 + given.index(tag))
@@ -1241,7 +1304,7 @@ class RawProcessor(BaseModule):
     CUDA_GRAPHS = True
 
     def _process_torch(self, met, wat, tags, wtags, sw_hz, sf_mhz, masks, origin=None,
-                       water_origin=None):
+                       water_origin=None, sf_samples=None):
         """
         The raw pipeline as batched torch operations on the data's device.
 
@@ -1259,9 +1322,11 @@ class RawProcessor(BaseModule):
         replay is the recorded kernels on the recorded tensors, so its numbers
         are the eager ones. Everything that decides which kernels run is the
         graphs' signature - shapes, tags, flags, the ppm windows, the pool
-        whose caches are read - and what a graph cannot hold (the
-        spectrometer frequency, which differs from scan to scan, and MAGMA's
-        solve for the coil weights) runs eagerly between the graphs. A batch
+        whose caches are read - and what a graph cannot hold (the batch's
+        spectrometer frequency, a Python value that changes from batch to
+        batch, and MAGMA's solve for the coil weights) runs eagerly between
+        the graphs. Where the scans of a batch differ in frequency, each one's
+        own enters as a tensor on the device, an input like the masks. A batch
         that needs gradients runs eagerly.
 
         Args:
@@ -1274,6 +1339,8 @@ class RawProcessor(BaseModule):
             masks: {tag: (B, n) bool} per-sample masks over the data's dimensions.
             origin: PoolOrigin of the data, or None.
             water_origin: PoolOrigin of the water, or None.
+            sf_samples: Every sample's frequency in MHz where the batch's
+                scans differ ("_sf_samples"), else None.
 
         Returns:
             "(met, wat)" with collapsed dimensions removed, spectral axis last,
@@ -1316,6 +1383,16 @@ class RawProcessor(BaseModule):
                            if held is not None else None)
         pools = tuple(held.pool if held is not None else None for held in pools)
 
+        # every scan's own frequency where the batch's differ: gathered from the pool's cache on
+        # the device where it applies, else uploaded with the batch - never between the graphs
+        if sf_samples is None:
+            inputs['sf'] = None
+        elif pools[0] is not None:
+            inputs['sf'] = pools[0].cached('RawProcessor.sf_mhz',
+                                           self._pool_sf_mhz)[inputs['index']]
+        else:
+            inputs['sf'] = torch.as_tensor(np.asarray(sf_samples, dtype=float), device=x.device)
+
         # the ppm windows, the only thing the frequency decides that a graph must know
         n_w = int(w.shape[-1]) if w is not None else n
         cut = 1 if self.truncate else 0
@@ -1326,7 +1403,7 @@ class RawProcessor(BaseModule):
                                                      (4.55, 4.7)))
         steps = lambda given: self._torch_steps(given, list(tags), list(wtags), sw_hz, spans,
                                                 pools, x.shape, spatial)
-        values = {'sf_mhz': sf_mhz, 'met': x}
+        values = {'sf_mhz': sf_mhz, 'sf_samples': sf_samples, 'met': x}
 
         tensors = [t for t in list(inputs.values()) + [x] if t is not None]
         if (self.CUDA_GRAPHS and x.device.type == 'cuda'
@@ -1493,7 +1570,8 @@ class RawProcessor(BaseModule):
                         group.remove(tag)
                         dropped.add(tag)
 
-        x, w = yield from self._torch_corrections(x, w, tags, wtags, sw_hz, spans)
+        x, w = yield from self._torch_corrections(x, w, tags, wtags, sw_hz, spans,
+                                                  inputs['sf'])
 
         report.update(
             met=self._from_torch_layout(x, spatial, tags),
@@ -1585,6 +1663,15 @@ class RawProcessor(BaseModule):
                    for chunk in layout.split(subjects)]
         return torch.cat([m[0] for m in moments]), torch.cat([m[1] for m in moments])
 
+    @staticmethod
+    def _pool_sf_mhz(pool):
+        """The pooled subjects' spectrometer frequencies in MHz, a tensor on the pool's device."""
+        import torch
+
+        values = [float(v[0] if hasattr(v, '__getitem__') else v)
+                  for v in (n.spectrometer_frequency for n in pool.source[0].nifti_list)]
+        return torch.tensor(values, dtype=torch.float64, device=pool.device)
+
     def _pool_water_gram(self, pool_water, wtags):
         """The Gram matrix of every pooled water, averaged over its transients."""
         from augmentrum.processing import torch_engine as engine
@@ -1653,11 +1740,12 @@ class RawProcessor(BaseModule):
         x = flat * engine.alignment_phasor(phi, eps, n, sw_hz, x.dtype)
         return x.reshape(b, v, 1, d, n), coil_mask, (phi.reshape(b, v, d), eps.reshape(b, v, d))
 
-    def _torch_corrections(self, x, w, tags, wtags, sw_hz, spans):
+    def _torch_corrections(self, x, w, tags, wtags, sw_hz, spans, sf=None):
         """
         Eddy current correction, truncation, water removal, referencing and
         phasing; a stepwise computation, like "_torch_steps", on the windows'
-        bins *spans*.
+        bins *spans*. *sf* is every sample's own spectrometer frequency (MHz,
+        a (B,) tensor on the device) where the batch's scans differ, else None.
         """
         import torch
         from augmentrum.processing import torch_engine as engine
@@ -1682,16 +1770,21 @@ class RawProcessor(BaseModule):
             w = w[..., 1:] if w is not None else None
 
         if self.remove_water:
-            # HLSVD runs in NumPy, and on the scan's frequency
-            x = yield engine.Step(self.water_removal, x, sw_hz, late=('sf_mhz',))
+            # HLSVD runs in NumPy, on each scan's frequency
+            x = yield engine.Step(self.water_removal, x, sw_hz, late=('sf_mhz', 'sf_samples'))
 
         n = x.shape[-1]
         if self.shift_ref:
             if self.shift_ref_method != 'fsl-mrs':
                 raise ValueError(f"Unknown tensor frequency shifting method: "
                                  f"{self.shift_ref_method}")
-            shift = yield from engine.peak_shift_steps(x.reshape(-1, n), sw_hz, spans['shift'],
-                                                       3.027)
+            flat = x.reshape(-1, n)
+            if sf is None:
+                shift = yield from engine.peak_shift_steps(flat, sw_hz, spans['shift'], 3.027)
+            else:
+                # every FID against its own scan's frequency, inside the graph
+                own = sf[:, None].expand(x.shape[0], flat.shape[0] // x.shape[0]).reshape(-1)
+                shift = engine.peak_shift_each(flat, sw_hz, spans['shift'], 3.027, own)
             x = x * engine.shift_phasor(shift, n, sw_hz, x.dtype).reshape(x.shape[:-1] + (n,))
 
         if self.phase_correct:
