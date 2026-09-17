@@ -569,6 +569,9 @@ class CoilSampler(DimensionSampler):
             :class:"Supplied" for maps already in hand, :class:"T2starMove" for
             measured ones. Unused when drawing.
         seed: Fixes the sequence. Draws still vary from call to call.
+        per_sample: When drawing, every sample keeps its own number and set of
+            coils; on tensors they are kept as a mask the raw processor combines
+            over (see :class:"DimensionSampler"), and the water shares it.
 
     Examples:
         >>> import numpy as np
@@ -596,13 +599,19 @@ class CoilSampler(DimensionSampler):
     # also lets subjects differ in matrix size.
     SUPPORTED_BACKENDS = tuple(Backend)
 
-    def __init__(self, mode: str = 'random', n_coils=None, source=None, seed=None):
+    def __init__(self, mode: str = 'random', n_coils=None, source=None, seed=None,
+                 per_sample: bool = False):
         if mode not in self.MODES:
             raise ValueError(f"mode must be one of {self.MODES}, got {mode!r}.")
 
         if mode in ('synthesize', 'reweight'):
             BaseModule.__init__(self)
             self.mode = mode
+            self.per_sample = False
+            # Building an array changes every coil's values, and reweighting
+            # aggregates over all of them: neither can honour a coil mask.
+            self.MASKS = None
+            self.PRESERVES_VALUES = False
             if mode == 'synthesize':
                 # Synthesis writes a dimension that was not there, and only
                 # the module that added it knows what it is. Reweighting keeps
@@ -614,7 +623,7 @@ class CoilSampler(DimensionSampler):
             # The source knows how many elements it has, so None leaves it to it.
             self.n_coils = None if n_coils is None else int(n_coils)
         else:
-            super().__init__(mode=mode, count=n_coils, seed=seed)
+            super().__init__(mode=mode, count=n_coils, seed=seed, per_sample=per_sample)
 
         self.source = source or Birdcage()
 
