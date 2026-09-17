@@ -415,6 +415,139 @@ class TestMaskedSubsets:
             assert _rel(got[b:b + 1], ref) < 1e-12
 
 
+#**************************************************************************************************#
+#                                     Class TestStepwiseRuns                                       #
+#**************************************************************************************************#
+#                                                                                                  #
+# A stepwise computation gives the same numbers eagerly and replayed as CUDA graphs.               #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestStepwiseRuns:
+    """What the graphs replay is what the eager engine computes."""
+
+    @staticmethod
+    def _steps(given):
+        """A little computation with a step in it, late in 'factor'."""
+        rolling = (given['x'] * 2).cumsum(-1)
+        scale = yield engine.Step(lambda values, factor: values.abs().amax() * factor,
+                                  rolling, late=('factor',))
+        return {'out': torch.sin(rolling) * scale, 'rows': given['x'].shape[0]}
+
+    def test_a_step_is_run_with_the_late_values(self):
+        got = engine.run_steps(self._steps({'x': torch.ones(1, 3)}), {'factor': 2.0})
+        rolling = torch.tensor([[2.0, 4.0, 6.0]])
+        assert torch.equal(got['out'], torch.sin(rolling) * 12.0) and got['rows'] == 1
+
+    def test_wsvd_weights_is_its_own_steps(self):
+        gram = torch.randn(2, 4, 4, dtype=torch.complex128)
+        cov = torch.eye(4, dtype=torch.complex128).expand(2, 4, 4).clone()
+        mask = torch.ones(2, 4, dtype=torch.bool)
+        whiten = torch.ones(2, dtype=torch.bool)
+        stepwise = engine.run_steps(engine.wsvd_weight_steps(gram @ gram.mH, cov, mask, whiten,
+                                                             True))
+        assert torch.equal(engine.wsvd_weights(gram @ gram.mH, cov, mask, whiten, True), stepwise)
+
+    def test_a_copy_starts_without_graphs(self):
+        from copy import deepcopy
+        graphs = engine.GraphedSteps(warmup=3, capacity=2)
+        assert len(deepcopy(graphs)._entries) == 0 and deepcopy(graphs).warmup == 3
+
+    @pytest.mark.skipif(not CUDA, reason="CUDA not available")
+    def test_replays_equal_the_eager_run(self):
+        """Every replay is the eager result of its own inputs and late values, bit for bit."""
+        graphs = engine.GraphedSteps(warmup=1)
+        gen = torch.Generator(device='cuda').manual_seed(0)
+        handed_out = []
+        for k in range(5):
+            x = torch.randn(4, 8, device='cuda', generator=gen)
+            got = graphs('one', self._steps, {'x': x}, {'factor': 1.0 + k})
+            ref = engine.run_steps(self._steps({'x': x}), {'factor': 1.0 + k})
+            assert torch.equal(got['out'], ref['out']) and got['rows'] == 4
+            handed_out.append((got['out'], ref['out']))
+        assert len(graphs) == 1, 'one signature, recorded once'
+        for got, ref in handed_out:                 # results survive the replays that followed
+            assert torch.equal(got, ref)
+
+
+#**************************************************************************************************#
+#                                      Class TestGraphedEngine                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# The processor's graphs against the processor's eager path, over changing batches.                #
+#**************************************************************************************************#
+@pytest.mark.skipif(not CUDA, reason="CUDA not available")
+class TestGraphedEngine:
+    """Replayed processing is eager processing, whatever the masks, the frequency or the pool."""
+
+    @staticmethod
+    def _processors(**settings):
+        """An eager processor and a graphed one, otherwise alike."""
+        made = [RawProcessor(registration_method='torch', volatile=True, **settings)
+                for _ in range(2)]
+        made[0].CUDA_GRAPHS = False
+        return made
+
+    @pytest.mark.parametrize('settings', [FULL, {**ALL_OFF, 'coil': True, 'average': True}],
+                             ids=['full', 'combine and average'])
+    def test_masks_and_frequencies_replay_exactly(self, settings):
+        _, _, met_t, wat_t = _synth_batch()
+        met, wat = torch.from_numpy(met_t).cuda(), torch.from_numpy(wat_t[..., 0]).cuda()
+        eager, graphed = self._processors(**settings)
+        gen = torch.Generator(device='cuda').manual_seed(0)
+        for k in range(5):
+            masks = {}
+            for tag, size in (('DIM_COIL', N_C), ('DIM_DYN', N_D)):
+                keep = torch.rand(N_B, size, device='cuda', generator=gen) > 0.4
+                keep[:, :2] = True                              # every sample keeps a few
+                masks[tag] = keep
+            call = dict(sw_hz=SW, sf_mhz=SF + 1e-5 * k, dim_tags=TAGS,
+                        water_dim_tags=WATER_TAGS, dim_masks=masks)
+            ref, ref_water = eager.process_tensor(met, wat, **call)
+            got, got_water = graphed.process_tensor(met, wat, **call)
+            assert torch.equal(got, ref) and torch.equal(got_water, ref_water)
+            assert torch.equal(graphed.dim_masks_.get('DIM_DYN', got),
+                               eager.dim_masks_.get('DIM_DYN', ref))
+        assert len(graphed._graphs) == 1, 'the calls share one signature'
+
+    def test_the_estimates_of_a_replay_are_its_own(self):
+        """last_alignment_ and last_keep_mask_ follow the batch, not the recorded one."""
+        _, _, met_t, wat_t = _synth_batch()
+        met, wat = torch.from_numpy(met_t).cuda(), torch.from_numpy(wat_t[..., 0]).cuda()
+        eager, graphed = self._processors()
+        call = dict(sw_hz=SW, sf_mhz=SF, dim_tags=TAGS, water_dim_tags=WATER_TAGS)
+        for scale in (1.0, 1.0, 1.0, 0.5, 2.0):                 # the first calls record
+            ref, _ = eager.process_tensor(met * scale, wat, **call)
+            got, _ = graphed.process_tensor(met * scale, wat, **call)
+            assert torch.equal(got, ref)
+            for a, b in zip(graphed.last_alignment_, eager.last_alignment_):
+                assert torch.equal(a, b)
+            assert torch.equal(graphed.last_keep_mask_, eager.last_keep_mask_)
+
+    def test_a_pooled_pipeline_replays_exactly(self):
+        """Through Augmentrum: per-sample draws, the pool's cached moments and the graphs."""
+        from augmentrum import Augmentrum
+        from tests.processing.test_raw_processing import _synth_niftis as _niftis
+
+        mets, wats = _niftis(4)
+        wats = [_water_with(w, 1) for w in wats]
+
+        def batches(graphs):
+            aug = Augmentrum(mets, wats, pipeline=[{'coil_sampling': {'per_sample': True}},
+                                                   {'average_sampling': {'per_sample': True}},
+                                                   'processing'],
+                             n_coils=(1, N_C), n_averages=(2, N_D), registration_method='torch',
+                             backend='pytorch', device='cuda', batch_size=3, volatile=True,
+                             seed=5)
+            for step in aug.pipelines['train'].steps:
+                if isinstance(step, RawProcessor):
+                    step.CUDA_GRAPHS = graphs
+            loader = aug.dataloader()
+            return [next(loader)[0] for _ in range(6)]
+
+        for graphed, eager in zip(batches(True), batches(False)):
+            assert torch.equal(graphed, eager)
+
+
 def test_uploads_match_the_backend_conversion():
     """to_backend is ops.match_backend (or asarray_like) in values, dtype and device."""
     from nifti_mrs_plus import ops
