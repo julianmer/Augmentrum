@@ -331,6 +331,9 @@ class TensorPool:
         device: Torch device (None: CPU); ignored on other backends.
     """
 
+    #: Threads reading the subjects when the pool is stacked.
+    READERS = 4
+
     def __init__(self, data: NIfTI_MRS_Plus, water: Optional[NIfTI_MRS_Plus],
                  backend: Backend, device=None):
         self.source = (data, water)
@@ -393,11 +396,20 @@ class TensorPool:
 
         Stacked into C order: NIfTI arrays come in Fortran order, and a pool
         that kept it would make every gather stride across the whole array.
+        Subjects are read on a few threads, since a file-backed object
+        decompresses on every read and zlib lets go of the interpreter.
         """
+        from concurrent.futures import ThreadPoolExecutor
+
         first = group.nifti_list[0][:]
         arr = np.empty((len(group),) + first.shape, dtype=first.dtype)
-        for i, nifti in enumerate(group.nifti_list):
-            arr[i] = first if i == 0 else nifti[:]
+        arr[0] = first
+
+        def read(i):
+            arr[i] = group.nifti_list[i][:]
+
+        with ThreadPoolExecutor(max_workers=self.READERS) as readers:
+            list(readers.map(read, range(1, len(group))))
         if self.backend == Backend.PYTORCH:
             import torch
             tensor = torch.from_numpy(arr)
