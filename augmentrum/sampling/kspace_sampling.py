@@ -2355,6 +2355,124 @@ class StackOfEccentric(StackOf):
 
 
 #**************************************************************************************************#
+#                                        Class SeqFile                                             #
+#**************************************************************************************************#
+#                                                                                                  #
+# A k-space trajectory read from a real Pulseq ".seq" file, instead of generated analytically.     #
+#                                                                                                  #
+#**************************************************************************************************#
+@TrajectoryRegistry.register
+class SeqFile(Trajectory):
+    """A k-space trajectory read from a real Pulseq ".seq" file - see "_build"."""
+
+    NAME = "seq_file"
+    NDIM = 3
+
+    def generate(self, geometry, like=None):
+        return self._build(geometry, self.params, like)
+
+    @staticmethod
+    def _build(geom: dict, params: dict, like=None) -> Tuple[List[Any], Dict[str, Any]]:
+        """
+        Trajectory commanded by a real sequence, instead of one generated
+        analytically like every other trajectory in this module.
+
+        Reads the ".seq" file via "augmentrum.physics.seq_file.load_seq_file"
+        (the optional dependency "pypulseq"), and uses its k-space trajectory
+        directly - already in cycles/m, the same convention every other
+        trajectory here returns, so no rescaling happens. The real gradient
+        waveform is also read, and is attached to "meta" (see below) rather
+        than discarded, since an augmentation may want it for something other
+        than the trajectory itself (e.g. a physically motivated eddy-current
+        or field model).
+
+        Parameters (params)
+        -------------------
+        seq_file : str, required
+            Path to a Pulseq ".seq" file.
+        n_shots : int, optional
+            Split the trajectory into exactly this many equal-length shots.
+            Left unset (the default), shot boundaries are detected instead
+            from gaps in the file's own ADC sample times - see
+            "_detect_shot_boundaries".
+        shot_gap_factor : float, default 3.0
+            Only used when "n_shots" is not given: a gap between two
+            consecutive ADC samples larger than this many times the median
+            spacing is treated as a shot boundary.
+
+        Output shot count: as many as the ".seq" file's own ADC timing
+        implies (or exactly "n_shots" if given).
+        Sample count per shot: whatever that shot actually has - unlike the
+        analytic trajectories above, real shots are not required to be equal
+        length.
+        """
+        from augmentrum.physics.seq_file import load_seq_file
+
+        seq_file = params.get("seq_file")
+        if not seq_file:
+            raise ValueError(
+                "trajectory='seq_file' needs traj_params={'seq_file': <path to .seq>}."
+            )
+
+        seq_data = load_seq_file(seq_file)
+        ndim = int(geom["ndim"])
+        coords = seq_data.k_traj_m[:ndim].T.astype(np.float64)   # (L, ndim), cycles/m
+
+        n_shots_param = params.get("n_shots")
+        if n_shots_param is not None:
+            segmentation = {"n_shots": int(n_shots_param)}
+        else:
+            segmentation = {"shot_boundaries": SeqFile._detect_shot_boundaries(
+                seq_data.t_adc, float(params.get("shot_gap_factor", 3.0)))}
+
+        shots = Trajectory.shots_from_continuous(coords, segmentation, like)
+        samples_per_shot = [int(ops.shape(s)[0]) for s in shots]
+
+        kmax = KspaceGeometry._kmax_from_geometry(geom)[:ndim]
+        meta = {
+            "trajectory_type":    "seq_file",
+            "seq_file":           seq_file,
+            "seq_definitions":    seq_data.definitions,
+            "dt":                 seq_data.dt,
+            "t_grid":             seq_data.t_grid,
+            "gradients_t_per_m":  seq_data.gradients_t_per_m,
+            "kmax":               tuple(kmax),
+            "fov_mm":             geom["fov_mm"][:ndim],
+            "matrix":             geom["matrix"][:ndim],
+            "n_shots":            len(shots),
+            "samples_per_shot":   (samples_per_shot[0] if len(set(samples_per_shot)) == 1
+                                   else samples_per_shot),
+            "density_estimate":   Trajectory._density_estimate(
+                "seq_file", len(shots), int(round(np.mean(samples_per_shot))), geom),
+            "params_used":        params,
+        }
+        return shots, meta
+
+    @staticmethod
+    def _detect_shot_boundaries(t_adc: np.ndarray, gap_factor: float) -> List[int]:
+        """
+        Shot-start indices inferred from gaps in the ADC sample times.
+
+        Consecutive samples within one readout are spaced by the ADC dwell
+        time; a much larger gap means the sequence moved on to another
+        excitation/readout (e.g. a TR recovery delay). A gap larger than
+        "gap_factor" times the median spacing is treated as a shot boundary.
+        This is a heuristic, since pypulseq exposes no explicit "shot"
+        concept - a single-shot sequence, or one with perfectly uniform
+        timing throughout, correctly falls back to one shot covering every
+        sample.
+        """
+        if len(t_adc) < 2:
+            return [0]
+        gaps = np.diff(t_adc)
+        typical = np.median(gaps)
+        if typical <= 0:
+            return [0]
+        boundary_idx = np.where(gaps > gap_factor * typical)[0] + 1
+        return [0] + boundary_idx.tolist()
+
+
+#**************************************************************************************************#
 #                                      Class ShotUndersampler                                      #
 #**************************************************************************************************#
 #                                                                                                  #
@@ -2405,6 +2523,10 @@ class ShotUndersampler:
         "floret_3d":         ["prefix", "drop_every", "shell_based", "combined"],
         "3d_egg_rosette":    ["prefix", "golden_prefix", "drop_every",
                               "shell_based", "combined"],
+        # Shots may be unequal length (see SeqFile._build), so only the
+        # methods that operate per-shot rather than assuming a fixed geometry
+        # are listed as compatible.
+        "seq_file":          ["prefix", "drop_every", "random_vd", "combined"],
     }
 
     @staticmethod

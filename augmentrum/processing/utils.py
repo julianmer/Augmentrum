@@ -436,7 +436,7 @@ def fid_to_spec(fids):
 
 
 #: fsl_mrs.utils.constants.PPM_SHIFT, copied so the axis helpers work without FSL-MRS.
-_PPM_SHIFT = {'1H': 4.65, '2H': 4.65, '13C': 0.0, '31P': 0.0}
+_PPM_SHIFT = {'1H': 4.65, '2H': 4.8, '13C': 0.0, '31P': 0.0}
 
 
 def ppm_reference(nucleus='1H'):

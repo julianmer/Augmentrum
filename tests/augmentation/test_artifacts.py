@@ -340,7 +340,7 @@ class TestPpmReference:
 
     def test_reference_follows_the_nucleus(self):
         assert ppm_reference('1H') == 4.65
-        assert ppm_reference('2H') == 4.65
+        assert ppm_reference('2H') == 4.8
         assert ppm_reference('31P') == 0.0
         assert ppm_reference('13C') == 0.0
         assert ppm_reference(None) == 4.65

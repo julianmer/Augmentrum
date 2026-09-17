@@ -69,6 +69,11 @@ csm = [
 keras = [
     "keras>=3.0.0",
 ]
+# Reading a Pulseq ".seq" file's gradient waveform/k-space trajectory
+# (augmentrum.physics.seq_file).
+seq = [
+    "pypulseq>=1.4.0",
+]
 docs = [
     "sphinx",
     "sphinx-autobuild",
@@ -85,6 +90,7 @@ all = [
     "keras>=3.0.0",
     "jax>=0.4.0",
     "jaxlib>=0.4.0",
+    "pypulseq>=1.4.0",
 ]
 
 [project.urls]
@@ -102,6 +108,7 @@ packages = [
     "augmentrum.processing",
     "augmentrum.sampling",
     "augmentrum.utils",
+    "augmentrum.physics",
 ]
 
 [tool.black]
