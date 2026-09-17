@@ -35,6 +35,7 @@ from augmentrum.core.dataset_utils import (
     map_structure,
 )
 from augmentrum.sampling.subject_splitter import SubjectSplitter
+from augmentrum.core.pool import TensorPool
 
 # Processing modules
 from augmentrum.processing.raw_processing import RawProcessor
@@ -320,8 +321,16 @@ class Augmentrum:
             modes: Dict mapping split names to modes (overrides 'mode')
             batch_size: Batch size
             backend: 'pytorch', 'numpy', 'tensorflow', 'keras', 'jax', or Backend enum
-            device: Device for PyTorch backend ('cuda', 'cpu', etc.). Note: Use .to() method
-                    on batches for GPU support instead of this parameter.
+            device: Where the PyTorch backend keeps the subject pool and builds
+                    batches ('cuda', 'cuda:1', 'cpu'); None keeps them on the CPU.
+                    On tensor backends every split whose subjects share one
+                    shape is stacked once into a pool on this device, batches
+                    are drawn from it by indexing - no NIfTI object is copied
+                    per batch - and the dataloaders hand out tensors on it.
+                    The pool is a snapshot of the subjects' values; call
+                    "refresh_pools" after changing them in place. A CUDA pool
+                    does not survive forked DataLoader workers: use
+                    num_workers=0 there, the device is the parallelism.
             volatile: Skip metadata updates for speed
             **kwargs: Module parameters, routed by name to every module in the
                 pipelines whose constructor accepts them. A key no module accepts
@@ -336,13 +345,16 @@ class Augmentrum:
 
                 SAMPLING (coil_sampling / average_sampling / transient_synthesis):
                   - n_coils: (1, 8) or 4          - n_averages: (4, 16) or 8
+                  - per_sample: draw coils / averages per sample, kept as masks
+                    on tensors (give it per step to target one sampler)
                   - n_transients: 32, tr_s, drift_hz_per_min, ...
 
                 PROCESSING ('processing' = RawProcessor):
                   - conj, coil, align, remove_outliers, average, ecc, truncate,
                     remove_water, shift_ref, phase_correct (bools)
                   - coil_method: 'fsl-mrs', 'adaptive'
-                  - registration_method: 'fsl-mrs', 'pattern'
+                  - registration_method: 'fsl-mrs', 'pattern', 'torch' (the
+                    batched device engine of every step)
                   - ecc_method, remove_method, average_method, water_removal_method,
                     shift_ref_method, phase_correct_method
 
@@ -393,7 +405,8 @@ class Augmentrum:
             self.backend = backend
 
         self.batch_size = batch_size
-        self.device = device  # Store device ('cuda', 'cpu', or None)
+        self.device = device  # where tensor pools and batches live (None: CPU)
+        self._pools: Dict[str, Tuple[tuple, Optional[TensorPool]]] = {}
         self.volatile = volatile
         self.domain_planning = domain_planning
         self.kwargs = kwargs
@@ -1184,6 +1197,35 @@ class Augmentrum:
                 self.batch_size, rng=self._fixed_rngs[split])
         return self._fixed_params[split]
 
+    #***********#
+    #   pools   #
+    #***********#
+    def _pool(self, split: str, data, water) -> Optional[TensorPool]:
+        """
+        The split's subjects stacked on the device, built on first use.
+
+        None where a split cannot be pooled (the NIfTI-list backend, subjects
+        of differing shapes), which keeps the per-batch copies. A pool that no
+        longer stands for the split's objects - a replaced split - is rebuilt.
+        """
+        key = TensorPool.fingerprint(data, water)
+        held = self._pools.get(split)
+        if held is None or held[0] != key:
+            device = self.device if self.backend == Backend.PYTORCH else None
+            held = (key, TensorPool.build(data, water, self.backend, device))
+            self._pools[split] = held
+        return held[1]
+
+    def refresh_pools(self) -> 'Augmentrum':
+        """
+        Drop the stacked pools, so the next batches restack the subjects.
+
+        Needed only after writing new values into the subjects' NIfTI objects
+        in place: a pool is a snapshot of them.
+        """
+        self._pools = {}
+        return self
+
     def _get_dataloader(self, split: str = 'train', framework: str = None, shuffle: bool = None):
         """
         Get dataloader for a specific split.
@@ -1204,6 +1246,7 @@ class Augmentrum:
         pipeline = self.pipelines[split]
         mode = self.modes[split]
         outputs = self.outputs[split]
+        pool = self._pool(split, data, water)
 
         # Create generator based on mode
         if mode == 'on-the-fly' or mode == 'random':  # Support legacy 'random'
@@ -1215,6 +1258,7 @@ class Augmentrum:
                 batch_size=self.batch_size,
                 outputs=outputs,
                 rng=self._rngs[split],
+                pool=pool,
             )
         elif mode == 'fixed' or mode == 'deterministic':  # Support legacy 'deterministic'
             # Fixed: use exact values (modules will use fixed params)
@@ -1230,6 +1274,7 @@ class Augmentrum:
                 outputs=outputs,
                 rng=self._rngs[split],
                 fixed_params=self._fixed_batch_params(split),
+                pool=pool,
             )
         else:
             raise ValueError(f"Unknown mode: {mode}. Use 'on-the-fly' or 'fixed'")
