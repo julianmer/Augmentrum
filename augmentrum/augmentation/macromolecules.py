@@ -84,6 +84,17 @@ class MMSource(ABC):
                 sf_mhz: Optional[float] = None) -> np.ndarray:
         """The unit-normalized complex MM spectrum on *ppm_axis*."""
 
+    def profiles(self, ppm_axis: np.ndarray, rng: np.random.Generator, batch: int,
+                 sf_mhz: Optional[float] = None) -> np.ndarray:
+        """
+        *batch* profiles drawn one after the other, "(batch, N)".
+
+        Exactly what *batch* calls of "profile" give, draws in the same order.
+        A source whose per-call work mostly does not depend on its draws
+        overrides this to do that part once.
+        """
+        return np.stack([self.profile(ppm_axis, rng, sf_mhz=sf_mhz) for _ in range(batch)])
+
     @property
     def varies(self) -> bool:
         """
@@ -99,6 +110,12 @@ class MMSource(ABC):
         """Scale a profile so its real part peaks at 1."""
         peak = np.max(np.abs(np.real(spectrum)))
         return spectrum / peak if peak > 0 else spectrum
+
+    @staticmethod
+    def _normalize_rows(spectra: np.ndarray) -> np.ndarray:
+        """"_normalize" for every row of "(batch, N)" profiles."""
+        peak = np.max(np.abs(np.real(spectra)), axis=-1, keepdims=True)
+        return np.where(peak > 0, spectra / np.where(peak > 0, peak, 1.0), spectra)
 
     @staticmethod
     def _regrid(spectrum: np.ndarray, ppm_from: np.ndarray,
@@ -146,6 +163,9 @@ class Parametrized(MMSource):
     spectrum, whatever its width.
     """
 
+    #: Axes whose fixed template is kept (a spectrometer frequency each).
+    CACHED_AXES = 64
+
     def __init__(self, components: Tuple = MM_CONSENSUS,
                  amp_jitter: float = 0.0,
                  ppm_jitter: float = 0.0,
@@ -161,6 +181,21 @@ class Parametrized(MMSource):
 
     def profile(self, ppm_axis, rng, sf_mhz=None):
         ppm = np.asarray(ppm_axis, float)
+        if self.varies:
+            return self._build(ppm, rng)
+
+        # Without jitter the template draws nothing and depends on the axis
+        # alone: fourteen lineshapes, built once per axis rather than per call.
+        cache = self.__dict__.setdefault('_fixed', {})
+        key = (ppm.shape, ppm.tobytes(), self.components)
+        if key not in cache:
+            if len(cache) >= self.CACHED_AXES:
+                cache.pop(next(iter(cache)))
+            cache[key] = self._build(ppm, rng)
+        return cache[key].copy()
+
+    def _build(self, ppm, rng):
+        """The template on *ppm*, the jitters drawn from *rng* component by component."""
         spectrum = np.zeros(ppm.shape, dtype=complex)
 
         for center, fwhm, amp in self.components:
@@ -390,6 +425,54 @@ class SemiParametrized(MMSource):
     def varies(self) -> bool:
         return bool(self.base.varies or self.broaden_ppm[1] > 0 or self.amp_mod > 0)
 
+    def profiles(self, ppm_axis, rng, batch, sf_mhz=None):
+        """
+        "profile" for a whole batch, the base built once when it is fixed.
+
+        A varying base draws between the broadening and envelope draws of every
+        call, so it keeps the call-by-call path. A fixed one draws nothing,
+        which leaves each sample's draws - a width, then the three envelope
+        weights - to be taken first, in the per-call order, and everything
+        after them to run on the batch at once: the same operations, row by
+        row, so the profiles are the per-call ones.
+        """
+        if self.base.varies:
+            return super().profiles(ppm_axis, rng, batch, sf_mhz=sf_mhz)
+        ppm = np.asarray(ppm_axis, float)
+        base = self.base.profile(ppm, rng, sf_mhz=sf_mhz)
+
+        widths, weights = np.empty(batch), np.empty((batch, 3))
+        for b in range(batch):
+            widths[b] = rng.uniform(*self.broaden_ppm)
+            if self.amp_mod > 0:
+                weights[b] = [rng.uniform(-1.0, 1.0) for _ in range(3)]
+
+        # Kernels differ in length from sample to sample, so broadening stays a loop
+        spectra = np.repeat(base[None], batch, axis=0)
+        dppm = float(np.median(np.abs(np.diff(ppm))))
+        for b in np.flatnonzero(widths > 0):
+            kernel = self._kernel(widths[b], dppm)
+            spectra[b] = (np.convolve(np.real(spectra[b]), kernel, mode='same')
+                          + 1j * np.convolve(np.imag(spectra[b]), kernel, mode='same'))
+
+        if self.amp_mod > 0:
+            x = np.linspace(0.0, np.pi, ppm.size)
+            envelope = np.ones((batch, ppm.size))
+            for k in (1, 2, 3):
+                envelope += weights[:, k - 1:k] * np.cos(k * x) / k
+            envelope = 1.0 + self.amp_mod * (envelope - envelope.mean(axis=-1, keepdims=True))
+            spectra = hilbert(np.real(spectra) * np.clip(envelope, 0.0, None), axis=-1)
+
+        return self._normalize_rows(spectra)
+
+    @staticmethod
+    def _kernel(width, dppm):
+        """The normalised Gaussian stencil of FWHM *width* ppm on an axis of step *dppm*."""
+        sigma = width / (2.0 * np.sqrt(2.0 * np.log(2.0))) / dppm
+        half = int(np.ceil(4 * sigma))
+        kernel = np.exp(-0.5 * (np.arange(-half, half + 1) / sigma) ** 2)
+        return kernel / kernel.sum()
+
     def profile(self, ppm_axis, rng, sf_mhz=None):
         ppm = np.asarray(ppm_axis, float)
         spectrum = self.base.profile(ppm, rng, sf_mhz=sf_mhz)
@@ -400,11 +483,7 @@ class SemiParametrized(MMSource):
         # FSL-referenced axis may carry its alias.
         width = rng.uniform(*self.broaden_ppm)
         if width > 0:
-            dppm = float(np.median(np.abs(np.diff(ppm))))
-            sigma = width / (2.0 * np.sqrt(2.0 * np.log(2.0))) / dppm
-            half = int(np.ceil(4 * sigma))
-            kernel = np.exp(-0.5 * (np.arange(-half, half + 1) / sigma) ** 2)
-            kernel /= kernel.sum()
+            kernel = self._kernel(width, float(np.median(np.abs(np.diff(ppm)))))
             spectrum = (np.convolve(np.real(spectrum), kernel, mode='same')
                         + 1j * np.convolve(np.imag(spectrum), kernel, mode='same'))
 
@@ -514,7 +593,7 @@ class Macromolecules(BaseModule):
         if not self.source.varies:
             return np.broadcast_to(self.source.profile(ppm, rng, sf_mhz=sf_mhz),
                                    (batch, ppm.size)).copy()
-        return np.stack([self.source.profile(ppm, rng, sf_mhz=sf_mhz) for _ in range(batch)])
+        return self.source.profiles(ppm, rng, batch, sf_mhz=sf_mhz)
 
     def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
         """
