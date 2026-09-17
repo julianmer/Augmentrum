@@ -1280,18 +1280,25 @@ class RawProcessor(BaseModule):
                                  f"'pattern'.")
         as_torch = lambda a: (a if ops.is_torch(a)
                               else torch.from_numpy(np.asarray(ops.to_numpy(a))))
-        x = as_torch(met)
-        w = as_torch(wat) if wat is not None else None
+        x, spatial = self._to_torch_layout(as_torch(met), tags)
+        w = self._to_torch_layout(as_torch(wat), wtags)[0] if wat is not None else None
         masks = {tag: torch.as_tensor(np.asarray(ops.to_numpy(mask))) if not ops.is_torch(mask)
                  else mask for tag, mask in masks.items()}
         masks = {tag: mask.to(device=x.device, dtype=torch.bool) for tag, mask in masks.items()}
 
         # the pools whose per-subject caches stand in for this batch's statistics
-        n = int(x.shape[-1])
+        b, v, c, d, n = x.shape
         pools = tuple(held if self._pool_holds(held, role, group, n) else None
                       for held, role, group in ((origin, 'data', tags),
                                                 (water_origin, 'water', wtags)))
-        inputs = dict(met=x, wat=w, coil_mask=masks.get('DIM_COIL'),
+
+        # A raw batch is a quarter of a gigabyte of coils and transients, and the coil
+        # combination is all that reads it: where the pool's cached moments cover the rest, it
+        # meets its weights in a step and stays out of the graphs, which then neither copy it
+        # nor keep a second one.
+        deferred = (self.coil and not self.conj and 'DIM_COIL' in tags and c > 1
+                    and self.coil_method == 'fsl-mrs' and w is not None and pools[0] is not None)
+        inputs = dict(met=None if deferred else x, wat=w, coil_mask=masks.get('DIM_COIL'),
                       dyn_mask=masks.get('DIM_DYN'))
         for key, held in zip(('index', 'water_index'), pools):
             inputs[key] = (torch.as_tensor(held.indices, device=x.device)
@@ -1307,16 +1314,16 @@ class RawProcessor(BaseModule):
                      water_phase=engine.window_spans(4 * (n_w - cut), sw_hz, sf_mhz,
                                                      (4.55, 4.7)))
         steps = lambda given: self._torch_steps(given, list(tags), list(wtags), sw_hz, spans,
-                                                pools)
-        values = {'sf_mhz': sf_mhz}
+                                                pools, x.shape, spatial)
+        values = {'sf_mhz': sf_mhz, 'met': x}
 
-        tensors = [t for t in inputs.values() if t is not None]
+        tensors = [t for t in list(inputs.values()) + [x] if t is not None]
         if (self.CUDA_GRAPHS and x.device.type == 'cuda'
                 and not (torch.is_grad_enabled() and any(t.requires_grad for t in tensors))):
             layout = lambda t: None if t is None else (tuple(t.shape), t.stride(), t.dtype)
             signature = (str(x.device), tuple(tags), tuple(wtags), sw_hz,
                          tuple(sorted(spans.items())), tuple(id(p) for p in pools),
-                         self._engine_settings(),
+                         self._engine_settings(), layout(x), spatial,
                          tuple((key, layout(t)) for key, t in inputs.items()))
             graphs = self.__dict__.get('_graphs')
             if graphs is None:
@@ -1351,7 +1358,7 @@ class RawProcessor(BaseModule):
                 self.coil_method, self.remove_method, self.average_method, self.ecc_method,
                 self.water_removal_method, self.shift_ref_method, self.phase_correct_method)
 
-    def _torch_steps(self, inputs, tags, wtags, sw_hz, spans, pools):
+    def _torch_steps(self, inputs, tags, wtags, sw_hz, spans, pools, shape, spatial):
         """
         The torch engine as a stepwise computation ("torch_engine.Step").
 
@@ -1370,6 +1377,9 @@ class RawProcessor(BaseModule):
             sw_hz: Spectral width in Hz.
             spans: The bins of every ppm window used, by purpose.
             pools: The TensorPools of data and water whose caches apply, or None.
+            shape: The data's "(B, V, C, D, T)" layout shape; 'met' is None where the
+                coil combination reads the batch in a step instead (see "_process_torch").
+            spatial: Its spatial shape, for the way back.
 
         Returns:
             dict with 'met' and 'wat' in the output layout, 'dim_masks',
@@ -1383,9 +1393,8 @@ class RawProcessor(BaseModule):
         report = dict(dropped=set(), water_dropped=set(), no_prewhiten=False, alignment=None,
                       keep_mask=None)
         entry_tags, entry_wtags = list(tags), list(wtags)
-        x, spatial = self._to_torch_layout(inputs['met'], tags)
-        w = self._to_torch_layout(inputs['wat'], wtags)[0] if inputs['wat'] is not None else None
-        b, v, c, d, n = x.shape
+        x, w = inputs['met'], inputs['wat']
+        b, v, c, d, n = shape
         coil_mask, dyn_mask = inputs['coil_mask'], inputs['dyn_mask']
 
         if self.conj:
@@ -1401,7 +1410,7 @@ class RawProcessor(BaseModule):
                     raise ValueError('Reference and data coil dimension does not match.')
             if self.coil_method == 'fsl-mrs':
                 x, w = yield from self._torch_wsvd(x, w, coil_mask, dyn_mask, inputs, pools,
-                                                   entry_tags, entry_wtags, report)
+                                                   entry_tags, entry_wtags, report, shape)
             elif self.coil_method == 'adaptive':
                 if coil_mask is not None:
                     raise NotImplementedError("Adaptive coil combination takes no coil masks; "
@@ -1482,7 +1491,7 @@ class RawProcessor(BaseModule):
             tags=tags, wtags=wtags)
         return report
 
-    def _torch_wsvd(self, x, w, coil_mask, dyn_mask, inputs, pools, tags, wtags, report):
+    def _torch_wsvd(self, x, w, coil_mask, dyn_mask, inputs, pools, tags, wtags, report, shape):
         """
         wSVD coil combination of the torch engine, over each sample's drawn
         coils; a stepwise computation, like "_torch_steps".
@@ -1496,7 +1505,7 @@ class RawProcessor(BaseModule):
         import torch
         from augmentrum.processing import torch_engine as engine
 
-        b, v, c, d, n = x.shape
+        b, v, c, d, n = shape
         tail = n - int((1 - engine.NOISE_FRACTION) * n)
         if pools[0] is not None:
             second, first = pools[0].cached(
@@ -1511,7 +1520,7 @@ class RawProcessor(BaseModule):
         cov, samples = engine.noise_covariance(second, first, v * tail, dyn_mask)
 
         active = (coil_mask if coil_mask is not None
-                  else torch.ones(b, c, dtype=torch.bool, device=x.device))
+                  else torch.ones(b, c, dtype=torch.bool, device=cov.device))
         whiten = samples >= engine.MIN_SAMPLES_PER_COIL * active.sum(dim=1)
         if coil_mask is None and dyn_mask is None and v * d * tail < \
                 engine.MIN_SAMPLES_PER_COIL * c:
@@ -1531,9 +1540,19 @@ class RawProcessor(BaseModule):
         else:
             gram = engine.reference_gram(w.mean(dim=3).transpose(-1, -2))   # (B, V, C, C)
         weights = yield from engine.wsvd_weight_steps(gram, cov, active, whiten, True)
+        if x is None:
+            return (yield engine.Step(self._combine_raw, weights, w, late=('met',)))
         x = engine.combine_coils(x, weights.to(x.dtype))
         w = engine.combine_coils(w, weights.to(w.dtype))
         return x.unsqueeze(2), w.unsqueeze(2)
+
+    @staticmethod
+    def _combine_raw(weights, water, met):
+        """The coil combination of a batch that stayed outside the graphs (see "_torch_steps")."""
+        from augmentrum.processing import torch_engine as engine
+
+        return (engine.combine_coils(met, weights.to(met.dtype)).unsqueeze(2),
+                engine.combine_coils(water, weights.to(water.dtype)).unsqueeze(2))
 
     @staticmethod
     def _pool_holds(origin, role, tags, n):
