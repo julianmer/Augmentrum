@@ -64,6 +64,9 @@ class LineBroadening(BaseModule):
 
     SUPPORTED_BACKENDS = tuple(Backend)
 
+    # Acts on every coil and transient alike, so per-sample masks pass through.
+    MASKS = 'pass'
+
     # Broadening multiplies the FID by a decay. The same operation in a
     # spectrum would be a convolution, not a multiply.
     DOMAIN = Domain(spectral='time')

@@ -23,6 +23,7 @@ import numpy as np
 from nifti_mrs_plus.random import SeedGenerator
 from augmentrum.core import NIfTI_MRS_Plus, Backend
 from augmentrum.core.base_module import BaseModule, Tap
+from augmentrum.core.pool import finalize_masks, masks_of, rewrap, set_masks
 from augmentrum.processing.domain import Domain
 
 
@@ -640,6 +641,12 @@ class AugmentationPipeline:
                 for param_name, orig_value in attrs.items():
                     setattr(self.steps[index], param_name, orig_value)
 
+        # Masks nothing consumed become zeros: whoever takes the tensor cannot
+        # see them, and a coil or transient that was not drawn must not read
+        # as one that was.
+        current_data = finalize_masks(current_data)
+        current_water = finalize_masks(current_water)
+
         if not self._tap_indices:
             return current_data, current_water
 
@@ -651,6 +658,8 @@ class AugmentationPipeline:
 
         end = self.end_domain or Domain(spectral='time', spatial='image')
         for name, (tap_data, tap_water) in taps.items():
+            tap_data, tap_water = finalize_masks(tap_data), finalize_masks(tap_water)
+            taps[name] = (tap_data, tap_water)
             if not end.satisfied_by(tap_data.state):
                 tap_data, tap_water = DomainTransform(
                     spectral=end.spectral, spatial=end.spatial)(tap_data, tap_water)
@@ -673,12 +682,11 @@ class AugmentationPipeline:
         provenance at exactly the tap point.
         """
         if data.backend == Backend.NIFTI_LIST or not data.volatile:
-            return data.copy()
+            return set_masks(data.copy(), masks_of(data))
 
-        snap = NIfTI_MRS_Plus(nifti_list=data.nifti_list, backend=data.backend,
-                              volatile=data.volatile, state=data.state)
+        snap = rewrap(data, data.nifti_list, data.backend, data.volatile, data.state)
         snap.set_data(data.get_data(data.backend), data.backend, dim_tags=data.dim_tags)
-        return snap
+        return set_masks(snap, masks_of(data))
 
     def _convert_backend(self, nifti_plus: NIfTI_MRS_Plus, target_backend: Backend) -> NIfTI_MRS_Plus:
         """

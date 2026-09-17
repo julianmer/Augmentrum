@@ -70,6 +70,9 @@ class AmplitudeScaling(BaseModule):
     SUPPORTED_BACKENDS = [Backend.NIFTI_LIST, Backend.NUMPY, Backend.PYTORCH,
                          Backend.TENSORFLOW, Backend.JAX, Backend.KERAS]
 
+    # Acts on every coil and transient alike, so per-sample masks pass through.
+    MASKS = 'pass'
+
     # A scale broadcasts, so a batch can carry one factor per sample.
     PER_SAMPLE_PARAMS = ('scale_factor',)
 

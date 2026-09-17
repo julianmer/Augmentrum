@@ -22,6 +22,8 @@ from augmentrum.core import NIfTI_MRS_Plus, Backend
 from nifti_mrs_plus.core import DataState
 from nifti_mrs_plus import ops
 from nifti_mrs_plus.random import SeedGenerator
+from augmentrum.core.pool import (masks_of, set_masks, origin_of, set_origin, rewrap,
+                                  water_masks)
 
 
 #**************************************************************************************************#
@@ -82,6 +84,20 @@ class BaseModule(ABC):
     # constructor; this is for names typed neither way, such as the samplers'
     # counts, which default to None.
     INTEGER_PARAMS: Tuple[str, ...] = ()
+
+    # How a module meets the per-sample dimension masks a sampler drawing with
+    # per_sample=True leaves on a batch (see augmentrum.core.pool). 'pass': it
+    # acts on every element alike, so the masks flow through untouched.
+    # 'consume' / 'draw': it takes them as "dim_masks" and reports the masks
+    # left afterwards as "dim_masks_". None: it would aggregate over entries a
+    # sample never drew, so a batch carrying masks is refused rather than
+    # processed as if every coil and transient were there.
+    MASKS: Optional[str] = None
+
+    # Whether a module that returns its input tensor itself has left the values
+    # exactly as they were (samplers that only mask, taps). The batch then
+    # keeps its pool origin, and consumers may use results the pool cached.
+    PRESERVES_VALUES: bool = False
 
     def __init_subclass__(cls, **kwargs):
         """
@@ -409,6 +425,27 @@ class BaseModule(ABC):
         if 'state' not in kwargs:
             kwargs['state'] = data.state
 
+        # Per-sample masks go to the modules that honour them, and nowhere else.
+        masks = masks_of(data)
+        takes_masks = self.MASKS in ('consume', 'draw')
+        if masks and not takes_masks and self.MASKS != 'pass':
+            raise ValueError(
+                f"{self.__class__.__name__} cannot take the per-sample masks over "
+                f"{sorted(masks)} that a sampler drawing with per_sample=True left on the "
+                f"batch: it would treat every coil and transient as drawn. Place it after "
+                f"'processing', which consumes the masks, or draw with per_sample=False."
+            )
+        if takes_masks:
+            kwargs['dim_masks'] = masks
+            self.dim_masks_ = dict(masks)
+
+        # Values that still equal pool entries let a consumer use what the pool cached.
+        origins = (origin_of(data), origin_of(water))
+        if origins[0] is not None:
+            kwargs.setdefault('pool_origin', origins[0])
+        if origins[1] is not None:
+            kwargs.setdefault('water_pool_origin', origins[1])
+
         # ── Get data in native backend format (not forced to numpy!) ──
         data_array = data.get_data(backend)
         water_array = water.get_data(backend) if water is not None else None
@@ -435,6 +472,13 @@ class BaseModule(ABC):
             water_out = self._wrap_processed(water, processed_water, backend,
                                              operation_name, operation_details,
                                              dim_tags=self._output_water_dim_tags(water))
+
+        masks = self.dim_masks_ if takes_masks else masks
+        set_masks(data_out, masks)
+        set_masks(water_out, water_masks(masks))
+        if self.PRESERVES_VALUES:
+            set_origin(data_out, origins[0] if processed_data is data_array else None)
+            set_origin(water_out, origins[1] if processed_water is water_array else None)
 
         return data_out, water_out
 
@@ -463,9 +507,9 @@ class BaseModule(ABC):
             dim_tags: Higher-dimension tags of the processed tensor; the
                 source's, minus what this module collapsed, when not given.
         """
-        out = NIfTI_MRS_Plus(nifti_list=source.nifti_list, backend=backend,
-                             volatile=source.volatile,
-                             state=self.output_state(source.state))
+        # A batch drawn from a pool stays one, so its borrowed objects stay safe.
+        out = rewrap(source, source.nifti_list, backend, source.volatile,
+                     self.output_state(source.state))
         if processed is not None:
             if dim_tags is None:
                 dim_tags = self._output_dim_tags(source)
@@ -689,6 +733,10 @@ class Tap(BaseModule):
     """
 
     SUPPORTED_BACKENDS = tuple(Backend)
+
+    # A tap copies nothing and changes nothing: masks and pool origins survive it.
+    MASKS = 'pass'
+    PRESERVES_VALUES = True
 
     def __init__(self, name: str = 'tap'):
         super().__init__()
