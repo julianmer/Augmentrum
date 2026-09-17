@@ -212,13 +212,21 @@ class EddyCurrent(BaseModule):
     #   trajectories   #
     #*******************#
     def _low_pass(self, phi: np.ndarray, sw_hz: float) -> np.ndarray:
-        """The trajectory below the cutoff, zero-phase so nothing is delayed."""
+        """
+        The trajectory below the cutoff, zero-phase so nothing is delayed.
+
+        Trajectories may be stacked as rows; each is filtered on its own. The
+        filter is a constant of the cutoff and the bandwidth, designed once.
+        """
         if self.lp_cut_hz is None or self.lp_cut_hz <= 0:
             return phi
         nyq = 0.5 * float(sw_hz)
         Wn = min(max(self.lp_cut_hz / nyq, 1e-6), 0.999999)
-        b, a = butter(2, Wn, btype='low')
-        return filtfilt(b, a, phi)
+        designs = self.__dict__.setdefault('_filters', {})
+        if Wn not in designs:
+            designs[Wn] = butter(2, Wn, btype='low')
+        b, a = designs[Wn]
+        return filtfilt(b, a, phi, axis=-1)
 
     def _ec_phase_from_water(self, fid_water: np.ndarray, sw_hz: float) -> np.ndarray:
         """
@@ -294,6 +302,30 @@ class EddyCurrent(BaseModule):
 
         return phi - phi[0]
 
+    def _synth_ec_phases(self, batch: int, N: int, sw_hz: float,
+                         rng: np.random.Generator) -> np.ndarray:
+        """
+        "_synth_ec_phase" for *batch* samples at once, "(batch, N)", bit for bit.
+
+        The noise of all samples is one draw of the same numbers in the same
+        order, and filtering, detrending and anchoring work row by row; only
+        the least-squares fit stays a call per sample, since LAPACK solves
+        several right-hand sides with a different rounding than one.
+        """
+        t = np.arange(N, dtype=float) / float(sw_hz)
+        pad = 0
+        if self.lp_cut_hz is not None and self.lp_cut_hz > 0:
+            pad = int(np.ceil(3.0 * float(sw_hz) / float(self.lp_cut_hz)))
+        noise = rng.normal(scale=self.std_rad, size=(batch, N + 2 * pad))
+        phi = self._low_pass(noise, sw_hz)[:, pad:pad + N]
+
+        if self.remove_linear:
+            A = np.c_[np.ones(N), t]
+            k = np.array([np.linalg.lstsq(A, row, rcond=None)[0] for row in phi])
+            phi = phi - (k[:, :1] + k[:, 1:] * t)
+
+        return phi - phi[:, :1]
+
     def _phases(self, batch: int, n_points: int, sw_hz: float, rng: np.random.Generator,
                 water_of=None) -> np.ndarray:
         """
@@ -324,7 +356,7 @@ class EddyCurrent(BaseModule):
                                            sw_water, n_points, sw_hz))
             return np.stack(rows)
 
-        return np.stack([self._synth_ec_phase(n_points, sw_hz, rng) for _ in range(batch)])
+        return self._synth_ec_phases(batch, n_points, sw_hz, rng)
 
     def _phasors(self, phases: np.ndarray) -> np.ndarray:
         """"exp(i·strength·φ)" per sample, the strength read per sample."""

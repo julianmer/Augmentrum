@@ -65,12 +65,13 @@ class TestResidualWater:
         assert np.iscomplexobj(result_data[0][:])
 
     def test_shared_profiles_are_built_once_and_stay_exact(self):
-        """Samples sharing lobe parameters share a profile; each stays its own."""
+        """Samples sharing a centre share the lobes, whatever their phase; each stays its own."""
         ppm = ppm_axis(256, 2000.0, 123.0)
         water = ResidualWater(phase_deg=10.0)
         water.phase_deg = np.array([10.0, 30.0, 10.0])
+        water.center_ppm = np.array([4.65, 4.65, 4.7])
         profiles = water._profiles(3, ppm, '1H')
-        assert len(water._profile_cache) == 2
+        assert len(water._lobe_cache) == 2
         for i in range(3):
             assert np.array_equal(profiles[i], water._profile(i, ppm, '1H'))
         assert np.array_equal(water._profiles(3, ppm, '1H'), profiles)
@@ -476,6 +477,33 @@ class TestPerSampleProfiles:
         echoes = [{'delay_s': (0.02, 0.2), 'amp': (0.1, 0.3), 'phase_deg': (-90, 90)}]
         added = self._added(SpuriousEchoes(echoes=echoes, seed=0))
         assert self._all_differ(added)
+
+    @pytest.mark.parametrize('n', [N_PTS, 1001])
+    def test_batched_peak_profiles_are_the_per_sample_ones(self, n):
+        """The batch build gives each sample's profile bit for bit, a zero width skipping it."""
+        module = ArtificialPeaks(peaks=[
+            {'ppm': (0.8, 1.6), 'amp': (0.05, 0.3), 'lb_hz': (0.0, 9.0),
+             'gb_hz': (0.0, 4.0), 'phase_deg': (-30, 30)},
+            {'ppm': 3.0, 'amp': 0.1, 'lb_hz': 5.0}], seed=1)
+        table = module._draw(6)
+        table[0]['lb_hz'][:2] = 0.0
+        table[0]['gb_hz'][1:3] = 0.0
+        ppm = ppm_axis(n, SW_HZ, SF_MHZ)
+        batch = module._profiles(6, ppm, table, SF_MHZ)
+        for i in range(6):
+            assert np.array_equal(batch[i], module._profile(i, ppm, table, SF_MHZ))
+
+    def test_batched_echo_profiles_are_the_per_sample_ones(self):
+        for mode, echoes in (('echo', None),
+                             ('replica', [{'delay_s': (0.02, 0.2), 'amp': (0.1, 0.3),
+                                           'phase_deg': (-90, 90), 'decay_hz': (0, 9)}])):
+            module = SpuriousEchoes(echoes=echoes, mode=mode, seed=2)
+            (drawn,) = module._draw(5, SW_HZ, n_points=N_PTS, sf_mhz=SF_MHZ)
+            t = np.arange(N_PTS) / SW_HZ
+            build = module._echo_profile if mode == 'echo' else module._replica_envelope
+            batch = build(module._columns(drawn, 5), t)
+            for i in range(5):
+                assert np.array_equal(batch[i], build(module._at(drawn, i), t))
 
     def test_a_sample_shares_its_profile_across_coils(self):
         """Per sample, not per trace: every coil of a sample sees the same peak."""

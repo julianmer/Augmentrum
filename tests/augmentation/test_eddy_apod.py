@@ -590,6 +590,14 @@ class TestSyntheticTrajectory:
         assert early < 0.3, f"{early:.2f} rad within 100 ms is a filter transient"
         assert rows.std(axis=1).mean() < 0.15
 
+    def test_a_batch_of_trajectories_is_the_draws_one_by_one(self):
+        """The batch takes the same noise in the same order and gives the same bits."""
+        module = EddyCurrent(seed=0)
+        batch = module._synth_ec_phases(5, N_PTS, SW_HZ, np.random.default_rng(4))
+        rng = np.random.default_rng(4)
+        rows = np.stack([module._synth_ec_phase(N_PTS, SW_HZ, rng) for _ in range(5)])
+        assert np.array_equal(batch, rows)
+
     def test_list_and_tensor_paths_agree(self):
         first = _phases(EddyCurrent(seed=3)(_ones(3, backend=Backend.NUMPY))[0])
         listed = _phases(EddyCurrent(seed=3)(_ones(3, backend=Backend.NIFTI_LIST))[0])

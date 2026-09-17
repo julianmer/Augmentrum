@@ -322,6 +322,16 @@ class SpuriousEchoes(BaseModule):
         """Sample *index*'s scalar parameters out of a drawn echo."""
         return {k: (v if isinstance(v, bool) else v[index]) for k, v in drawn.items()}
 
+    @staticmethod
+    def _columns(drawn: Dict, batch: int) -> Dict:
+        """
+        A drawn echo as "(batch, 1)" columns, so a profile built from it
+        broadcasts to one row per sample - element by element the arithmetic
+        of "_at"'s scalars, and so the same numbers.
+        """
+        return {k: (v if isinstance(v, bool) else np.asarray(v)[:batch, None])
+                for k, v in drawn.items()}
+
     #******************#
     #   the profiles   #
     #******************#
@@ -482,21 +492,20 @@ class SpuriousEchoes(BaseModule):
         ghost_total = None
 
         for drawn in table:
-            per_sample = [self._at(drawn, i) for i in range(batch)]
-
             if self.mode == 'echo':
-                profile = np.stack([self._echo_profile(e, t) for e in per_sample])
+                profile = self._echo_profile(self._columns(drawn, batch), t)
                 max_abs = ops.amax(ops.abs(data_array), axis=-1, keepdims=True)
                 ghost = ops.cast_like(max_abs, data_array) * ops.cast_like(
                     to_backend(batch_profile(profile, ndim), data_array), data_array)
 
             elif self.mode == 'replica':
-                envelope = np.stack([self._replica_envelope(e, t) for e in per_sample])
+                envelope = self._replica_envelope(self._columns(drawn, batch), t)
                 delayed = self._delayed(data_array, drawn['shift'])
                 ghost = delayed * ops.cast_like(
                     to_backend(batch_profile(envelope, ndim), data_array), data_array)
 
             else:  # hybrid: the delayed copy under the localized envelope
+                per_sample = [self._at(drawn, i) for i in range(batch)]
                 modulation = np.stack([self._hybrid_modulation(e, t) for e in per_sample])
                 delayed = self._delayed(data_array, drawn['shift'])
                 mod = ops.cast_like(to_backend(batch_profile(modulation, ndim), data_array),

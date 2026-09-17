@@ -164,10 +164,19 @@ class ResidualWater(BaseModule):
         Returns:
             Complex profile with the same length as ppm_axis, peak magnitude 1
         """
+        lobes = ResidualWater._water_lobes(ppm_axis, center_ppm=center_ppm, peaks=peaks)
+        return lobes * np.exp(1j * np.deg2rad(phase_deg))
+
+    @staticmethod
+    def _water_lobes(ppm_axis, *, center_ppm=None,
+                     peaks=((0.0, 0.20, 1.0), (+0.12, 0.18, 0.4), (-0.15, 0.25, 0.3))):
+        """
+        "_water_lobe_profile" before its global phase: the part that does not
+        depend on the phase, so a batch of phases can share one build.
+        """
         ppm = np.asarray(ppm_axis, float)
         if center_ppm is None:
             center_ppm = ppm_reference('1H')
-        phi = np.deg2rad(phase_deg)
         w = np.zeros_like(ppm, complex)
 
         # Causal Lorentzians of unit area, each with its own optional phase: a
@@ -182,8 +191,7 @@ class ResidualWater(BaseModule):
 
         # Normalize lobes to ~unit max
         peak_mag = np.max(np.abs(w))
-        w = w / (peak_mag if peak_mag > 0 else 1.0)
-        return w * np.exp(1j * phi)
+        return w / (peak_mag if peak_mag > 0 else 1.0)
 
     def _profile(self, index: int, ppm: np.ndarray, nucleus) -> np.ndarray:
         """
@@ -205,21 +213,24 @@ class ResidualWater(BaseModule):
         """
         One unit profile per sample, "(batch, N)".
 
-        A profile depends on the axis and the sample's lobe parameters alone, so
-        samples - and batches - that share them share one computed profile.
+        The lobes depend on the axis and the sample's centre alone, so samples -
+        and batches - that share them share one build; the global phase, drawn
+        per sample, is applied afterwards, as "_water_lobe_profile" applies it.
         """
-        cache = self.__dict__.setdefault('_profile_cache', {})
+        cache = self.__dict__.setdefault('_lobe_cache', {})
         axis = (ppm.size, hash(ppm.tobytes()), nucleus, repr(self.peaks))
         rows = []
         for i in range(batch):
-            center, phase = self.sample_of(self.center_ppm, i), self.sample_of(self.phase_deg, i)
-            key = axis + (None if center is None else float(center), float(phase))
+            center = self.sample_of(self.center_ppm, i)
+            center = ppm_reference(nucleus) if center is None else float(center)
+            key = axis + (center,)
             if key not in cache:
                 if len(cache) >= 256:
                     cache.clear()
-                cache[key] = self._profile(i, ppm, nucleus)
+                cache[key] = self._water_lobes(ppm, center_ppm=center, peaks=self.peaks)
             rows.append(cache[key])
-        return np.stack(rows)
+        phases = np.array([float(self.sample_of(self.phase_deg, i)) for i in range(batch)])
+        return np.stack(rows) * np.exp(1j * np.deg2rad(phases))[:, None]
 
     def process_nifti_list(self, data_list: List, water_list: Optional[List] = None, **kwargs):
         """

@@ -581,6 +581,54 @@ def causal_lineshape(ppm, center_ppm, lorentz_ppm=0.0, gauss_ppm=0.0):
     return spectrum / np.max(np.real(spectrum))
 
 
+def causal_lineshapes(ppm, center_ppm, lorentz_ppm=0.0, gauss_ppm=0.0):
+    """
+    "causal_lineshape" for a batch of resonances at once, "(batch, n)".
+
+    Row b is "causal_lineshape(ppm, center_ppm[b], lorentz_ppm[b], gauss_ppm[b])"
+    bit for bit: the per-row factors are formed exactly as the scalar ones
+    are, a width is applied only to the rows where it is positive, and the
+    transforms run row by row on the batch. It exists so that a module drawing
+    a resonance per sample pays for one set of array operations instead of one
+    per sample.
+
+    Args:
+        ppm: The ppm of every bin, as for "causal_lineshape".
+        center_ppm: "(batch,)" peak positions.
+        lorentz_ppm: Lorentzian FWHMs in ppm, a scalar or "(batch,)"; 0 for none.
+        gauss_ppm: Gaussian FWHMs in ppm, a scalar or "(batch,)"; 0 for none.
+
+    Returns:
+        A "(batch, n)" complex array whose rows' real parts peak at 1.
+    """
+    ppm = np.asarray(ppm, dtype=np.float64)
+    centers = np.asarray(center_ppm, dtype=np.float64).reshape(-1)
+    batch, n = centers.size, ppm.size
+    if n < 2:
+        return np.ones((batch, n), dtype=np.complex128)
+    lorentz = np.broadcast_to(np.asarray(lorentz_ppm, dtype=np.float64), (batch,))[:, None]
+    gauss = np.broadcast_to(np.asarray(gauss_ppm, dtype=np.float64), (batch,))[:, None]
+
+    step = float(np.median(np.diff(ppm)))
+    t = np.arange(n, dtype=np.float64)
+
+    # The winding factor goes through Python complex arithmetic as in the scalar
+    # version (which divides where NumPy's complex division would multiply by
+    # the reciprocal), so every row starts from the same complex number.
+    winding = np.array([2j * np.pi * (n // 2 - (n // 2 + (float(c) - ppm[n // 2]) / step)) / n
+                        for c in centers])
+    fid = np.exp(winding[:, None] * t)
+    if np.any(lorentz > 0):
+        damped = fid * np.exp(-np.pi * (lorentz / abs(step)) * t / n)
+        fid = np.where(lorentz > 0, damped, fid)
+    if np.any(gauss > 0):
+        damped = fid * np.exp(-(np.pi * (gauss / abs(step)) * t / n) ** 2 / (4.0 * np.log(2.0)))
+        fid = np.where(gauss > 0, damped, fid)
+
+    spectrum = np.fft.fftshift(np.fft.ifft(fid, axis=-1), axes=-1)
+    return spectrum / np.max(np.real(spectrum), axis=-1, keepdims=True)
+
+
 #***********************#
 #   per-sample values   #
 #***********************#
