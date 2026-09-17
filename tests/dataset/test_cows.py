@@ -269,11 +269,11 @@ def test_cache_round_trips_the_scans_and_skips_the_twix_read(study, synthetic, t
     first = loader.load_twix()
     assert len(synthetic) == 6
     assert sorted(os.listdir(cache)) == sorted(
-        ['index.json'] + [f"{s}.nii.gz" for s in METAB + MM]
-        + [f"{s}_water.nii.gz" for s in METAB + MM])
+        ['index.json'] + [f"{s}.nii" for s in METAB + MM]
+        + [f"{s}_water.nii" for s in METAB + MM])
     with open(cache / 'index.json') as handle:
         index = json.load(handle)
-    assert index['sub-10_acq-01_vapor7_metab_PFL.nii.gz']['region'] == 'PFL'
+    assert index['sub-10_acq-01_vapor7_metab_PFL.nii']['region'] == 'PFL'
 
     second = COWSDataModule(study, cache_dir=cache).load_twix()
     assert len(synthetic) == 6, "the second load read the TWIX files again"
@@ -294,7 +294,7 @@ def test_cache_is_bypassed_for_other_oversampling_or_a_changed_source(study, syn
     kept = COWSDataModule(study, cache_dir=cache, subjects='sub-10',
                           remove_oversampling=False).load_twix()
     assert len(synthetic) == 4 and kept[0][0].shape[3] == 128
-    assert (cache / 'sub-10_acq-01_vapor7_metab_PFL_os.nii.gz').is_file()
+    assert (cache / 'sub-10_acq-01_vapor7_metab_PFL_os.nii').is_file()
 
     # a source file that changed since is read again, not served stale
     (study / 'sub-10' / 'mrs' / 'sourcedata'
@@ -448,3 +448,20 @@ def test_the_truncated_upstream_file_fails_cleanly():
         data, _, mm, _, _ = loader.load_twix(strict=False)
     assert data == [] and loader.mm_names == ['sub-01_acq-07_vapor7_mm_OCC']
     assert len(loader.load_failures) == 1
+
+
+def test_a_compressed_cache_is_written_on_request_and_read_either_way(study, synthetic, tmp_path,
+                                                                     monkeypatch):
+    cache = tmp_path / 'cache'
+    first = COWSDataModule(study, cache_dir=cache, subjects='sub-10',
+                           compress_cache=True).load_twix()
+    assert (cache / 'sub-10_acq-01_vapor7_metab_PFL.nii.gz').is_file()
+    assert not (cache / 'sub-10_acq-01_vapor7_metab_PFL.nii').exists()
+
+    # the default (uncompressed) loader reads the gzipped cache instead of the TWIX
+    monkeypatch.setattr(cows, 'read_twix', lambda *a, **k: pytest.fail("TWIX read"))
+    monkeypatch.setattr(cows, '_load_twix_scan', lambda *a, **k: pytest.fail("TWIX read"))
+    second = COWSDataModule(study, cache_dir=cache, subjects='sub-10').load_twix()
+    assert len(second[0]) == len(first[0])
+    for a, b in zip(first[0], second[0]):
+        assert np.array_equal(a[:], b[:])
