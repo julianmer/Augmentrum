@@ -343,9 +343,15 @@ def COWSData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
              n_coils=(1, None), n_averages=(1, None), pipelines=None,
              modes=None, backend='pytorch', volatile=False,
              location=None, water_sup=None, subjects=None, source='twix',
-             remove_oversampling=True, cache_dir=None, workers=None, strict=True, **kwargs):
+             remove_oversampling=True, cache_dir=None, workers=None, strict=True,
+             device=None, **kwargs):
     """
     Load COWS metabolite scans and create an Augmentrum instance.
+
+    The default training pipeline draws coils and transients per sample (as
+    masks the processing consumes) and, on tensor backends, processes with the
+    batched torch engine (registration_method='torch'), the subject pool
+    stacked once on *device*; pass registration_method to choose another.
 
     Args:
         data_dir: Path to the COWS data directory (the ds006812 root).
@@ -367,15 +373,18 @@ def COWSData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
         cache_dir: Where loaded scans are cached as NIfTI-MRS (TWIX only).
         workers: Processes to read TWIX files with (None or 1: in-process).
         strict: Raise on a scan that fails to load; False skips it with a warning.
+        device: Torch device for the pooled subjects and batches (None: CPU).
         **kwargs: Additional parameters for modules.
 
     Returns:
         Augmentrum instance with COWS data loaded.
     """
     if pipelines is None:
-        # Train on random coil and transient subsets of the raw acquisition, then
-        # process; validate and test on the full acquisition, processed the same way.
-        pipelines = {'train': ['coil_sampling', 'average_sampling', 'processing'],
+        # Train on random coil and transient subsets of the raw acquisition - a
+        # subset of its own for every sample - then process; validate and test
+        # on the full acquisition, processed the same way.
+        pipelines = {'train': [{'coil_sampling': {'per_sample': True}},
+                               {'average_sampling': {'per_sample': True}}, 'processing'],
                      'val': ['processing'], 'test': ['processing']}
     if modes is None:
         modes = {'train': 'on-the-fly', 'val': 'fixed', 'test': 'fixed'}
@@ -385,6 +394,11 @@ def COWSData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
     accepted = Augmentrum.accepted_parameters(pipelines)
     sampling = {key: value for key, value in (('n_coils', n_coils), ('n_averages', n_averages))
                 if key in accepted}
+    # Tensor batches are processed by the batched engine unless told otherwise.
+    if (str(getattr(backend, 'value', backend)).lower() != 'nifti_list'
+            and 'registration_method' in accepted
+            and 'registration_method' not in kwargs):
+        kwargs['registration_method'] = 'torch'
 
     loader = COWSDataModule(data_dir=data_dir, location=location, water_sup=water_sup,
                             subjects=subjects, remove_oversampling=remove_oversampling,
@@ -410,6 +424,7 @@ def COWSData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
         seed=seed,
         volatile=volatile,
         groups=groups,
+        device=device,
         **sampling,
         **kwargs
     )
