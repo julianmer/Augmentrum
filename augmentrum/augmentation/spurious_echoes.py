@@ -22,7 +22,7 @@ import numpy as np
 from typing import Optional, List, Dict
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import batch_profile, ppm_reference
+from augmentrum.processing.utils import batch_profile, ppm_reference, to_backend
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
 from nifti_mrs_plus.ops import match_backend
@@ -489,7 +489,7 @@ class SpuriousEchoes(BaseModule):
                 profile = np.stack([self._echo_profile(e, t) for e in per_sample])
                 max_abs = ops.amax(ops.abs(data_array), axis=-1, keepdims=True)
                 ghost = ops.cast_like(max_abs, data_array) * ops.cast_like(
-                    match_backend(batch_profile(profile, ndim), data_array), data_array)
+                    to_backend(batch_profile(profile, ndim), data_array), data_array)
 
             elif self.mode == 'replica':
                 envelope = np.stack([self._replica_envelope(e, t) for e in per_sample])

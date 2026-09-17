@@ -61,6 +61,9 @@ class PhaseShift(BaseModule):
 
     SUPPORTED_BACKENDS = tuple(Backend)
 
+    # Acts on every coil and transient alike, so per-sample masks pass through.
+    MASKS = 'pass'
+
     # A constant rotation broadcasts, so a batch can carry one phase per
     # sample. The first-order ramp stays one per batch: its value decides the
     # module's domain, and a mixed batch would have no single answer.
@@ -221,6 +224,9 @@ class FrequencyShift(BaseModule):
     """
 
     SUPPORTED_BACKENDS = tuple(Backend)
+
+    # Acts on every coil and transient alike, so per-sample masks pass through.
+    MASKS = 'pass'
 
     # A frequency shift is applied as a phase that winds along the FID.
     DOMAIN = Domain(spectral='time')

@@ -21,10 +21,9 @@ from typing import Optional, List
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from augmentrum.processing.utils import (ppm_axis, ppm_reference, batch_profile,
-                                         per_sample_factor, causal_lineshape)
+                                         per_sample_factor, causal_lineshape, to_backend)
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
-from nifti_mrs_plus.ops import match_backend
 
 
 #**************************************************************************************************#
@@ -203,8 +202,24 @@ class ResidualWater(BaseModule):
         )
 
     def _profiles(self, batch: int, ppm: np.ndarray, nucleus) -> np.ndarray:
-        """One unit profile per sample, "(batch, N)"."""
-        return np.stack([self._profile(i, ppm, nucleus) for i in range(batch)])
+        """
+        One unit profile per sample, "(batch, N)".
+
+        A profile depends on the axis and the sample's lobe parameters alone, so
+        samples - and batches - that share them share one computed profile.
+        """
+        cache = self.__dict__.setdefault('_profile_cache', {})
+        axis = (ppm.size, hash(ppm.tobytes()), nucleus, repr(self.peaks))
+        rows = []
+        for i in range(batch):
+            center, phase = self.sample_of(self.center_ppm, i), self.sample_of(self.phase_deg, i)
+            key = axis + (None if center is None else float(center), float(phase))
+            if key not in cache:
+                if len(cache) >= 256:
+                    cache.clear()
+                cache[key] = self._profile(i, ppm, nucleus)
+            rows.append(cache[key])
+        return np.stack(rows)
 
     def process_nifti_list(self, data_list: List, water_list: Optional[List] = None, **kwargs):
         """
@@ -288,7 +303,7 @@ class ResidualWater(BaseModule):
         amp_ref = ops.amax(ops.abs(ops.real(spec)), axis=-1, keepdims=True)
         water_amp = per_sample_factor(self.amplitude_scale, ndim, amp_ref) * amp_ref
 
-        water_add = ops.cast_like(match_backend(unit_lobes, spec), spec) \
+        water_add = ops.cast_like(to_backend(unit_lobes, spec), spec) \
             * ops.cast_like(water_amp, spec)
 
         # 3. Add water in the spectral domain (backend-native)

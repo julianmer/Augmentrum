@@ -22,7 +22,7 @@ from scipy.signal import convolve, hilbert
 
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import ppm_axis, ppm_reference
+from augmentrum.processing.utils import ppm_axis, ppm_reference, to_backend
 from nifti_mrs_plus import Backend, ops
 
 
@@ -332,19 +332,80 @@ class BaselineAugmentation(BaseModule):
         bound = float(self.bounds_amp)
 
         steps = rng.normal(0.0, float(self.step_sd), size=(traces, n_pts))
-        walk = np.empty((traces, n_pts))
-        level = np.zeros(traces)
-        for i in range(n_pts):
-            level = level + steps[:, i]
-            level = np.where(level < -bound, -2.0 * bound - level, level)
-            level = np.where(level > bound, 2.0 * bound - level, level)
-            walk[:, i] = level
+        walk = self._reflected_walk(steps, bound)
 
         width = int(self.smooth_pts)
         if width > 1:
             walk = convolve(walk, np.ones((1, width)) / float(width), mode='same')
 
-        return ops.match_backend(hilbert(walk, axis=-1), like)
+        return to_backend(hilbert(walk, axis=-1), like)
+
+    @staticmethod
+    def _reflected_walk(steps, bound, window=64):
+        """
+        The running sum of *steps* per trace, reflected into [-bound, bound] at every step.
+
+        Each step reflects the level the one before reached, so the walk is
+        sequential - but only at its reflections: in between it is a plain
+        running sum. All traces therefore advance together, a *window* of steps
+        per round, each from its own position: a round sums the window onto the
+        trace's current level and stops the trace at its first exit, which is
+        reflected and becomes the level the next round starts from. The sums
+        associate exactly as step-by-step addition does, so the walk is bit for
+        bit the loop's. A walk that reflects so often that rounds stop paying
+        is finished step by step from the earliest open position, and so is a
+        batch of many traces, where a round costs more than a step.
+
+        Args:
+            steps: (traces, n_points) increments.
+            bound: The reflecting bound.
+            window: Steps per round.
+
+        Returns:
+            The (traces, n_points) walk.
+        """
+        traces, n_pts = steps.shape
+        walk = np.empty_like(steps)
+        offsets = np.arange(window)
+        rows = np.arange(traces)
+        start = np.zeros(traces, dtype=np.int64)       # next position of each trace
+        level = np.zeros(traces)                       # its level before that position
+        budget = 2 * (-(-n_pts // window)) + 8 if traces <= 64 else 0
+        while rows.size and budget:
+            budget -= 1
+            pos = start[rows, None] + offsets
+            valid = pos < n_pts
+            chunk = np.where(valid, steps[rows[:, None], np.minimum(pos, n_pts - 1)], 0.0)
+            sums = np.cumsum(np.concatenate([level[rows, None], chunk], axis=1), axis=1)[:, 1:]
+            outside = ((sums < -bound) | (sums > bound)) & valid
+            hit = outside.any(axis=1)
+            stop = np.where(hit, outside.argmax(axis=1), window)
+
+            inside = valid & (offsets < stop[:, None])
+            r, c = np.nonzero(inside)
+            walk[rows[r], pos[r, c]] = sums[r, c]
+
+            where = np.flatnonzero(hit)
+            reflected = sums[where, stop[where]]
+            reflected = np.where(reflected < -bound, -2.0 * bound - reflected, reflected)
+            reflected = np.where(reflected > bound, 2.0 * bound - reflected, reflected)
+            walk[rows[where], pos[where, stop[where]]] = reflected
+
+            level[rows] = np.where(hit, 0.0, sums[:, -1])
+            level[rows[where]] = reflected
+            exit_pos = pos[np.arange(rows.size), np.minimum(stop, window - 1)]
+            start[rows] = np.where(hit, exit_pos + 1, start[rows] + window)
+            rows = rows[start[rows] < n_pts]
+
+        # everything before the earliest open position is final
+        first = int(start[rows].min()) if rows.size else n_pts
+        level = walk[rows, first - 1] if first > 0 else np.zeros(rows.size)
+        for i in range(first, n_pts):
+            level = level + steps[rows, i]
+            level = np.where(level < -bound, -2.0 * bound - level, level)
+            level = np.where(level > bound, 2.0 * bound - level, level)
+            walk[rows, i] = level
+        return walk
 
     #*************************#
     #   the analytic signal   #
@@ -566,4 +627,4 @@ class BaselineAugmentation(BaseModule):
         else:
             per_sample = arr.reshape(-1)[np.arange(batch) % arr.size]
             column = np.repeat(per_sample, traces // batch).reshape(traces, 1)
-        return ops.match_backend(column, like)
+        return to_backend(column, like)

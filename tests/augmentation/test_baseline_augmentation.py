@@ -101,6 +101,26 @@ class TestRandomWalkBaseline:
 
         assert np.allclose(result1[0][:], result2[0][:])
 
+    @pytest.mark.parametrize("step_sd, bound, shape", [
+        (0.02, 1.0, (16, 2048)),        # the default: a few reflections
+        (0.2, 1.0, (8, 1024)),          # reflecting all the time
+        (3.0, 1.0, (4, 300)),           # steps overshooting the band
+        (0.05, 1.0, (128, 256)),        # many traces
+        (0.02, 1.0, (3, 1)),
+    ])
+    def test_the_walk_is_the_step_by_step_one(self, step_sd, bound, shape):
+        """The vectorised walk reproduces the reflecting loop bit for bit."""
+        steps = np.random.default_rng(0).normal(0.0, step_sd, size=shape)
+        walk = np.empty(shape)
+        level = np.zeros(shape[0])
+        for i in range(shape[1]):
+            level = level + steps[:, i]
+            level = np.where(level < -bound, -2.0 * bound - level, level)
+            level = np.where(level > bound, 2.0 * bound - level, level)
+            walk[:, i] = level
+
+        assert np.array_equal(BaselineAugmentation._reflected_walk(steps, bound), walk)
+
 
 #**************************************************************************************************#
 #                                    Class TestBSplineBaseline                                     #

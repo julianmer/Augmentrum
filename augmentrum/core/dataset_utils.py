@@ -155,7 +155,8 @@ def create_random_generator(data: NIfTI_MRS_Plus,
                             pipeline,
                             batch_size: int,
                             outputs=None,
-                            rng: Optional[np.random.Generator] = None):
+                            rng: Optional[np.random.Generator] = None,
+                            pool=None):
     """
     Infinite random-sampling generator (on-the-fly mode).
 
@@ -167,6 +168,10 @@ def create_random_generator(data: NIfTI_MRS_Plus,
             caller so that a seed fixes the draws and a second generator over
             the same split continues the stream rather than restarting it.
             None draws a fresh, unseeded generator.
+        pool: A TensorPool of *data* and *water* to draw batches from by
+            indexing (see augmentrum.core.pool); None copies the subjects'
+            NIfTI objects for every batch. The subject draws are the same
+            either way.
 
     Yields:
         (batch_data, batch_water) — NIfTI_MRS_Plus objects — or, with an
@@ -178,9 +183,12 @@ def create_random_generator(data: NIfTI_MRS_Plus,
 
     while True:
         indices = rng.integers(0, n_subjects, size=batch_size).tolist()
-        batch_data, batch_water = _make_batch(data, water, indices)
+        batch_data, batch_water = (pool.batch(indices) if pool is not None
+                                   else _make_batch(data, water, indices))
         batch_params = pipeline.sample_batch_parameters(batch_size)
         result = pipeline(batch_data, batch_water, batch_params=batch_params)
+        # the drawn batch is spent: letting go lets the pool reuse its memory
+        del batch_data, batch_water
         yield _resolve_outputs(pipeline, result, outputs)
 
 
@@ -191,7 +199,8 @@ def create_fixed_generator(data: NIfTI_MRS_Plus,
                            shuffle: bool = False,
                            outputs=None,
                            rng: Optional[np.random.Generator] = None,
-                           fixed_params=None):
+                           fixed_params=None,
+                           pool=None):
     """
     Single-pass generator with fixed augmentation parameters.
 
@@ -207,6 +216,7 @@ def create_fixed_generator(data: NIfTI_MRS_Plus,
         fixed_params: The parameters, as "pipeline.sample_batch_parameters"
             returns them. None samples them once here, for callers that do
             not keep any.
+        pool: A TensorPool to draw batches from, as for the random generator.
 
     Yields:
         (batch_data, batch_water) — NIfTI_MRS_Plus objects — or, with an
@@ -224,9 +234,11 @@ def create_fixed_generator(data: NIfTI_MRS_Plus,
 
     for start in range(0, n_subjects, batch_size):
         batch_idx = indices[start : start + batch_size]
-        batch_data, batch_water = _make_batch(data, water, batch_idx)
+        batch_data, batch_water = (pool.batch(batch_idx) if pool is not None
+                                   else _make_batch(data, water, batch_idx))
         params = _trim_batch_params(fixed_params, len(batch_idx))
         result = pipeline(batch_data, batch_water, batch_params=params)
+        del batch_data, batch_water
         yield _resolve_outputs(pipeline, result, outputs)
 
 
@@ -263,7 +275,14 @@ def convert_batch_to_backend(batch_data: List, batch_water: List, backend: Backe
     if backend == Backend.NIFTI_LIST:
         return batch_data, batch_water
 
-    elif backend == Backend.NUMPY:
+    # A batch hands over its tensor as it is - on its device, without a trip
+    # through its NIfTI objects - where the backend is the one it holds.
+    if backend in (Backend.NUMPY, Backend.PYTORCH) and isinstance(batch_data, NIfTI_MRS_Plus):
+        water = batch_water if isinstance(batch_water, NIfTI_MRS_Plus) else None
+        return (_batch_tensor(batch_data, backend),
+                _batch_tensor(water, backend) if water is not None else None)
+
+    if backend == Backend.NUMPY:
         # Convert to numpy arrays
         data_arrays = []
         for item in batch_data:
@@ -315,6 +334,20 @@ def convert_batch_to_backend(batch_data: List, batch_water: List, backend: Backe
 
     else:
         raise ValueError(f"Unknown backend: {backend}")
+
+
+def _batch_tensor(batch: NIfTI_MRS_Plus, backend: Backend):
+    """
+    A batch's values as a *backend* tensor, straight from its pending tensor.
+
+    PyTorch batches stay on their device and leave detached, as the NumPy
+    round trip this replaces left them.
+    """
+    if len(batch) == 0:
+        return None
+    if backend == Backend.PYTORCH:
+        return batch.get_data(Backend.PYTORCH).detach()
+    return np.asarray(batch.get_data(Backend.NUMPY))
 
 
 #***********************************#

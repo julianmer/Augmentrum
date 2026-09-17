@@ -60,6 +60,9 @@ class ZeroFill(BaseModule):
 
     SUPPORTED_BACKENDS = tuple(Backend)
 
+    # Acts on every coil and transient alike, so per-sample masks pass through.
+    MASKS = 'pass'
+
     # Padding lengthens the FID; in a spectrum it would interpolate.
     DOMAIN = Domain(spectral='time')
 

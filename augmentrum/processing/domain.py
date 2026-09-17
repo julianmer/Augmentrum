@@ -117,6 +117,9 @@ class DomainTransform(BaseModule):
 
     SUPPORTED_BACKENDS = tuple(b for b in Backend if b is not Backend.NIFTI_LIST)
 
+    # Acts on every coil and transient alike, so per-sample masks pass through.
+    MASKS = 'pass'
+
     #: Which axis of a batched array each domain lives on.
     SPECTRAL_AXIS = 4
     SPATIAL_AXES = (1, 2, 3)

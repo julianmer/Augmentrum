@@ -621,7 +621,31 @@ def per_sample_factor(value, ndim, like):
     arr = np.asarray(value, dtype=np.float64)
     if arr.ndim == 0:
         return float(arr)
-    return ops.match_backend(arr.reshape((-1,) + (1,) * (ndim - 1)), like)
+    return to_backend(arr.reshape((-1,) + (1,) * (ndim - 1)), like)
+
+
+def to_backend(param, like, dtype=None):
+    """
+    "ops.match_backend" - or, with *dtype*, "ops.asarray_like" - without the wait.
+
+    Uploading a host array to a CUDA tensor makes the host wait for all the
+    work queued on the device before it. Going through pinned memory without
+    blocking lets a pipeline queue a whole batch and the device run it in one
+    go; the values, dtype and device are the same.
+
+    Args:
+        param: A NumPy parameter array.
+        like: The tensor whose backend and device it goes to.
+        dtype: Target dtype name; None adopts *like*'s.
+    """
+    if ops.is_torch(like) and like.device.type == 'cuda':
+        import torch
+        from augmentrum.processing.torch_engine import upload
+        target = getattr(torch, dtype) if dtype is not None else like.dtype
+        return upload(param, like.device).to(target)
+    if dtype is not None:
+        return ops.asarray_like(like, param, dtype=dtype)
+    return ops.match_backend(param, like)
 
 
 #********************#

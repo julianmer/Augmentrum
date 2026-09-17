@@ -343,9 +343,15 @@ def COWSData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
              n_coils=(1, None), n_averages=(1, None), pipelines=None,
              modes=None, backend='pytorch', volatile=False,
              location=None, water_sup=None, subjects=None, source='twix',
-             remove_oversampling=True, cache_dir=None, workers=None, strict=True, **kwargs):
+             remove_oversampling=True, cache_dir=None, workers=None, strict=True,
+             device=None, compress_cache=False, **kwargs):
     """
     Load COWS metabolite scans and create an Augmentrum instance.
+
+    The default training pipeline draws coils and transients per sample (as
+    masks the processing consumes) and, on tensor backends, processes with the
+    batched torch engine (registration_method='torch'), the subject pool
+    stacked once on *device*; pass registration_method to choose another.
 
     Args:
         data_dir: Path to the COWS data directory (the ds006812 root).
@@ -365,17 +371,21 @@ def COWSData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
         source: 'twix' (raw, default) or 'mat' (INSPECTOR-processed derivatives).
         remove_oversampling: Remove the 2x readout oversampling (TWIX only).
         cache_dir: Where loaded scans are cached as NIfTI-MRS (TWIX only).
+        compress_cache: Write that cache gzipped, see "COWSDataModule".
         workers: Processes to read TWIX files with (None or 1: in-process).
         strict: Raise on a scan that fails to load; False skips it with a warning.
+        device: Torch device for the pooled subjects and batches (None: CPU).
         **kwargs: Additional parameters for modules.
 
     Returns:
         Augmentrum instance with COWS data loaded.
     """
     if pipelines is None:
-        # Train on random coil and transient subsets of the raw acquisition, then
-        # process; validate and test on the full acquisition, processed the same way.
-        pipelines = {'train': ['coil_sampling', 'average_sampling', 'processing'],
+        # Train on random coil and transient subsets of the raw acquisition - a
+        # subset of its own for every sample - then process; validate and test
+        # on the full acquisition, processed the same way.
+        pipelines = {'train': [{'coil_sampling': {'per_sample': True}},
+                               {'average_sampling': {'per_sample': True}}, 'processing'],
                      'val': ['processing'], 'test': ['processing']}
     if modes is None:
         modes = {'train': 'on-the-fly', 'val': 'fixed', 'test': 'fixed'}
@@ -385,10 +395,16 @@ def COWSData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
     accepted = Augmentrum.accepted_parameters(pipelines)
     sampling = {key: value for key, value in (('n_coils', n_coils), ('n_averages', n_averages))
                 if key in accepted}
+    # Tensor batches are processed by the batched engine unless told otherwise.
+    if (str(getattr(backend, 'value', backend)).lower() != 'nifti_list'
+            and 'registration_method' in accepted
+            and 'registration_method' not in kwargs):
+        kwargs['registration_method'] = 'torch'
 
     loader = COWSDataModule(data_dir=data_dir, location=location, water_sup=water_sup,
                             subjects=subjects, remove_oversampling=remove_oversampling,
-                            cache_dir=cache_dir, workers=workers, strict=strict)
+                            cache_dir=cache_dir, workers=workers, strict=strict,
+                            compress_cache=compress_cache)
     if source == 'twix':
         data, water, _, _, _ = loader.load_twix()
     elif source == 'mat':
@@ -410,6 +426,7 @@ def COWSData(data_dir, batch_size=16, seed=0, val_frac=0.1, test_frac=0.1,
         seed=seed,
         volatile=volatile,
         groups=groups,
+        device=device,
         **sampling,
         **kwargs
     )
@@ -453,9 +470,11 @@ class COWSDataModule:
     "REGIONS".
 
     Caching: with "cache_dir" each TWIX scan is written once as
-    "<stem>.nii.gz" and "<stem>_water.nii.gz" plus an "index.json", and read
-    from there afterwards, header fields included. Reading TWIX is ~0.35 s a
-    file; the cache is several times faster and does not need pymapvbvd.
+    "<stem>.nii" and "<stem>_water.nii" plus an "index.json", and read from
+    there afterwards, header fields included. Uncompressed by default: raw
+    coil and transient data is mostly noise, so gzip saves ~7 % of the space
+    while every read has to inflate the whole file (~60 ms a scan against
+    ~3 ms memory-mapped). Reading TWIX is ~0.35 s a file and needs pymapvbvd.
 
     Args:
         data_dir: The ds006812 root (or, for "load_mats", the "mrs_mat"
@@ -473,13 +492,15 @@ class COWSDataModule:
             reads in-process.
         strict: Raise on the first scan that fails to load (default). False
             skips it with a warning and records it in "load_failures".
+        compress_cache: Write the cache as ".nii.gz" instead of ".nii". A
+            cache in the other format is still read rather than rebuilt.
     """
 
     INDEX = 'index.json'
 
     def __init__(self, data_dir, location=None, water_sup=None, subjects=None,
                  remove_oversampling: bool = True, cache_dir=None, workers=None,
-                 strict: bool = True):
+                 strict: bool = True, compress_cache: bool = False):
         self.data_dir = str(data_dir)
         self.regions = self._canonical(location, REGIONS, 'location')
         self.water_sup = self._canonical(water_sup, WATER_SUPPRESSIONS, 'water_sup')
@@ -487,6 +508,7 @@ class COWSDataModule:
             s.lower() for s in ([subjects] if isinstance(subjects, str) else subjects))
         self.remove_oversampling = bool(remove_oversampling)
         self.cache_dir = None if cache_dir is None else str(cache_dir)
+        self.compress_cache = bool(compress_cache)
         self.workers = workers
         self.strict = strict
 
@@ -600,11 +622,12 @@ class COWSDataModule:
     #***********#
     #   cache   #
     #***********#
-    def _cache_paths(self, scan: COWSScan):
+    def _cache_paths(self, scan: COWSScan, compressed=None):
         # Oversampled data is a different array, so it gets its own files.
         stem = scan.stem + ('' if self.remove_oversampling else '_os')
-        return (os.path.join(self.cache_dir, stem + '.nii.gz'),
-                os.path.join(self.cache_dir, stem + '_water.nii.gz'))
+        ext = '.nii.gz' if (self.compress_cache if compressed is None else compressed) else '.nii'
+        return (os.path.join(self.cache_dir, stem + ext),
+                os.path.join(self.cache_dir, stem + '_water' + ext))
 
     def _index(self) -> dict:
         path = os.path.join(self.cache_dir, self.INDEX)
@@ -622,12 +645,14 @@ class COWSDataModule:
         """The cached "(data, water)" of a scan, or None if absent or from another source."""
         from fsl_mrs.utils.mrs_io import read_FID
 
-        data_path, water_path = self._cache_paths(scan)
-        entry = index.get(os.path.basename(data_path))
-        if (entry is None or not os.path.isfile(data_path) or not os.path.isfile(water_path)
-                or entry.get('size') != os.path.getsize(scan.path)):
-            return None
-        return read_FID(data_path), read_FID(water_path)
+        # the configured format first, then a cache written in the other one
+        for compressed in (self.compress_cache, not self.compress_cache):
+            data_path, water_path = self._cache_paths(scan, compressed)
+            entry = index.get(os.path.basename(data_path))
+            if (entry is not None and os.path.isfile(data_path) and os.path.isfile(water_path)
+                    and entry.get('size') == os.path.getsize(scan.path)):
+                return read_FID(data_path), read_FID(water_path)
+        return None
 
     def _write_cache(self, scan: COWSScan, data, water, index: dict):
         """Save a scan's NIfTIs and record them in "index" (the caller saves the index)."""
