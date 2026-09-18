@@ -24,6 +24,7 @@ import numpy as np
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
+from augmentrum.core import precision as prec
 from augmentrum.utils.geometry import Affine
 from nifti_mrs_plus import ops, resample
 
@@ -519,8 +520,9 @@ class SpatialAugmentations(BaseModule):
         n_batch, n_chan = ops.shape(xg)[0], ops.shape(xg)[1]
         spatial = tuple(ops.shape(xg)[2:])
 
-        # theta is a small NumPy matrix; move it onto the data's own backend
-        theta_b = ops.asarray_like(xg, theta)
+        # theta is a small NumPy matrix; move it onto the data's own backend, in its precision
+        theta_b = ops.asarray_like(xg, theta,
+                                   dtype='float64' if prec.of(xg) == 'double' else 'float32')
 
         # The sampling grid depends only on (theta, spatial) — never on C — so it
         # is built once and reused for every chunk and for both the real and the
@@ -633,7 +635,7 @@ class SpatialAugmentations(BaseModule):
             phase = phase + (2.0 * np.pi * k.reshape([1] + view)
                              * voxels.reshape((-1,) + (1,) * len(spatial)))
 
-        ramp = np.exp(1j * phase).astype(np.complex64)[..., None]
+        ramp = np.exp(1j * phase)[..., None]
         return x * ops.cast_like(ops.match_backend(ramp, x), x)
 
     def _grid_sample(self, x, grid):
@@ -744,7 +746,8 @@ class SpatialAugmentations(BaseModule):
             data = nifti[:]  # Assuming this returns the data array
 
             tensor = data if not isinstance(data, np.ndarray) else data
-            tensor = ops.cast(tensor, "complex64" if ops.is_complex(tensor) else "float32")
+            if prec.of(tensor) is None:                  # integer data: resampled as float32
+                tensor = ops.cast(tensor, "float32")
             tensors.append(tensor)
 
         return ops.stack(tensors, axis=0)
@@ -848,9 +851,10 @@ class SpatialAugmentations(BaseModule):
         pipeline = kwargs.get('pipeline', self.pipeline)
         aug_spec_list = kwargs.get('aug_spec_list', None)
 
-        # Stay on whatever backend the caller handed us
-        data_array = ops.cast(
-            data_array, "complex64" if ops.is_complex(data_array) else "float32")
+        # Stay on whatever backend the caller handed us, in its precision (augmentrum.core.
+        # precision); integer data are resampled as float32
+        if prec.of(data_array) is None:
+            data_array = ops.cast(data_array, "float32")
 
         # Only relocate when a device was explicitly requested — otherwise leave
         # the tensor where the caller put it (moving it would drag GPU tensors
