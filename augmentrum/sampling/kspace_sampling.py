@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 
 from augmentrum.core.base_module import BaseModule
+from augmentrum.core import precision as prec
 from augmentrum.processing.domain import Domain
 from nifti_mrs_plus import Backend
 from nifti_mrs_plus import ops
@@ -3887,14 +3888,15 @@ class KspaceUndersampling(BaseModule):
         from augmentrum.processing.interpolating import LinearInterpolator
         from augmentrum.sampling.kspace_reconstructor import GriddingNUFFT
 
-        # Gridding takes the trajectory in [-0.5, 0.5) per axis
-        coords = (pts / (2.0 * kmax[None, :])).astype(np.float32)
+        # Gridding takes the trajectory in [-0.5, 0.5) per axis; host arrays in double, cast to
+        # the data's precision where they meet it
+        coords = (pts / (2.0 * kmax[None, :])).astype(np.float64)
         dual = recon_pts is not None
         recon_coords = (coords if not dual else
-                        (recon_pts / (2.0 * kmax[None, :])).astype(np.float32))
+                        (recon_pts / (2.0 * kmax[None, :])).astype(np.float64))
 
         nx, ny, nz = matrix
-        vol = ops.cast(data_array, 'complex64')
+        vol = ops.cast(data_array, prec.complex_name(data_array))
         n_batch = int(ops.shape(vol)[0])
         n_t = int(ops.shape(vol)[4])
 
@@ -3977,13 +3979,14 @@ class KspaceUndersampling(BaseModule):
         import torch as _torch
         from augmentrum.sampling.kspace_reconstructor import KspaceReconstructor
 
-        coords = _torch.from_numpy(pts.T).float()[None, None]          # [1, 1, D, K]
-        coords = KspaceReconstructor.normalize_trajectory(coords, kmax)
-
         was_numpy = not is_torch(data_array)
         vol = _torch.as_tensor(np.asarray(data_array)) if was_numpy else data_array
         dtype = vol.dtype
-        vol = vol.to(_torch.complex64)
+        vol = vol.to(getattr(_torch, prec.complex_name(vol)))           # its own precision
+        real = vol.real.dtype
+
+        coords = _torch.from_numpy(pts.T).to(real)[None, None]          # [1, 1, D, K]
+        coords = KspaceReconstructor.normalize_trajectory(coords, kmax)
 
         nx, ny, nz = matrix
         if ndim == 2:                       # (B, X, Y, Z, T) -> (B, Z*T, X, Y)
@@ -4002,6 +4005,7 @@ class KspaceUndersampling(BaseModule):
         kdata = recon._tkbn().KbNufft(
             im_size=im_size,
             grid_size=tuple(int(self.nufft_osf * n) for n in im_size),
+            dtype=real,
         )(stack, ktraj)
         if self.noise_sigma_k:
             kdata = self._add_kspace_noise(kdata)
@@ -4213,8 +4217,8 @@ class KspaceUndersampling(BaseModule):
         adjoint — so the reconstruction shapes the noise exactly as regridding
         shapes it in an in vivo acquisition.
         """
-        real = self.rng.normal(tuple(ops.shape(k)), like=ops.real(k))
-        imag = self.rng.normal(tuple(ops.shape(k)), like=ops.real(k))
+        real = self.rng.normal(tuple(ops.shape(k)), like=ops.real(k), dtype=prec.real_name(k))
+        imag = self.rng.normal(tuple(ops.shape(k)), like=ops.real(k), dtype=prec.real_name(k))
         return k + float(self.noise_sigma_k) * ops.cast_like(
             ops.complex_from(real, imag), k)
 

@@ -90,7 +90,7 @@ class LinearInterpolator(Interpolator):
         stack = ops.reshape(grid, (1,) + tuple(ops.shape(grid)))
         view = (1,) * (len(ops.shape(grid)) - 1) + (len(coords), coords.shape[1])
         sample_grid = ops.match_backend(
-            np.ascontiguousarray(coords[..., ::-1]).astype(np.float32).reshape(view),
+            np.ascontiguousarray(coords[..., ::-1]).astype(np.float64).reshape(view),
             ops.real(grid))
 
         if ops.is_complex(grid):
@@ -231,7 +231,7 @@ class KaiserBesselInterpolator(GriddingKernel):
         for n, grid in zip(im_size, self.grid_size):
             axis = self._axis_deapodization(int(n), int(grid))
             deapod = axis if deapod is None else np.multiply.outer(deapod, axis)
-        return deapod.astype(np.float32)
+        return deapod.astype(np.float64)
 
     def _axis_deapodization(self, n: int, grid: int) -> np.ndarray:
         """The correction along one image axis of length *n*."""
@@ -274,7 +274,7 @@ class KaiserBesselInterpolator(GriddingKernel):
             else:
                 flat_idx = (flat_idx[:, :, None] + idx_d[:, None, :]).reshape(len(coords), -1)
                 flat_w = (flat_w[:, :, None] * per_axis_w[d][:, None, :]).reshape(len(coords), -1)
-        return flat_idx, flat_w.astype(np.float32)
+        return flat_idx, flat_w.astype(np.float64)
 
     def sample(self, grid, coords):
         """Gather each sample from the bins its kernel touches."""

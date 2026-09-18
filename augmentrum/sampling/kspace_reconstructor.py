@@ -236,7 +236,7 @@ class GriddingNUFFT:
             back = (grid[flat_idx].reshape(idx.shape) * weight).sum(axis=1)
             w = w / np.maximum(back, 1e-12)
 
-        return (w / w.max()).astype(np.float32)
+        return w / w.max()
 
 
 #**************************************************************************************************#
@@ -377,7 +377,7 @@ class KspaceReconstructor:
             raise ValueError(f"k_max values must be positive, got {values}.")
 
         scale = ops.match_backend(
-            np.asarray(values, dtype=np.float32).reshape(1, 1, ndim, 1), coords)
+            np.asarray(values, dtype=np.float64).reshape(1, 1, ndim, 1), coords)
         return coords / ops.cast_like(scale, coords)
 
     @staticmethod
@@ -430,7 +430,7 @@ class KspaceReconstructor:
         # The weights depend only on the trajectory, so they are computed once
         # in NumPy from the first batch element and broadcast.
         flat = ops.to_numpy(self.flatten(coords)[0])[0].T / (2.0 * np.pi)
-        weights = self._gridder().density_weights(flat.astype(np.float32))
+        weights = self._gridder().density_weights(flat.astype(np.float64))
 
         return ops.reshape(ops.match_backend(weights, coords), (1, S, L)) \
             + ops.cast_like(ops.full_like_shape(coords, (B, S, L), 0.0), coords)
@@ -462,7 +462,7 @@ class KspaceReconstructor:
             samples = ops.reshape(
                 ops.take(kdata_flat, np.array([b]), axis=0),
                 ops.shape(kdata_flat)[1:])
-            planes.append(gridder.adjoint(samples, coords_b.astype(np.float32)))
+            planes.append(gridder.adjoint(samples, coords_b.astype(np.float64)))
 
         return ops.stack(planes, axis=0)
 
