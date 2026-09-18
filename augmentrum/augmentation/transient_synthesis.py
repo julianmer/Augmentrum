@@ -128,6 +128,7 @@ class TransientSynthesizer(BaseModule):
         self.events_per_min = events_per_min
         self.seed = seed
         self.last_tracks_ = ()
+        self.last_events_ = ()
 
     #*****************#
     #   scan draws    #
@@ -174,6 +175,9 @@ class TransientSynthesizer(BaseModule):
         amplitude (fraction), extra broadening (Hz FWHM), each of length
         n_transients. Public so a simulator can record the realized tracks
         as ground truth; process_tensor keeps its own draws in "last_tracks_".
+        The motion events behind the tracks stay in "last_events_", one dict
+        per event (start and stop transient, disruptive, persistent), so a
+        simulator can move its subject when the tracks say the subject moved.
 
         Args:
             rng: A numpy Generator, e.g. "self.rng.numpy_rng()".
@@ -203,6 +207,7 @@ class TransientSynthesizer(BaseModule):
 
         # Motion events: sparse, clustered, occasionally persistent.
         n_events = rng.poisson(p['events_per_min'] * scan_s / 60.0)
+        events = []
         for _ in range(int(n_events)):
             start = int(rng.integers(0, n))
             stop = min(n, start + 1 + int(rng.geometric(0.5)))
@@ -214,10 +219,14 @@ class TransientSynthesizer(BaseModule):
             if disruptive:
                 amp[hit] *= 1.0 - rng.uniform(0.05, 0.5)
                 broaden[hit] += rng.uniform(5.0, 20.0)
-            if rng.random() < 0.5:
+            persistent = rng.random() < 0.5
+            if persistent:
                 freq[hit.stop:] += 3.0 * rng.standard_normal()
                 broaden[hit.stop:] += rng.uniform(0.5, 3.0)
+            events.append({'start': hit.start, 'stop': hit.stop,
+                           'disruptive': bool(disruptive), 'persistent': bool(persistent)})
 
+        self.last_events_ = tuple(events)
         return freq, phase, amp, broaden
 
     #*****************#
