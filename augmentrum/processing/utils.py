@@ -429,10 +429,15 @@ def resample_signal_lp(data, npoints, bandwidth, axis=1):
 #   fsl-mrs axis conventions   #
 #******************************#
 def fid_to_spec(fids):
-    """FSL-MRS FIDToSpec along the last axis: ortho fft, first point halved."""
-    fids = np.array(fids, dtype=np.complex128)
+    """
+    FSL-MRS FIDToSpec along the last axis: ortho fft, first point halved; in the precision of
+    *fids* (NumPy's FFT computes in double, so the result is put back).
+    """
+    fids = np.array(fids)
+    fids = fids.astype(np.result_type(fids.dtype, np.complex64), copy=False)
     fids[..., 0] *= 0.5
-    return np.fft.fftshift(np.fft.fft(fids, axis=-1, norm='ortho'), axes=-1)
+    spec = np.fft.fftshift(np.fft.fft(fids, axis=-1, norm='ortho'), axes=-1)
+    return spec.astype(fids.dtype, copy=False)
 
 
 #: fsl_mrs.utils.constants.PPM_SHIFT, copied so the axis helpers work without FSL-MRS.
