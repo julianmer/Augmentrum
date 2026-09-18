@@ -521,8 +521,7 @@ class SpatialAugmentations(BaseModule):
         spatial = tuple(ops.shape(xg)[2:])
 
         # theta is a small NumPy matrix; move it onto the data's own backend, in its precision
-        theta_b = ops.asarray_like(xg, theta,
-                                   dtype='float64' if prec.of(xg) == 'double' else 'float32')
+        theta_b = ops.asarray_like(xg, theta, dtype=prec.real_name(xg))
 
         # The sampling grid depends only on (theta, spatial) — never on C — so it
         # is built once and reused for every chunk and for both the real and the

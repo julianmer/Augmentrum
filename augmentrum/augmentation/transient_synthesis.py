@@ -243,8 +243,7 @@ class TransientSynthesizer(BaseModule):
 
         return (amp[None, :]
                 * np.exp(-np.pi * broaden[None, :] * t)
-                * np.exp(1j * (2.0 * np.pi * freq[None, :] * t + phase[None, :]))
-                ).astype(np.complex64)
+                * np.exp(1j * (2.0 * np.pi * freq[None, :] * t + phase[None, :])))
 
     def process_tensor(self, data_array, water_array=None,
                        backend: Backend = Backend.NUMPY, **kwargs):

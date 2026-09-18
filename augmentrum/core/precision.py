@@ -22,7 +22,7 @@ from typing import Optional
 from nifti_mrs_plus import ops
 
 
-__all__ = ['PRECISIONS', 'check', 'of', 'dtype_name', 'cast']
+__all__ = ['PRECISIONS', 'check', 'of', 'dtype_name', 'real_name', 'complex_name', 'cast']
 
 
 #: The precisions a module can be asked to work in.
@@ -75,6 +75,22 @@ def dtype_name(x, precision: Optional[str] = None) -> str:
     if target is None or name not in _OF:
         return name
     return (_COMPLEX if name.startswith('complex') else _REAL)[target]
+
+
+#***************#
+#   real name   #
+#***************#
+def real_name(x) -> str:
+    """
+    The real dtype name of *x*'s precision, for what is made to meet it (an axis, a level, a
+    random draw): 'float64' for double-precision data, 'float32' for anything else.
+    """
+    return _REAL['double' if of(x) == 'double' else 'single']
+
+
+def complex_name(x) -> str:
+    """The complex dtype name of *x*'s precision: 'complex128' for double, 'complex64' else."""
+    return _COMPLEX['double' if of(x) == 'double' else 'single']
 
 
 #**********#

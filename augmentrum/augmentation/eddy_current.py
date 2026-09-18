@@ -245,7 +245,8 @@ class EddyCurrent(BaseModule):
         Returns:
             Phase values in radians, one per point of the water
         """
-        w = np.asarray(fid_water, dtype=np.complex128).ravel()
+        w = np.asarray(fid_water).ravel()
+        w = w.astype(np.result_type(w.dtype, np.complex64), copy=False)     # its own precision
         n = w.size
         t = np.arange(n, dtype=float) / float(sw_hz)
         mag = np.abs(w)
