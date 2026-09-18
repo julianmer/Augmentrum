@@ -22,6 +22,7 @@ from augmentrum.core import NIfTI_MRS_Plus, Backend
 from nifti_mrs_plus.core import DataState
 from nifti_mrs_plus import ops
 from nifti_mrs_plus.random import SeedGenerator
+from augmentrum.core import precision as prec
 from augmentrum.core.pool import (masks_of, set_masks, origin_of, set_origin, rewrap,
                                   water_masks)
 
@@ -99,6 +100,12 @@ class BaseModule(ABC):
     # keeps its pool origin, and consumers may use results the pool cached.
     PRESERVES_VALUES: bool = False
 
+    # The working precision, set by every module's "precision" argument: 'single', 'double',
+    # or None to follow the data. The data are cast to it on the way in (augmentrum.core.
+    # precision), so a module that follows the dtype of what it is given computes, and
+    # returns, in that precision.
+    precision: Optional[str] = None
+
     def __init_subclass__(cls, **kwargs):
         """
         Wrap a subclass's "__init__" so its arguments are recorded automatically.
@@ -118,7 +125,7 @@ class BaseModule(ABC):
         kinds = {p.name: p.kind for p in signature.parameters.values()}
 
         @functools.wraps(init)
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args, precision=None, **kwargs):
             init(self, *args, **kwargs)
 
             bound = signature.bind(self, *args, **kwargs)
@@ -133,6 +140,11 @@ class BaseModule(ABC):
                 else:
                     params[name] = value
 
+            # every module takes "precision", whatever its own signature (pipeline.
+            # constructor_params adds it); set last, so an outer class's value wins
+            self.precision = prec.check(precision)
+            if precision is not None:
+                params['precision'] = precision
             self.params = params
             self.rng = SeedGenerator(params.get('seed'))
 
@@ -308,6 +320,11 @@ class BaseModule(ABC):
         # Log provenance (only if not volatile)
         operation_name = self.__class__.__name__
         operation_details = {'method': 'process_nifti_list', 'params': self.params, **kwargs}
+        # NIfTI objects keep the dtype they are stored in: a list-path module works on
+        # that, and its output is put into the working precision
+        cast_out = lambda out: (out if out is None or self.precision is None else out.set_data(
+            prec.cast(out.get_data(out.backend if out.backend != Backend.NIFTI_LIST
+                                   else Backend.NUMPY), self.precision)))
 
         # Wrap back into NIfTI_MRS_Plus
         data_out = NIfTI_MRS_Plus(
@@ -317,6 +334,7 @@ class BaseModule(ABC):
             state=self.output_state(data.state)
         )
 
+        data_out = cast_out(data_out)
         # Update metadata if not volatile
         if not data.volatile:
             data_out.update_metadata(operation_name, operation_details)
@@ -329,6 +347,7 @@ class BaseModule(ABC):
                 volatile=water.volatile if water else data.volatile,
                 state=self.output_state(water.state if water else data.state)
             )
+            water_out = cast_out(water_out)
             if water and not water.volatile:
                 water_out.update_metadata(operation_name, operation_details)
 
@@ -446,9 +465,11 @@ class BaseModule(ABC):
         if origins[1] is not None:
             kwargs.setdefault('water_pool_origin', origins[1])
 
-        # ── Get data in native backend format (not forced to numpy!) ──
-        data_array = data.get_data(backend)
-        water_array = water.get_data(backend) if water is not None else None
+        # ── Get data in native backend format (not forced to numpy!), in the working precision ──
+        original = data.get_data(backend)
+        water_original = water.get_data(backend) if water is not None else None
+        data_array = prec.cast(original, self.precision)
+        water_array = prec.cast(water_original, self.precision)
 
         # ── Process (receives native tensors — preserves gradients) ──
         moved = self._spectral_axis_last(data_array)
@@ -477,8 +498,9 @@ class BaseModule(ABC):
         set_masks(data_out, masks)
         set_masks(water_out, water_masks(masks))
         if self.PRESERVES_VALUES:
-            set_origin(data_out, origins[0] if processed_data is data_array else None)
-            set_origin(water_out, origins[1] if processed_water is water_array else None)
+            # values still equal the pool's only if nothing, not even a cast, touched them
+            set_origin(data_out, origins[0] if processed_data is original else None)
+            set_origin(water_out, origins[1] if processed_water is water_original else None)
 
         return data_out, water_out
 

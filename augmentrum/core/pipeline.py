@@ -76,10 +76,14 @@ def constructor_params(module) -> List[str]:
     except (TypeError, ValueError):
         params = getattr(module, 'params', None)
         return list(params.keys()) if isinstance(params, dict) else []
-    return [p.name for p in sig.parameters.values()
-            if p.name != 'self'
-            and p.kind not in (inspect.Parameter.VAR_POSITIONAL,
-                               inspect.Parameter.VAR_KEYWORD)]
+    names = [p.name for p in sig.parameters.values()
+             if p.name != 'self'
+             and p.kind not in (inspect.Parameter.VAR_POSITIONAL,
+                                inspect.Parameter.VAR_KEYWORD)]
+    # every module takes its working precision (BaseModule adds it to any signature)
+    if issubclass(cls, BaseModule) and 'precision' not in names:
+        names.append('precision')
+    return names
 
 
 def integer_params(module) -> set:
