@@ -10,7 +10,9 @@
 #          - coil weights, spectral registration, unlike-transient detection, eddy current phase,  #
 #          reference peaks - as whole-batch torch operations on the data's own device, with        #
 #          per-sample coil and transient masks standing in for ragged subsets - and the replay of  #
-#          such a computation as CUDA graphs.                                                      #
+#          such a computation as CUDA graphs. Everything runs in the precision of the data it is   #
+#          given (augmentrum.core.precision): complex64 data are processed in single precision,    #
+#          complex128 in double.                                                                   #
 #                                                                                                  #
 ####################################################################################################
 
@@ -29,7 +31,7 @@ import torch
 from augmentrum.processing.utils import ppm_shift_axis, ppm_window
 
 
-__all__ = ['fid_to_spec', 'masked_median', 'noise_moments', 'noise_covariance', 'reference_gram',
+__all__ = ['real_of', 'complex_of', 'tiny', 'fid_to_spec', 'masked_median', 'noise_moments', 'noise_covariance', 'reference_gram',
            'combine_coils', 'principal_vector', 'wsvd_weights', 'align', 'alignment_phasor',
            'unlike_mask', 'unwrap', 'ecc_phase', 'peak_phase', 'peak_shift_hz', 'shift_phasor',
            'first_true', 'upload', 'constant', 'window_spans', 'Step', 'run_steps', 'GraphedSteps',
@@ -41,6 +43,31 @@ NOISE_FRACTION = 0.1
 
 #: FSL-MRS estimate_noise_cov refuses a covariance from fewer samples per coil than this.
 MIN_SAMPLES_PER_COIL = 10
+
+
+#********************#
+#   working dtypes   #
+#********************#
+_DOUBLE = (torch.float64, torch.complex128)
+
+
+def _dtype(x):
+    return x if isinstance(x, torch.dtype) else x.dtype
+
+
+def real_of(x):
+    """The real dtype of the precision of *x* (a tensor or dtype): float64 or float32."""
+    return torch.float64 if _dtype(x) in _DOUBLE else torch.float32
+
+
+def complex_of(x):
+    """The complex dtype of the precision of *x* (a tensor or dtype): complex128 or complex64."""
+    return torch.complex128 if _dtype(x) in _DOUBLE else torch.complex64
+
+
+def tiny(x):
+    """The smallest normal number in the precision of *x*: the floor of a norm that divides."""
+    return torch.finfo(real_of(x)).tiny
 
 
 #********************#
@@ -81,13 +108,13 @@ def upload(array, device, dtype=None):
     return tensor.pin_memory().to(device, non_blocking=True)
 
 
-def constant(key, build, device):
-    """A host-built constant, uploaded to *device* once and kept (bounded)."""
-    key = (key, str(device))
+def constant(key, build, device, dtype=None):
+    """A host-built constant, uploaded to *device* once (as *dtype* if given) and kept (bounded)."""
+    key = (key, str(device), dtype)
     if key not in _CONSTANTS:
         if len(_CONSTANTS) > 256:
             _CONSTANTS.clear()
-        _CONSTANTS[key] = upload(build(), device)
+        _CONSTANTS[key] = upload(build(), device, dtype)
     for recorder in _RECORDERS:
         recorder.append(_CONSTANTS[key])
     return _CONSTANTS[key]
@@ -358,10 +385,10 @@ def noise_moments(tails):
 
     Returns:
         "(second, first)": sum of x x^H, (B, D, C, C), and sum of x, (B, D, C),
-        both over voxels and points, in complex128.
+        both over voxels and points, in the precision of *tails*.
     """
     b, v, c, d, l = tails.shape
-    x = tails.to(torch.complex128).permute(0, 3, 1, 4, 2).reshape(b, d, v * l, c)
+    x = tails.to(complex_of(tails)).permute(0, 3, 1, 4, 2).reshape(b, d, v * l, c)
     return x.mT @ x.conj(), x.sum(dim=-2)
 
 
@@ -380,7 +407,7 @@ def noise_covariance(second, first, samples_per_transient, dyn_mask=None):
     """
     if dyn_mask is None:
         dyn_mask = torch.ones(second.shape[:2], dtype=torch.bool, device=second.device)
-    weights = dyn_mask.to(torch.float64)
+    weights = dyn_mask.to(real_of(second))
     total = (second * weights[..., None, None]).sum(dim=1)
     mean_sum = (first * weights[..., None]).sum(dim=1)
     n = weights.sum(dim=1) * samples_per_transient
@@ -391,7 +418,7 @@ def noise_covariance(second, first, samples_per_transient, dyn_mask=None):
 
 def reference_gram(reference):
     """X^H X of reference FIDs laid out (..., T, C): the right-singular problem of wSVD."""
-    x = reference.to(torch.complex128)
+    x = reference.to(complex_of(reference))
     return x.mH @ x
 
 
@@ -435,7 +462,7 @@ def wsvd_weights(gram, cov, coil_mask, whiten, with_reference):
             for 'svd' (a transient combined with its own decomposition).
 
     Returns:
-        Complex128 weights, (B, ..., C), zero on masked coils; with a single
+        Complex weights in the precision of *gram*, (B, ..., C), zero on masked coils; with a single
         active coil, exactly one on it (FSL-MRS leaves such data uncombined).
     """
     return run_steps(wsvd_weight_steps(gram, cov, coil_mask, whiten, with_reference))
@@ -446,12 +473,13 @@ def wsvd_weight_steps(gram, cov, coil_mask, whiten, with_reference):
     b, c = coil_mask.shape
     lead = gram.shape[1:-2]
     shape = (b,) + (1,) * len(lead)
-    mask = coil_mask.to(torch.float64)
-    pair = (mask[:, :, None] * mask[:, None, :]).to(torch.complex128)
-    eye = torch.eye(c, dtype=torch.complex128, device=gram.device)
-    free = torch.diag_embed((1.0 - mask).to(torch.complex128))
+    real, cplx = real_of(gram), complex_of(gram)
+    mask = coil_mask.to(real)
+    pair = (mask[:, :, None] * mask[:, None, :]).to(cplx)
+    eye = torch.eye(c, dtype=cplx, device=gram.device)
+    free = torch.diag_embed((1.0 - mask).to(cplx))
 
-    whitened = cov.to(torch.complex128) * pair + free
+    whitened = cov.to(cplx) * pair + free
     cov_eff = torch.where(whiten[:, None, None], whitened, eye.expand(b, c, c))
     chol = torch.linalg.cholesky_ex(cov_eff).L.reshape(shape + (c, c))
 
@@ -492,15 +520,16 @@ def principal_vector(gram, squarings=12, steps=2):
     reference array shows - and two power steps on the matrix itself restore
     the precision the squarings cost. The phase is arbitrary, as an SVD's is.
     """
-    power = gram / torch.linalg.matrix_norm(gram, keepdim=True).clamp(min=1e-300)
+    floor = tiny(gram)
+    power = gram / torch.linalg.matrix_norm(gram, keepdim=True).clamp(min=floor)
     for _ in range(squarings):
         power = power @ power
-        power = power / torch.linalg.matrix_norm(power, keepdim=True).clamp(min=1e-300)
+        power = power / torch.linalg.matrix_norm(power, keepdim=True).clamp(min=floor)
     column = torch.linalg.vector_norm(power, dim=-2).argmax(dim=-1)
     vector = power.gather(-1, column[..., None, None].expand(*power.shape[:-1], 1))[..., 0]
     for _ in range(steps):
         vector = (gram @ vector[..., None])[..., 0]
-        vector = vector / torch.linalg.vector_norm(vector, dim=-1, keepdim=True).clamp(min=1e-300)
+        vector = vector / torch.linalg.vector_norm(vector, dim=-1, keepdim=True).clamp(min=floor)
     return vector
 
 
@@ -541,8 +570,8 @@ class ShiftProfile:
     arithmetic, which torch runs several times faster than complex on CPU.
 
     Args:
-        x: Transients, (B, D, T) complex128.
-        target: One target per sample, (B, T) complex128.
+        x: Transients, (B, D, T) complex; the profile is in their precision.
+        target: One target per sample, (B, T), in the same precision.
         first: First bin of the ppm window (FSL-MRS limit_to_range).
         last: Bin after the window's last.
     """
@@ -562,11 +591,12 @@ class ShiftProfile:
         spectrum = torch.fft.fft(xt, n=2 * n, dim=-1)
         autocorr = torch.fft.ifft(spectrum.real ** 2 + spectrum.imag ** 2, dim=-1)[..., :n]
         q = autocorr * constant(('window kernel', n, first, last),
-                                lambda: _window_kernel(n, first, last), x.device)
+                                lambda: _window_kernel(n, first, last), x.device,
+                                complex_of(x))
         self.q0 = q[..., 0].real.clone()
         q[..., 0] = 0
 
-        self.lag = torch.arange(n, device=x.device, dtype=torch.float64)
+        self.lag = torch.arange(n, device=x.device, dtype=real_of(x))
         index = self.lag + 1
         # rows: (h, q) x (re, im) x (moment 0, 1, 2); h is weighted by n + 1, q by n
         rows = []
@@ -680,7 +710,8 @@ def _bracket(profile, phi, sw_hz, iterations, base=None):
 
     if base is None:
         probes = constant(('bracket probes', sw_hz),
-                          lambda: np.array([0.0, 1.0, 1.0 + GOLD, -GOLD]) / sw_hz, phi.device)
+                          lambda: np.array([0.0, 1.0, 1.0 + GOLD, -GOLD]) / sw_hz, phi.device,
+                          real_of(phi))
         k, e = profile.shared(probes)
         f0, f1, f_pos, f_neg = profile.cost(phi[..., None], k, e).unbind(dim=-1)
         swap = f0 < f1
@@ -838,7 +869,7 @@ def _newton(profile, nu, low, high, step_cap, steps, phi=None):
             grad = e1 - 2 * (turn * k1).real
             hess = e2 - 2 * (turn * k2).real
         else:
-            mag = k.abs().clamp(min=1e-300)
+            mag = k.abs().clamp(min=tiny(k))
             slope = (k.conj() * k1).real / mag
             curve = ((k1.abs() ** 2 + (k.conj() * k2).real) - slope ** 2) / mag
             grad = e1 - 2 * slope
@@ -894,7 +925,7 @@ def align(fids, mask, sw_hz, sf_mhz, ppmlim, **options):
             *sf_mhz* and *ppmlim* are then not read.
 
     Returns:
-        "(phi, eps)" in radians and Hz, (B, D) float64.
+        "(phi, eps)" in radians and Hz, (B, D), in the precision of *fids*.
     """
     rows = _rows_per_chunk(fids, 12 * 8)
     if rows >= fids.shape[0]:
@@ -908,20 +939,20 @@ def _align(fids, mask, sw_hz, sf_mhz, ppmlim, passes=2, bracket_iterations=1,
            brent_iterations=2, locked_steps=0, free_steps=(2, 3), max_shift_hz=None,
            spans=None):
     """"align" on one chunk of samples."""
-    x = fids.to(torch.complex128)
+    x = fids.to(complex_of(fids))
     b, d, n = x.shape
     first, last = spans if spans is not None else ppm_window(n, sw_hz, sf_mhz, ppmlim)
     reach = (sw_hz / 4 if max_shift_hz is None else max_shift_hz) / sw_hz
 
     # the target: the transient nearest the mean of the valid ones, first of any tie
-    weights = mask.to(torch.float64)
+    weights = mask.to(real_of(x))
     avg = (x * weights[..., None]).sum(dim=1, keepdim=True) / weights.sum(dim=1)[:, None, None]
     dist = torch.linalg.vector_norm(x - avg, dim=-1).masked_fill(~mask, torch.inf)
     near = dist <= dist.min(dim=-1, keepdim=True).values * (1 + 1e-9)
     target = x.gather(1, first_true(near)[:, None, None].expand(b, 1, n))[:, 0]
 
     profile = ShiftProfile(x, target, first, last)
-    nu = torch.zeros(b, d, dtype=torch.float64, device=x.device)
+    nu = torch.zeros(b, d, dtype=real_of(x), device=x.device)
     k, _ = profile.at(nu)
     for step in range(passes):
         # the phase line search ends at the phase that is optimal where the pass starts
@@ -962,7 +993,7 @@ def _align(fids, mask, sw_hz, sf_mhz, ppmlim, passes=2, bracket_iterations=1,
 
 def alignment_phasor(phi, eps, n, sw_hz, dtype):
     """e^{-i phi} e^{-2 pi i t eps} on FSL-MRS's time axis (dwell .. n dwell), (..., T)."""
-    t = torch.linspace(1.0 / sw_hz, n / sw_hz, n, dtype=torch.float64, device=phi.device)
+    t = torch.linspace(1.0 / sw_hz, n / sw_hz, n, dtype=real_of(dtype), device=phi.device)
     angle = -phi[..., None] - 2 * math.pi * t * eps[..., None]
     return torch.polar(torch.ones_like(angle), angle).to(dtype)
 
@@ -993,9 +1024,9 @@ def unlike_mask(fids, mask, sdlimit=1.96, niter=2):
     """
     b, d, n = fids.shape
     parts = torch.view_as_real(fids).permute(0, 2, 3, 1).contiguous()    # (B, T, 2, D)
-    halved = torch.view_as_real(halve_first(fids.to(torch.complex128))).reshape(b, d, 2 * n)
+    halved = torch.view_as_real(halve_first(fids.to(complex_of(fids)))).reshape(b, d, 2 * n)
     energy = (halved ** 2).sum(dim=-1)
-    weights = mask.to(torch.float64)
+    weights = mask.to(real_of(fids))
     count = weights.sum(dim=-1, keepdim=True)
 
     keep = mask
@@ -1016,7 +1047,7 @@ def unlike_mask(fids, mask, sdlimit=1.96, niter=2):
 
 def _real_median(parts, mask):
     """
-    NumPy's median over the valid transients of (B, T, 2, D) parts, in float64 (B, T, 2).
+    NumPy's median over the valid transients of (B, T, 2, D) parts, (B, T, 2), in their precision.
 
     The mean of the two middle values for an even count - torch.median would
     return the lower one - with the invalid entries sorted behind the valid.
@@ -1026,7 +1057,7 @@ def _real_median(parts, mask):
     shape = ordered.shape[:-1] + (1,)
     low = ((count - 1) // 2).reshape(-1, 1, 1, 1).expand(shape)
     high = (count // 2).reshape(-1, 1, 1, 1).expand(shape)
-    pair = ordered.gather(-1, low).to(torch.float64) + ordered.gather(-1, high).to(torch.float64)
+    pair = ordered.gather(-1, low) + ordered.gather(-1, high)
     return 0.5 * pair[..., 0]
 
 
@@ -1049,10 +1080,10 @@ def ecc_phase(refs, width=32):
     suspect's sliding_gaussian as nifti_ecc_smoothed uses it: edge-padded with
     10-point edge means, correlated with a normalised Gaussian window.
     """
-    phase = unwrap(torch.angle(refs.to(torch.complex128)))
+    phase = unwrap(torch.angle(refs.to(complex_of(refs))))
     lead, n = phase.shape[:-1], phase.shape[-1]
     flat = phase.reshape(-1, n)
-    window = torch.exp(-torch.linspace(-3, 3, width, dtype=torch.float64,
+    window = torch.exp(-torch.linspace(-3, 3, width, dtype=phase.dtype,
                                        device=phase.device) ** 2)
     window = window / window.sum()
     offset = (width - 1) // 2
@@ -1075,7 +1106,7 @@ def _padded_window(fids, sw_hz, sf_mhz, window, spans=None):
     padded = torch.cat([fids, torch.zeros(fids.shape[:-1] + (3 * n,), dtype=fids.dtype,
                                           device=fids.device)], dim=-1)
     first, last = spans if spans is not None else ppm_window(4 * n, sw_hz, sf_mhz, window)
-    return fid_to_spec(padded.to(torch.complex128))[..., first:last], first, last
+    return fid_to_spec(padded.to(complex_of(padded)))[..., first:last], first, last
 
 
 def peak_phase(fids, sw_hz, sf_mhz, window, spans=None):
@@ -1118,6 +1149,6 @@ def _peak_hz(peak, n, sw_hz, spans, reference_ppm, sf_mhz):
 
 def shift_phasor(shift_hz, n, sw_hz, dtype):
     """e^{-2 pi i t shift} on FSL-MRS freqshift's time axis (0 .. n dwell), (..., T)."""
-    t = torch.linspace(0, n / sw_hz, n, dtype=torch.float64, device=shift_hz.device)
+    t = torch.linspace(0, n / sw_hz, n, dtype=real_of(dtype), device=shift_hz.device)
     angle = -2 * math.pi * t * shift_hz[..., None]
     return torch.polar(torch.ones_like(angle), angle).to(dtype)

@@ -32,6 +32,16 @@ from augmentrum.core.pool import WATER_SHARED
 from augmentrum.core import Backend
 
 
+#*****************#
+#   precision     #
+#*****************#
+def _complex_like(x):
+    """*x* as a NumPy array of the complex dtype of its own precision: complex64 for single-
+    precision data, complex128 for double (augmentrum.core.precision)."""
+    x = np.asarray(x)
+    return x.astype(np.result_type(x.dtype, np.complex64), copy=False)
+
+
 #**************************************************************************************************#
 #                                        Class RawProcessor                                        #
 #**************************************************************************************************#
@@ -40,6 +50,7 @@ from augmentrum.core import Backend
 # differentiable twin on tensors — one module, the backend picks the engine.                       #
 #                                                                                                  #
 #**************************************************************************************************#
+
 class RawProcessor(BaseModule):
     """
     Raw-data processing on any backend — one module, the backend picks the engine.
@@ -342,7 +353,7 @@ class RawProcessor(BaseModule):
         if 'DIM_DYN' in others:
             ref_tc = ops.mean(ref_tc, axis=4 + others.index('DIM_DYN'), keepdims=True)
 
-        ref = ops.to_numpy(ref_tc).astype(np.complex128)
+        ref = _complex_like(ops.to_numpy(ref_tc))
         phase = np.exp(-1j * np.angle(ref))
         lead = ref.shape[:-2]
         flat = (ref * phase).reshape((-1,) + ref.shape[-2:])
@@ -747,8 +758,8 @@ class RawProcessor(BaseModule):
         # per-subject noise covariance and whitening, from the FID tails
         noise = ops.to_numpy(met[..., int(0.9 * n_time):])
         noise = np.moveaxis(noise, coil_axis, -1).reshape(n_batch, -1, n_coil)
-        eye = np.eye(n_coil, dtype=np.complex128)
-        cov = np.empty((n_batch, n_coil, n_coil), dtype=np.complex128)
+        eye = np.eye(n_coil, dtype=np.result_type(noise.dtype, np.complex64))
+        cov = np.empty((n_batch, n_coil, n_coil), dtype=eye.dtype)
         white = np.empty_like(cov)
         white_inv = np.empty_like(cov)
         for b, samples in enumerate(noise):
@@ -771,7 +782,7 @@ class RawProcessor(BaseModule):
 
         lead = len(ops.shape(source_tc)) - 2
         shape = (n_batch,) + (1,) * (lead - 1) + (n_coil, n_coil)
-        source = ops.to_numpy(source_tc).astype(np.complex128)
+        source = _complex_like(ops.to_numpy(source_tc))
         _, _, vh = np.linalg.svd(source @ white.reshape(shape), full_matrices=False)
         weights = self._wsvd_weights(vh[..., 0, :], white.reshape(shape),
                                      white_inv.reshape(shape), cov.reshape(shape),
@@ -812,7 +823,7 @@ class RawProcessor(BaseModule):
         ref_tc = (self._transient_mean(wat_tc, wtags) if wat_tc is not None
                   else self._transient_mean(met_tc, tags))
 
-        ref = ops.to_numpy(ref_tc).astype(np.complex128)
+        ref = _complex_like(ops.to_numpy(ref_tc))
         phase = np.exp(-1j * np.angle(ref))
         lead = ref.shape[:-2]
         flat = (ref * phase).reshape((-1,) + ref.shape[-2:])
@@ -1092,12 +1103,12 @@ class RawProcessor(BaseModule):
             raise ValueError(f"Unknown tensor water removal method: {self.water_removal_method}")
         from scipy.sparse.linalg import svds
 
-        arr = ops.to_numpy(met).astype(np.complex128)
+        arr = _complex_like(ops.to_numpy(met))
         n = arr.shape[-1]
         m = n // 2
         k = min(20, n - m - 1, m)
         flat = arr.reshape(-1, n)
-        uk = np.empty((flat.shape[0], n - m, k), dtype=np.complex128)
+        uk = np.empty((flat.shape[0], n - m, k), dtype=arr.dtype)
         for i, fid in enumerate(flat):
             hankel = np.lib.stride_tricks.sliding_window_view(fid, m + 1)   # (n-m, m+1)
             uk[i] = svds(hankel, k=k)[0]
@@ -1460,8 +1471,8 @@ class RawProcessor(BaseModule):
                 if valid is None:
                     x = x.mean(dim=3, keepdim=True)
                 else:
-                    weights = valid.to(torch.float64)
-                    weights = (weights / weights.sum(dim=1, keepdim=True)).to(x.real.dtype)
+                    weights = valid.to(x.real.dtype)
+                    weights = weights / weights.sum(dim=1, keepdim=True)
                     x = (x * weights[:, None, None, :, None]).sum(dim=3, keepdim=True)
                 tags.remove('DIM_DYN')
                 report['dropped'].add('DIM_DYN')
@@ -1596,7 +1607,7 @@ class RawProcessor(BaseModule):
         else:
             weights = dyn_mask.to(x.real.dtype)[:, None, None, :, None]
             ref = (x * weights).sum(dim=3) / weights.sum(dim=3)
-        ref = ops.to_numpy(ref).astype(np.complex128).transpose(0, 1, 3, 2)   # (B, V, T, C)
+        ref = _complex_like(ops.to_numpy(ref)).transpose(0, 1, 3, 2)   # (B, V, T, C)
         phase = np.exp(-1j * np.angle(ref))
         flat = (ref * phase).reshape((-1,) + ref.shape[-2:])
         csm = np.stack([estimate_csm(voxel)[:, 0] for voxel in flat])
@@ -1659,7 +1670,7 @@ class RawProcessor(BaseModule):
             if self.ecc_method == 'smoothed':
                 phase = engine.ecc_phase(ref)
             elif self.ecc_method == 'fsl-mrs':
-                phase = torch.angle(ref.to(torch.complex128))
+                phase = torch.angle(ref.to(engine.complex_of(ref)))
             else:
                 raise ValueError(f"Unknown ECC method: {self.ecc_method}")
             phasor = torch.polar(torch.ones_like(phase), -phase)
@@ -1804,7 +1815,7 @@ class RawProcessor(BaseModule):
         Returns:
             Accumulated (phi, eps) per transient, each (..., D).
         """
-        fids = np.asarray(fids, dtype=np.complex128)
+        fids = _complex_like(fids)
         n = fids.shape[-1]
         t = np.linspace(1.0 / sw_hz, n / sw_hz, n)                  # FSL timeAxis (starts at dwell)
         first, last = ppm_window(n, sw_hz, sf_mhz, ppmlim)
@@ -1902,7 +1913,7 @@ class RawProcessor(BaseModule):
         Returns:
             Boolean keep mask, (..., D).
         """
-        fids = np.asarray(fids, dtype=np.complex128)
+        fids = _complex_like(fids)
         specs = fid_to_spec(fids)
         target = np.median(fids.real, axis=-2) + 1j * np.median(fids.imag, axis=-2)
         keep = np.ones(fids.shape[:-1], dtype=bool)
@@ -1965,7 +1976,7 @@ class RawProcessor(BaseModule):
             The modeled water FID, (..., T) complex.
         """
         dwell = 1.0 / sw_hz
-        fids = np.asarray(fids, dtype=np.complex128)
+        fids = _complex_like(fids)
         n = fids.shape[-1]
 
         # complex matmul raises spurious fp-flag warnings on some BLAS builds
