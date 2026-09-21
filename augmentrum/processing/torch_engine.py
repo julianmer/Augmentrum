@@ -495,9 +495,14 @@ def wsvd_weight_steps(gram, cov, coil_mask, whiten, with_reference):
     amp0 = amp.gather(-1, first)
     rescale = torch.linalg.vector_norm(amp, dim=-1, keepdim=True) * amp0 / amp0.abs()
 
+    # still a generator for the callers that "yield from" it, though nothing in it leaves the graph
+    yield from ()
     if with_reference:
-        # MAGMA's batched solve allocates device memory of its own: no CUDA graph holds it
-        solved = yield Step(torch.cholesky_solve, amp.conj()[..., None], chol)
+        # chol chol^H x = b as the two triangular solves "torch.cholesky_solve" makes: its batched
+        # MAGMA version makes the host wait for the device (on a shared GPU that is a whole round
+        # of the other processes' turns) and allocates outside any CUDA graph; cuBLAS does neither
+        half = torch.linalg.solve_triangular(chol, amp.conj()[..., None], upper=False)
+        solved = torch.linalg.solve_triangular(chol.mH, half, upper=True)
         weights = solved[..., 0] * rescale
     else:
         weights = torch.linalg.solve_triangular(
