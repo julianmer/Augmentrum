@@ -19,7 +19,7 @@ from typing import Optional, List, Tuple
 from scipy.signal import butter, filtfilt
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import batch_profile, to_backend
+from augmentrum.processing.utils import batch_profile, device_values, on_cuda, to_backend
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
 from nifti_mrs_plus.ops import to_numpy
@@ -297,11 +297,23 @@ class EddyCurrent(BaseModule):
         phi = self._low_pass(noise, sw_hz)[pad:pad + N]
 
         if self.remove_linear:
-            A = np.c_[np.ones(N), t]
-            k0, k1 = np.linalg.lstsq(A, phi, rcond=None)[0]
-            phi = phi - (k0 + k1 * t)
+            phi = self._detrend(phi, t)
 
         return phi - phi[0]
+
+    @staticmethod
+    def _detrend(phi: np.ndarray, t: np.ndarray) -> np.ndarray:
+        """
+        *phi* minus its least-squares line in *t*, row by row.
+
+        The closed-form fit of a line against one shared axis: the same
+        arithmetic for one row as for a stack of them, so a batch detrends each
+        sample exactly as a single call does, without a solver call per row.
+        """
+        tc = t - t.mean()
+        k1 = (phi * tc).sum(axis=-1, keepdims=True) / (tc * tc).sum()
+        k0 = phi.mean(axis=-1, keepdims=True) - k1 * t.mean()
+        return phi - (k0 + k1 * t)
 
     def _synth_ec_phases(self, batch: int, N: int, sw_hz: float,
                          rng: np.random.Generator) -> np.ndarray:
@@ -309,9 +321,8 @@ class EddyCurrent(BaseModule):
         "_synth_ec_phase" for *batch* samples at once, "(batch, N)", bit for bit.
 
         The noise of all samples is one draw of the same numbers in the same
-        order, and filtering, detrending and anchoring work row by row; only
-        the least-squares fit stays a call per sample, since LAPACK solves
-        several right-hand sides with a different rounding than one.
+        order, and filtering, detrending ("_detrend") and anchoring work row by
+        row.
         """
         t = np.arange(N, dtype=float) / float(sw_hz)
         pad = 0
@@ -321,9 +332,7 @@ class EddyCurrent(BaseModule):
         phi = self._low_pass(noise, sw_hz)[:, pad:pad + N]
 
         if self.remove_linear:
-            A = np.c_[np.ones(N), t]
-            k = np.array([np.linalg.lstsq(A, row, rcond=None)[0] for row in phi])
-            phi = phi - (k[:, :1] + k[:, 1:] * t)
+            phi = self._detrend(phi, t)
 
         return phi - phi[:, :1]
 
@@ -452,7 +461,16 @@ class EddyCurrent(BaseModule):
 
         phases = self._phases(batch, n_points, float(sw_hz), self.rng.numpy_rng(),
                               water_of=water_of)
-        phasor = batch_profile(self._phasors(phases), ndim)
+        if on_cuda(data_array) and ndim > 1:
+            # the trajectories travel as they are; the phasor is formed on the device
+            import torch
+            strength = np.array([float(self.sample_of(self.strength, i))
+                                 for i in range(phases.shape[0])])[:, None]
+            angle = device_values(strength, data_array) * device_values(phases, data_array)
+            phasor = torch.polar(torch.ones_like(angle), angle).reshape(
+                (batch,) + (1,) * (ndim - 2) + (n_points,))
+        else:
+            phasor = batch_profile(self._phasors(phases), ndim)
 
         # Apply phasor: backend-native multiply (preserves gradients for data)
         return data_array * ops.cast_like(to_backend(phasor, data_array), data_array), \
