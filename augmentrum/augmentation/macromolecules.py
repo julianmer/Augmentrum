@@ -27,7 +27,8 @@ from scipy.signal import hilbert
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from augmentrum.processing.utils import (ppm_axis, batch_profile, per_sample_factor,
-                                         causal_lineshape, to_backend)
+                                         causal_lineshape, device_axis, device_values,
+                                         on_cuda, to_backend)
 from nifti_mrs_plus import Backend
 from nifti_mrs_plus import ops
 
@@ -52,6 +53,18 @@ MM_CONSENSUS: Tuple[Tuple[float, float, float], ...] = (
     (3.86, 0.14, 0.15),
     (4.03, 0.15, 0.12),
 )
+
+
+def _analytic_filter(n):
+    """The frequency weights of "scipy.signal.hilbert" for *n* points, as it builds them."""
+    h = np.zeros(n, dtype=np.complex128)
+    if n % 2 == 0:
+        h[0] = h[n // 2] = 1
+        h[1:n // 2] = 2
+    else:
+        h[0] = 1
+        h[1:(n + 1) // 2] = 2
+    return h
 
 
 #**************************************************************************************************#
@@ -85,13 +98,14 @@ class MMSource(ABC):
         """The unit-normalized complex MM spectrum on *ppm_axis*."""
 
     def profiles(self, ppm_axis: np.ndarray, rng: np.random.Generator, batch: int,
-                 sf_mhz: Optional[float] = None) -> np.ndarray:
+                 sf_mhz: Optional[float] = None, like=None) -> np.ndarray:
         """
         *batch* profiles drawn one after the other, "(batch, N)".
 
         Exactly what *batch* calls of "profile" give, draws in the same order.
         A source whose per-call work mostly does not depend on its draws
-        overrides this to do that part once.
+        overrides this to do that part once. *like*: a tensor on whose CUDA
+        device a source may build the profiles instead (NumPy here).
         """
         return np.stack([self.profile(ppm_axis, rng, sf_mhz=sf_mhz) for _ in range(batch)])
 
@@ -425,7 +439,7 @@ class SemiParametrized(MMSource):
     def varies(self) -> bool:
         return bool(self.base.varies or self.broaden_ppm[1] > 0 or self.amp_mod > 0)
 
-    def profiles(self, ppm_axis, rng, batch, sf_mhz=None):
+    def profiles(self, ppm_axis, rng, batch, sf_mhz=None, like=None):
         """
         "profile" for a whole batch, the base built once when it is fixed.
 
@@ -434,7 +448,8 @@ class SemiParametrized(MMSource):
         which leaves each sample's draws - a width, then the three envelope
         weights - to be taken first, in the per-call order, and everything
         after them to run on the batch at once: the same operations, row by
-        row, so the profiles are the per-call ones.
+        row, so the profiles are the per-call ones. With a CUDA *like* that
+        part runs on its device ("_device_profiles").
         """
         if self.base.varies:
             return super().profiles(ppm_axis, rng, batch, sf_mhz=sf_mhz)
@@ -446,6 +461,9 @@ class SemiParametrized(MMSource):
             widths[b] = rng.uniform(*self.broaden_ppm)
             if self.amp_mod > 0:
                 weights[b] = [rng.uniform(-1.0, 1.0) for _ in range(3)]
+
+        if like is not None and on_cuda(like):
+            return self._device_profiles(base, widths, weights, ppm, like)
 
         # Kernels differ in length from sample to sample, so broadening stays a loop
         spectra = np.repeat(base[None], batch, axis=0)
@@ -464,6 +482,50 @@ class SemiParametrized(MMSource):
             spectra = hilbert(np.real(spectra) * np.clip(envelope, 0.0, None), axis=-1)
 
         return self._normalize_rows(spectra)
+
+    def _device_profiles(self, base, widths, weights, ppm, like):
+        """
+        The broadening, envelope and analytic signal of "profiles", in float64 on
+        *like*'s device, from the host-drawn widths and weights.
+
+        Every sample is convolved at once, each with its own Gaussian stencil
+        padded with zeros to the longest (a sample drawn without broadening
+        gets a unit impulse, which leaves it as it is); the stencils are
+        symmetric, so the correlation "conv1d" computes is the convolution.
+        The envelope's cosines and the analytic-signal filter are the host's
+        own arrays, kept on the device.
+        """
+        import torch
+        import torch.nn.functional as F
+        batch, n = widths.size, ppm.size
+        spectra = device_values(base, like).reshape(1, n).repeat(batch, 1)
+
+        if np.any(widths > 0):
+            dppm = float(np.median(np.abs(np.diff(ppm))))
+            kernels = [self._kernel(w, dppm) if w > 0 else np.ones(1) for w in widths]
+            half = max(k.size // 2 for k in kernels)
+            stack = np.zeros((batch, 2 * half + 1))
+            for b, k in enumerate(kernels):
+                stack[b, half - k.size // 2:half + k.size // 2 + 1] = k
+            weight = device_values(np.repeat(stack, 2, axis=0)[:, None, :], like)
+            parts = torch.stack([spectra.real, spectra.imag], dim=1).reshape(1, 2 * batch, n)
+            parts = F.conv1d(parts, weight, padding=half, groups=2 * batch).reshape(batch, 2, n)
+            spectra = torch.complex(parts[:, 0], parts[:, 1])
+
+        if self.amp_mod > 0:
+            w = device_values(weights, like)
+            envelope = torch.ones((batch, n), dtype=torch.float64, device=like.device)
+            for k in (1, 2, 3):
+                cos = device_axis(('mm_envelope', n, k),
+                                  lambda k=k: np.cos(k * np.linspace(0.0, np.pi, n)), like)
+                envelope = envelope + w[:, k - 1:k] * cos / k
+            envelope = 1.0 + self.amp_mod * (envelope - envelope.mean(dim=-1, keepdim=True))
+            h = device_values(_analytic_filter(n), like)
+            spectra = torch.fft.ifft(torch.fft.fft(spectra.real * envelope.clamp(min=0.0), dim=-1)
+                                     * h, dim=-1)
+
+        peak = torch.amax(torch.abs(spectra.real), dim=-1, keepdim=True)
+        return torch.where(peak > 0, spectra / torch.where(peak > 0, peak, 1.0), spectra)
 
     @staticmethod
     def _kernel(width, dppm):
@@ -581,19 +643,20 @@ class Macromolecules(BaseModule):
                 f"got {mm_source!r}."
             )
 
-    def _profiles(self, batch: int, ppm: np.ndarray, sf_mhz: float) -> np.ndarray:
+    def _profiles(self, batch: int, ppm: np.ndarray, sf_mhz: float, like=None):
         """
         One unit MM profile per sample, "(batch, N)".
 
         A randomizable source is drawn per sample from one generator taken off
         the module's seed stream, so a seed reproduces the whole batch; a fixed
-        source is built once and repeated.
+        source is built once and repeated. With a CUDA *like* a source may hand
+        back a complex128 tensor on its device.
         """
         rng = self.rng.numpy_rng()
         if not self.source.varies:
             return np.broadcast_to(self.source.profile(ppm, rng, sf_mhz=sf_mhz),
                                    (batch, ppm.size)).copy()
-        return self.source.profiles(ppm, rng, batch, sf_mhz=sf_mhz)
+        return self.source.profiles(ppm, rng, batch, sf_mhz=sf_mhz, like=like)
 
     def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
         """
@@ -625,7 +688,12 @@ class Macromolecules(BaseModule):
         batch = int(shape[0]) if ndim > 1 else 1
 
         ppm = ppm_axis(n_points, float(sw_hz), float(sf_mhz), nucleus)
-        unit = batch_profile(self._profiles(batch, ppm, float(sf_mhz)), ndim)
+        profiles = self._profiles(batch, ppm, float(sf_mhz),
+                                  like=spec if on_cuda(spec) and ndim > 1 else None)
+        if on_cuda(profiles):
+            unit = profiles.reshape((batch,) + (1,) * (ndim - 2) + (n_points,))
+        else:
+            unit = batch_profile(profiles, ndim)
 
         amp_ref = ops.amax(ops.abs(ops.real(spec)), axis=-1, keepdims=True)
         amp = per_sample_factor(self.mm_scale, ndim, amp_ref) * amp_ref
