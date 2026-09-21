@@ -586,7 +586,24 @@ def causal_lineshape(ppm, center_ppm, lorentz_ppm=0.0, gauss_ppm=0.0):
     return spectrum / np.max(np.real(spectrum))
 
 
-def causal_lineshapes(ppm, center_ppm, lorentz_ppm=0.0, gauss_ppm=0.0):
+def _causal_lineshapes_device(winding, lorentz, gauss, step, n, like):
+    """"causal_lineshapes" past its per-row winding factors, in float64 on *like*'s device."""
+    import torch
+    t = device_axis(('index', n), lambda: np.arange(n, dtype=np.float64), like)
+    fid = torch.exp(device_values(winding, like).reshape(-1, 1) * t)
+    lorentz_d, gauss_d = device_values(lorentz, like), device_values(gauss, like)
+    if np.any(lorentz > 0):
+        damped = fid * torch.exp(-np.pi * (lorentz_d / abs(step)) * t / n)
+        fid = torch.where(lorentz_d > 0, damped, fid)
+    if np.any(gauss > 0):
+        damped = fid * torch.exp(-(np.pi * (gauss_d / abs(step)) * t / n) ** 2
+                                 / (4.0 * np.log(2.0)))
+        fid = torch.where(gauss_d > 0, damped, fid)
+    spectrum = torch.fft.fftshift(torch.fft.ifft(fid, dim=-1), dim=-1)
+    return spectrum / torch.amax(spectrum.real, dim=-1, keepdim=True)
+
+
+def causal_lineshapes(ppm, center_ppm, lorentz_ppm=0.0, gauss_ppm=0.0, like=None):
     """
     "causal_lineshape" for a batch of resonances at once, "(batch, n)".
 
@@ -602,9 +619,11 @@ def causal_lineshapes(ppm, center_ppm, lorentz_ppm=0.0, gauss_ppm=0.0):
         center_ppm: "(batch,)" peak positions.
         lorentz_ppm: Lorentzian FWHMs in ppm, a scalar or "(batch,)"; 0 for none.
         gauss_ppm: Gaussian FWHMs in ppm, a scalar or "(batch,)"; 0 for none.
+        like: A tensor; a CUDA one has the rows built on its device ("on_cuda").
 
     Returns:
-        A "(batch, n)" complex array whose rows' real parts peak at 1.
+        A "(batch, n)" complex array whose rows' real parts peak at 1 (complex128,
+        on *like*'s device when built there).
     """
     ppm = np.asarray(ppm, dtype=np.float64)
     centers = np.asarray(center_ppm, dtype=np.float64).reshape(-1)
@@ -622,6 +641,8 @@ def causal_lineshapes(ppm, center_ppm, lorentz_ppm=0.0, gauss_ppm=0.0):
     # the reciprocal), so every row starts from the same complex number.
     winding = np.array([2j * np.pi * (n // 2 - (n // 2 + (float(c) - ppm[n // 2]) / step)) / n
                         for c in centers])
+    if like is not None and on_cuda(like):
+        return _causal_lineshapes_device(winding, lorentz, gauss, step, n, like)
     fid = np.exp(winding[:, None] * t)
     if np.any(lorentz > 0):
         damped = fid * np.exp(-np.pi * (lorentz / abs(step)) * t / n)
@@ -691,9 +712,11 @@ def on_cuda(like):
 
 
 def device_values(values, like):
-    """Host-drawn parameter *values* as a float64 tensor on *like*'s CUDA device."""
+    """Host-drawn parameter *values* on *like*'s CUDA device, as float64 (complex128 if complex)."""
     from augmentrum.processing.torch_engine import upload
-    return upload(np.asarray(values, dtype=np.float64), like.device)
+    arr = np.asarray(values)
+    arr = arr.astype(np.complex128 if np.iscomplexobj(arr) else np.float64, copy=False)
+    return upload(arr, like.device)
 
 
 def device_axis(key, build, like):
@@ -720,6 +743,8 @@ def to_backend(param, like, dtype=None):
         import torch
         from augmentrum.processing.torch_engine import upload
         target = getattr(torch, dtype) if dtype is not None else like.dtype
+        if isinstance(param, torch.Tensor):      # built on the device already ("on_cuda")
+            return param.to(like.device).to(target)
         return upload(param, like.device).to(target)
     if dtype is not None:
         return ops.asarray_like(like, param, dtype=dtype)
