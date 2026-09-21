@@ -677,6 +677,31 @@ def per_sample_factor(value, ndim, like):
     return to_backend(arr.reshape((-1,) + (1,) * (ndim - 1)), like)
 
 
+def on_cuda(like):
+    """
+    Whether *like* is a CUDA tensor, whose per-batch profiles are then built on its device.
+
+    A module that builds a "(batch, N)" profile in NumPy pays for the host
+    arithmetic and for an upload every batch. On a CUDA tensor the same float64
+    arithmetic runs on the device from the host-drawn parameters instead, so
+    only those parameters travel; the result agrees with the NumPy build to
+    float64 rounding, far below the precision the profile is applied in.
+    """
+    return ops.is_torch(like) and like.device.type == 'cuda'
+
+
+def device_values(values, like):
+    """Host-drawn parameter *values* as a float64 tensor on *like*'s CUDA device."""
+    from augmentrum.processing.torch_engine import upload
+    return upload(np.asarray(values, dtype=np.float64), like.device)
+
+
+def device_axis(key, build, like):
+    """A float64 axis built on the host once (NumPy, as the host path builds it) and kept on the device."""
+    from augmentrum.processing.torch_engine import constant
+    return constant(key, lambda: np.asarray(build(), dtype=np.float64), like.device)
+
+
 def to_backend(param, like, dtype=None):
     """
     "ops.match_backend" - or, with *dtype*, "ops.asarray_like" - without the wait.

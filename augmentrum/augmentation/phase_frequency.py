@@ -20,7 +20,7 @@ from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import to_backend
+from augmentrum.processing.utils import device_axis, device_values, on_cuda, to_backend
 from nifti_mrs_plus import Backend
 from nifti_mrs_plus.ops import fft, ifft, fftshift, ifftshift
 
@@ -186,10 +186,19 @@ class PhaseShift(BaseModule):
         # frequency domain, so the module is put there before it runs.
         spec = fid
         N = fid.shape[-1]
+        ramp_shape = [1] * (len(fid.shape) - 1) + [N]
+
+        if on_cuda(spec):
+            # the same float64 ramp (deg2rad is a multiply by pi / 180), on the device
+            import torch
+            u = device_axis(('unit_ramp', N), lambda: np.linspace(0.0, 1.0, N, dtype=np.float64),
+                            spec)
+            angle = (float(phc1_deg) * u) * (np.pi / 180.0)
+            ramp = torch.polar(torch.ones_like(angle), angle).reshape(ramp_shape)
+            return spec * ramp.to(spec.dtype)
 
         # Linear ramp (numpy — no gradients needed for coordinates)
         u = np.linspace(0.0, 1.0, N, dtype=np.float64)
-        ramp_shape = [1] * (len(fid.shape) - 1) + [N]
         ramp = np.exp(1j * np.deg2rad(phc1_deg * u)).reshape(ramp_shape)
 
         # Apply the ramp; the caller puts the data back where it was
@@ -306,14 +315,22 @@ class FrequencyShift(BaseModule):
             return fid
 
         N = fid.shape[-1]
+        shape = [1] * (len(fid.shape) - 1) + [N]
+        shift = self.per_sample(np.asarray(shift_hz, dtype=np.float64), len(fid.shape))
+
+        if on_cuda(fid):
+            # the same float64 phase, formed in the same order, on the device
+            import torch
+            t = device_axis(('time', N, float(sw_hz)),
+                            lambda: np.arange(N, dtype=np.float64) / float(sw_hz), fid)
+            phase = (2.0 * math.pi * device_values(shift, fid)) * t.reshape(shape)
+            return fid * torch.polar(torch.ones_like(phase), phase).to(fid.dtype)
 
         # Time axis (numpy — no gradients needed for coordinates)
         t = np.arange(N, dtype=np.float64) / float(sw_hz)
-        t = t.reshape([1] * (len(fid.shape) - 1) + [N])
+        t = t.reshape(shape)
 
         # Shift phasor (numpy complex), one row per sample for a vector shift
-        shift = self.per_sample(np.asarray(shift_hz, dtype=np.float64),
-                                len(fid.shape))
         shift_factor = np.exp(1j * 2.0 * math.pi * shift * t)
 
         # Multiply: convert phasor to same backend, preserves gradients
