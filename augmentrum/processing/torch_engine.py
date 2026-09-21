@@ -548,6 +548,45 @@ def phasor(angle):
     return torch.polar(torch.ones_like(angle), angle)
 
 
+# A cost evaluation of the alignment needs, per transient, the dot products of its weighted rows
+# with cos and sin of theta_t = 2 pi t nu. As torch operations that is theta, its cosine and its
+# sine written out for every point, and two matrix-vector products that read the rows twice. One
+# Triton kernel ("_shift_kernel") forms the same angles in registers (in float32, in the same
+# order) and reads every row once; libdevice's cos and sin keep full precision at the angles of
+# a whole FID.
+_SHIFT_KERNEL = []
+
+
+def _load_shift_kernel():
+    """The Triton kernels, imported once; None without Triton."""
+    if not _SHIFT_KERNEL:
+        try:
+            from augmentrum.processing import _shift_kernel
+            _SHIFT_KERNEL.append(_shift_kernel)
+        except ImportError:
+            _SHIFT_KERNEL.append(None)
+    return _SHIFT_KERNEL[0]
+
+
+def shift_sums(rows, nu):
+    """
+    "(rows @ cos(theta), rows @ sin(theta))" with theta_t = 2 pi t nu, (..., R) each, in one
+    pass over *rows* (..., R, T) for shifts *nu* (...) in cycles per sample; None where the
+    fused kernel does not apply (not float32 on CUDA, or no Triton).
+    """
+    if not (rows.is_cuda and rows.dtype == torch.float32 and nu.dtype == torch.float32
+            and rows.is_contiguous()):
+        return None
+    if _load_shift_kernel() is None:
+        return None
+    lead, r, n = rows.shape[:-2], rows.shape[-2], rows.shape[-1]
+    flat = nu.reshape(-1).contiguous()
+    cos = torch.empty((flat.numel(), r), dtype=rows.dtype, device=rows.device)
+    sin = torch.empty_like(cos)
+    _SHIFT_KERNEL[0].launch(rows.reshape(-1, r, n), flat, cos, sin)
+    return cos.reshape(lead + (r,)), sin.reshape(lead + (r,))
+
+
 class ShiftProfile:
     """
     The FSL-MRS alignment cost of every transient, as an exact function of its shift.
@@ -620,10 +659,14 @@ class ShiftProfile:
         K and E at one shift per transient, (B, D); with *derivatives*, as
         "((K, K', K''), (E, E', E''))" in nu.
         """
-        theta = 2 * math.pi * self.lag * nu[..., None]              # (B, D, T)
         rows = self.rows if derivatives else self.plain
-        cos = (rows @ torch.cos(theta)[..., None])[..., 0]
-        sin = (rows @ torch.sin(theta)[..., None])[..., 0]
+        fused = shift_sums(rows, nu)
+        if fused is not None:
+            cos, sin = fused
+        else:
+            theta = 2 * math.pi * self.lag * nu[..., None]          # (B, D, T)
+            cos = (rows @ torch.cos(theta)[..., None])[..., 0]
+            sin = (rows @ torch.sin(theta)[..., None])[..., 0]
         k, e = self._combine(cos, sin, 3 if derivatives else 1)
 
         rate = 2 * math.pi
@@ -952,6 +995,18 @@ def _align(fids, mask, sw_hz, sf_mhz, ppmlim, passes=2, bracket_iterations=1,
     target = x.gather(1, first_true(near)[:, None, None].expand(b, 1, n))[:, 0]
 
     profile = ShiftProfile(x, target, first, last)
+    fused = x.is_cuda and _load_shift_kernel() is not None
+    if (fused and x.is_cuda and profile.rows.dtype == torch.float32 and passes == 2
+            and bracket_iterations == 1 and brent_iterations == 2 and locked_steps == 0
+            and tuple(free_steps) == (2, 3) and max_shift_hz is None):
+        # the whole search below, one transient per program ("_shift_kernel.align_search")
+        per = lambda v: v[:, None].expand(b, d).reshape(-1).contiguous()
+        phi, nu = _SHIFT_KERNEL[0].align_search(profile.rows.reshape(-1, 12, n),
+                                                profile.q0.reshape(-1).contiguous(),
+                                                per(profile.y_energy), per(profile.norm), sw_hz)
+        phi, eps = phi.reshape(b, d), nu.reshape(b, d) * sw_hz
+        moving = mask & (mask.sum(dim=-1, keepdim=True) > 1)
+        return torch.where(moving, phi, 0.0), torch.where(moving, eps, 0.0)
     nu = torch.zeros(b, d, dtype=real_of(x), device=x.device)
     k, _ = profile.at(nu)
     for step in range(passes):
