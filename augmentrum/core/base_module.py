@@ -27,6 +27,10 @@ from augmentrum.core.pool import (masks_of, set_masks, origin_of, set_origin, re
                                   water_masks)
 
 
+#: A header fact not read yet (None is a valid answer: "not there").
+_UNREAD = object()
+
+
 #**************************************************************************************************#
 #                                        Class BaseModule                                          #
 #**************************************************************************************************#
@@ -412,15 +416,23 @@ class BaseModule(ABC):
         # be processed at a frequency that is not its own, and what a scan comes out
         # as would depend on who shares its batch. Modules that care read the
         # per-sample values; the scalar stays for everything else.
+        # A pooled batch reads its headers once for all its steps ("PooledBatch"):
+        # the same borrowed objects stand behind every wrapper of the batch.
+        headers = getattr(data, '_headers', None)
         if 'sf_mhz_samples' not in kwargs and data.n_subjects > 1:
-            try:
-                values = np.asarray(
-                    [float(v[0] if hasattr(v, '__getitem__') else v)
-                     for v in (n.spectrometer_frequency for n in data.nifti_list)], dtype=float)
-            except Exception:
-                values = None
+            values = headers.get('sf_mhz_samples', _UNREAD) if headers is not None else _UNREAD
+            if values is _UNREAD:
+                try:
+                    values = np.asarray(
+                        [float(v[0] if hasattr(v, '__getitem__') else v)
+                         for v in (n.spectrometer_frequency for n in data.nifti_list)],
+                        dtype=float)
+                except Exception:
+                    values = None
+                if headers is not None:
+                    headers['sf_mhz_samples'] = values
             if values is not None and values.size and not np.all(values == values[0]):
-                kwargs['sf_mhz_samples'] = values
+                kwargs['sf_mhz_samples'] = values.copy()
 
         # Inject spatial geometry (matrix, voxel size, FOV) the same way, so
         # modules that need to reason about k-space read it off the NIfTI-MRS
@@ -428,11 +440,18 @@ class BaseModule(ABC):
         # Absent or unreadable geometry is not an error — most modules never
         # look at it, and a bare-array workflow legitimately has none.
         if 'geometry' not in kwargs and data.n_subjects > 0:
-            try:
-                from augmentrum.sampling.kspace_sampling import KspaceGeometry
-                kwargs['geometry'] = KspaceGeometry.read_header_geometry(data)
-            except Exception:
-                pass
+            key = ('geometry', tuple(data.shape))
+            geometry = headers.get(key, _UNREAD) if headers is not None else _UNREAD
+            if geometry is _UNREAD:
+                try:
+                    from augmentrum.sampling.kspace_sampling import KspaceGeometry
+                    geometry = KspaceGeometry.read_header_geometry(data)
+                except Exception:
+                    geometry = None
+                if headers is not None:
+                    headers[key] = geometry
+            if geometry is not None:
+                kwargs['geometry'] = dict(geometry)
 
         # Inject the dimension tags too. A bare tensor has no way to say which
         # of its trailing axes is coils and which is averages, so a module that

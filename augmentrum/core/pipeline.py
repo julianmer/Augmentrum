@@ -15,6 +15,7 @@
 #   imports   #
 #*************#
 import difflib
+import functools
 import inspect
 import typing
 import warnings
@@ -99,11 +100,17 @@ def integer_params(module) -> set:
         module: A module class or instance.
     """
     cls = module if isinstance(module, type) else module.__class__
+    return set(_integer_params_of(cls))
+
+
+@functools.lru_cache(maxsize=None)
+def _integer_params_of(cls) -> frozenset:
+    """"integer_params" of a class, read once: its signature never changes."""
     names = set(getattr(cls, 'INTEGER_PARAMS', ()) or ())
     try:
         sig = inspect.signature(cls.__init__)
     except (TypeError, ValueError):
-        return names
+        return frozenset(names)
 
     for p in sig.parameters.values():
         if _is_integer(p.default):
@@ -115,7 +122,7 @@ def integer_params(module) -> set:
             if typing.get_origin(annotation) is typing.Union else (annotation,)
         if any(a is int for a in candidates):
             names.add(p.name)
-    return names
+    return frozenset(names)
 
 
 def suggest_names(name: str, valid, n: int = 3) -> str:
