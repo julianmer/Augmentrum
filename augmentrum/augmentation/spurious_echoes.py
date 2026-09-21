@@ -22,7 +22,8 @@ import numpy as np
 from typing import Optional, List, Dict
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import batch_profile, ppm_reference, to_backend
+from augmentrum.processing.utils import (batch_profile, device_axis, device_values, on_cuda,
+                                         ppm_reference, to_backend)
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
 
@@ -366,6 +367,22 @@ class SpuriousEchoes(BaseModule):
         return (echo['amp'] * self._localized_envelope(echo, t)
                 * np.exp(1j * (2.0 * np.pi * echo['freq_hz'] * t + phase)))
 
+    def _echo_profile_device(self, echo: Dict, n_points: int, sw_hz: float, like):
+        """"_echo_profile" in float64 on *like*'s CUDA device, from the host-drawn columns."""
+        import torch
+        t = device_axis(('time', n_points, sw_hz),
+                        lambda: np.arange(n_points, dtype=np.float64) / sw_hz, like)
+        phase = np.deg2rad(self.global_phase_deg) + np.deg2rad(echo['phase_deg'])
+        t_echo, T2 = device_values(echo['t_echo'], like), device_values(echo['T2'], like)
+        d = t - t_echo
+        if echo['gaussian_env']:
+            envelope = torch.exp(-(d * d) / (2.0 * (T2 * T2)))
+        else:
+            envelope = torch.exp(-torch.abs(d) / T2)
+        angle = 2.0 * np.pi * device_values(echo['freq_hz'], like) * t + device_values(phase, like)
+        return (device_values(echo['amp'], like) * envelope
+                * torch.polar(torch.ones_like(angle), angle))
+
     def _hybrid_modulation(self, echo: Dict, t: np.ndarray) -> np.ndarray:
         """What multiplies the (normalized) delayed copy in hybrid mode."""
         phase = np.deg2rad(self.global_phase_deg) + np.deg2rad(echo['phase_deg'])
@@ -493,10 +510,16 @@ class SpuriousEchoes(BaseModule):
 
         for drawn in table:
             if self.mode == 'echo':
-                profile = self._echo_profile(self._columns(drawn, batch), t)
+                if on_cuda(data_array) and ndim > 1:
+                    profile = self._echo_profile_device(self._columns(drawn, batch), n_points,
+                                                        float(sw_hz), data_array)
+                    profile = profile.reshape((batch,) + (1,) * (ndim - 2) + (n_points,))
+                else:
+                    profile = batch_profile(self._echo_profile(self._columns(drawn, batch), t),
+                                            ndim)
                 max_abs = ops.amax(ops.abs(data_array), axis=-1, keepdims=True)
                 ghost = ops.cast_like(max_abs, data_array) * ops.cast_like(
-                    to_backend(batch_profile(profile, ndim), data_array), data_array)
+                    to_backend(profile, data_array), data_array)
 
             elif self.mode == 'replica':
                 envelope = self._replica_envelope(self._columns(drawn, batch), t)
