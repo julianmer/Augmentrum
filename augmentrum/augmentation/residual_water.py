@@ -21,7 +21,8 @@ from typing import Optional, List
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from augmentrum.processing.utils import (ppm_axis, ppm_reference, batch_profile,
-                                         per_sample_factor, causal_lineshape, to_backend)
+                                         per_sample_factor, causal_lineshape, device_values,
+                                         on_cuda, to_backend)
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
 
@@ -209,15 +210,19 @@ class ResidualWater(BaseModule):
             phase_deg=float(self.sample_of(self.phase_deg, index)),
         )
 
-    def _profiles(self, batch: int, ppm: np.ndarray, nucleus) -> np.ndarray:
+    def _profiles(self, batch: int, ppm: np.ndarray, nucleus, like=None):
         """
         One unit profile per sample, "(batch, N)".
 
         The lobes depend on the axis and the sample's centre alone, so samples -
         and batches - that share them share one build; the global phase, drawn
         per sample, is applied afterwards, as "_water_lobe_profile" applies it.
+        With a CUDA *like* the lobes are kept on its device as well and the
+        result is a complex128 tensor there.
         """
         cache = self.__dict__.setdefault('_lobe_cache', {})
+        device = like is not None and on_cuda(like)
+        on_device = self.__dict__.setdefault('_lobe_cache_device', {}) if device else None
         axis = (ppm.size, hash(ppm.tobytes()), nucleus, repr(self.peaks))
         rows = []
         for i in range(batch):
@@ -227,10 +232,22 @@ class ResidualWater(BaseModule):
             if key not in cache:
                 if len(cache) >= 256:
                     cache.clear()
+                    if device:
+                        on_device.clear()
                 cache[key] = self._water_lobes(ppm, center_ppm=center, peaks=self.peaks)
-            rows.append(cache[key])
+            if device:
+                if (key, like.device) not in on_device:
+                    on_device[key, like.device] = device_values(cache[key], like)
+                rows.append(on_device[key, like.device])
+            else:
+                rows.append(cache[key])
         phases = np.array([float(self.sample_of(self.phase_deg, i)) for i in range(batch)])
-        return np.stack(rows) * np.exp(1j * np.deg2rad(phases))[:, None]
+        factor = np.exp(1j * np.deg2rad(phases))[:, None]
+        if device:
+            import torch
+            # the lobes stay on the device; only the per-sample phase factors travel
+            return torch.stack(rows) * device_values(factor, like)
+        return np.stack(rows) * factor
 
     def process_nifti_list(self, data_list: List, water_list: Optional[List] = None, **kwargs):
         """
@@ -308,7 +325,11 @@ class ResidualWater(BaseModule):
 
         # 1. ppm axis and one unit profile per sample (NumPy, coordinates only)
         ppm = ppm_axis(n_points, float(sw_hz), float(sf_mhz), nucleus)
-        unit_lobes = batch_profile(self._profiles(batch, ppm, nucleus), ndim)
+        if on_cuda(spec) and ndim > 1:
+            unit_lobes = self._profiles(batch, ppm, nucleus, like=spec).reshape(
+                (batch,) + (1,) * (ndim - 2) + (n_points,))
+        else:
+            unit_lobes = batch_profile(self._profiles(batch, ppm, nucleus), ndim)
 
         # 2. One amplitude per FID, on the data's own backend
         amp_ref = ops.amax(ops.abs(ops.real(spec)), axis=-1, keepdims=True)
