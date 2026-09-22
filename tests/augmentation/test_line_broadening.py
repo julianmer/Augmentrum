@@ -376,5 +376,142 @@ class TestLineBroadeningIntegration:
         assert result_data is not None
 
 
+
+#**************************************************************************************************#
+#                                  Class TestLorentzianNarrowing                                   #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test Lorentzian narrowing (a negative lb_hz).                                                    #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestLorentzianNarrowing:
+    """A negative lb_hz multiplies the FID by exp(+pi |lb| t), warns once, and a cap limits it."""
+
+    SW = 1000.0
+    N = 512
+
+    def _t(self):
+        return np.arange(self.N) / self.SW
+
+    def test_negative_lb_narrows_exactly(self):
+        """lb_hz = -2 multiplies the FID by exp(+2 pi t)."""
+        fid = np.ones((1, self.N), complex)
+        broadening = LineBroadening(lb_hz=-2.0, mode='lorentzian')
+        with pytest.warns(UserWarning, match='narrows the lines'):
+            out, _ = broadening.process_tensor(fid, sw_hz=self.SW)
+        assert np.allclose(out[0], np.exp(2 * np.pi * self._t()))
+
+    def test_all_negative_per_sample_widths_narrow(self):
+        """A batch whose widths are all negative is narrowed, not passed through."""
+        fid = np.ones((3, self.N), complex)
+        lb = np.array([-0.5, -1.0, -2.0])
+        broadening = LineBroadening(lb_hz=lb, mode='voigt')
+        with pytest.warns(UserWarning):
+            out, _ = broadening.process_tensor(fid, sw_hz=self.SW)
+        assert np.allclose(out, np.exp(-np.pi * lb[:, None] * self._t()[None]))
+
+    def test_mixed_per_sample_widths(self):
+        """Narrowing, nothing and broadening side by side in one batch."""
+        fid = np.ones((3, self.N), complex)
+        lb = np.array([-1.0, 0.0, 2.0])
+        broadening = LineBroadening(lb_hz=lb, gb_hz=0.0, mode='voigt')
+        with pytest.warns(UserWarning):
+            out, _ = broadening.process_tensor(fid, sw_hz=self.SW)
+        assert np.allclose(out, np.exp(-np.pi * lb[:, None] * self._t()[None]))
+
+    def test_narrowing_undoes_broadening(self):
+        """Broadening by 3 Hz and then narrowing by 3 Hz returns the original FID."""
+        rng = np.random.default_rng(0)
+        fid = rng.standard_normal((2, self.N)) + 1j * rng.standard_normal((2, self.N))
+        wide, _ = LineBroadening(lb_hz=3.0, mode='lorentzian').process_tensor(fid, sw_hz=self.SW)
+        with pytest.warns(UserWarning):
+            back, _ = LineBroadening(lb_hz=-3.0, mode='lorentzian').process_tensor(
+                wide, sw_hz=self.SW)
+        assert np.allclose(back, fid)
+
+    def test_cap_stops_the_rise(self):
+        """With narrow_cap_s the envelope is exp(+pi |lb| min(t, cap))."""
+        fid = np.ones((1, self.N), complex)
+        broadening = LineBroadening(lb_hz=-1.5, mode='lorentzian', narrow_cap_s=0.1)
+        with pytest.warns(UserWarning, match='capped at 0.1 s'):
+            out, _ = broadening.process_tensor(fid, sw_hz=self.SW)
+        assert np.allclose(out[0], np.exp(1.5 * np.pi * np.minimum(self._t(), 0.1)))
+
+    def test_cap_leaves_broadening_alone(self):
+        """The cap only acts on narrowing; positive widths decay over the whole FID."""
+        fid = np.ones((2, self.N), complex)
+        lb = np.array([-1.0, 2.0])
+        broadening = LineBroadening(lb_hz=lb, mode='lorentzian', narrow_cap_s=0.1)
+        with pytest.warns(UserWarning):
+            out, _ = broadening.process_tensor(fid, sw_hz=self.SW)
+        t = self._t()
+        assert np.allclose(out[0], np.exp(np.pi * np.minimum(t, 0.1)))
+        assert np.allclose(out[1], np.exp(-2 * np.pi * t))
+
+    def test_positive_widths_unchanged(self):
+        """Non-negative widths give exactly the envelope they always did, without a warning."""
+        import warnings as w
+        fid = np.ones((2, self.N), complex)
+        lb, gb = np.array([0.0, 2.5]), np.array([1.0, 0.0])
+        with w.catch_warnings():
+            w.simplefilter('error')
+            out, _ = LineBroadening(lb_hz=lb, gb_hz=gb, mode='voigt').process_tensor(
+                fid, sw_hz=self.SW)
+        t = self._t()[None]
+        expected = np.exp(-np.pi * lb[:, None] * t) * np.exp(-(np.pi * gb[:, None] * t) ** 2
+                                                              / (4 * np.log(2)))
+        assert np.array_equal(out, fid * expected.astype(out.real.dtype))
+
+    def test_warns_once_per_module(self):
+        """The warning comes on the first narrowing call only."""
+        import warnings as w
+        fid = np.ones((1, self.N), complex)
+        broadening = LineBroadening(lb_hz=-1.0, mode='lorentzian')
+        with w.catch_warnings(record=True) as caught:
+            w.simplefilter('always')
+            broadening.process_tensor(fid, sw_hz=self.SW)
+            broadening.process_tensor(fid, sw_hz=self.SW)
+        assert sum('narrows the lines' in str(c.message) for c in caught) == 1
+
+    def test_negative_gaussian_raises(self):
+        """A Gaussian cannot be narrowed by the envelope."""
+        fid = np.ones((1, self.N), complex)
+        with pytest.raises(ValueError, match='gb_hz must be >= 0'):
+            LineBroadening(gb_hz=-1.0, mode='gaussian').process_tensor(fid, sw_hz=self.SW)
+        with pytest.raises(ValueError, match='gb_hz must be >= 0'):
+            LineBroadening(lb_hz=1.0, gb_hz=np.array([1.0, -0.5]), mode='voigt').process_tensor(
+                np.ones((2, self.N), complex), sw_hz=self.SW)
+
+    def test_invalid_cap_raises(self):
+        with pytest.raises(ValueError, match='narrow_cap_s'):
+            LineBroadening(lb_hz=-1.0, narrow_cap_s=0.0)
+
+    def test_nifti_list_path_narrows(self, dummy_nifti_list):
+        """On the NIfTI-list backend, narrowing by 5 Hz undoes broadening by 5 Hz."""
+        nifti_plus = NIfTI_MRS_Plus(nifti_list=dummy_nifti_list, backend=Backend.NIFTI_LIST)
+        original = nifti_plus[0][:].copy()
+        wide, _ = LineBroadening(lb_hz=5.0, mode='lorentzian')(nifti_plus, None)
+        assert not np.allclose(wide[0][:], original)
+        with pytest.warns(UserWarning):
+            back, _ = LineBroadening(lb_hz=-5.0, mode='lorentzian')(wide, None)
+        assert np.allclose(back[0][:], original)
+
+    @pytest.mark.parametrize('device', ['cpu', 'cuda'])
+    def test_torch_per_sample(self, device):
+        """Per-sample narrowing on a torch tensor stays on its device and matches NumPy."""
+        torch = pytest.importorskip('torch')
+        if device == 'cuda' and not torch.cuda.is_available():
+            pytest.skip('no CUDA')
+        lb = np.array([-1.0, 1.0])
+        fid = torch.ones((2, self.N), dtype=torch.complex64, device=device)
+        broadening = LineBroadening(lb_hz=lb, mode='lorentzian', narrow_cap_s=0.2)
+        with pytest.warns(UserWarning):
+            out, _ = broadening.process_tensor(fid, sw_hz=self.SW)
+        assert out.device.type == device
+        t = self._t()
+        expected = np.stack([np.exp(np.pi * np.minimum(t, 0.2)), np.exp(-np.pi * t)])
+        assert np.allclose(out.cpu().numpy(), expected, rtol=1e-5)
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
