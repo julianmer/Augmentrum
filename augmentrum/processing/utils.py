@@ -25,8 +25,6 @@ from scipy import integrate
 
 from nifti_mrs_plus import ops
 
-# from suspect.processing.denoising import sliding_gaussian
-
 # own
 from augmentrum import __version__
 
@@ -145,11 +143,47 @@ def safe_squeeze(mrs_obj, dims=None):
 
 
 #***************************************#
+#   sliding-gaussian smoothed phase     #
+#***************************************#
+def _sliding_gaussian_phase(ref: np.ndarray, width: int = 32) -> np.ndarray:
+    """
+    Smoothed unwrapped phase of a reference FID.
+
+    Replicates "suspect.processing.denoising.sliding_gaussian" applied to
+    "np.unwrap(np.angle(ref))" (edge-padded with 10-point edge means,
+    correlated with a normalized Gaussian window), without needing the
+    external "suspect" package installed. This is the same algorithm as
+    "augmentrum.processing.raw_processing.RawProcessor._ecc_phase" (NumPy)
+    and "augmentrum.processing.torch_engine.ecc_phase" (PyTorch) — those two
+    are parity-tested against "suspect" itself, so this NIfTI-object path
+    reuses the identical formula rather than a second, independently-derived
+    one.
+
+    Args:
+        ref: Reference FID, "(..., T)" complex.
+        width: Gaussian window width in samples.
+
+    Returns:
+        Smoothed unwrapped phase, same shape as "ref", real-valued.
+    """
+    phase = np.unwrap(np.angle(np.asarray(ref)), axis=-1)
+    window = np.exp(-np.linspace(-3, 3, width) ** 2)
+    window /= window.sum()
+    offset = (width - 1) // 2
+    left = np.broadcast_to(phase[..., :10].mean(axis=-1, keepdims=True),
+                           phase.shape[:-1] + (offset,))
+    right = np.broadcast_to(phase[..., -10:].mean(axis=-1, keepdims=True),
+                            phase.shape[:-1] + (width - 1 - offset,))
+    padded = np.concatenate([left, phase, right], axis=-1)
+    return np.lib.stride_tricks.sliding_window_view(padded, width, axis=-1) @ window
+
+
+#***************************************#
 #   nifti eddy current correction       #
 #***************************************#
 def nifti_ecc_smoothed(data, reference, report=None):
     """
-    Eddy current correction for MRS data in the NIfTI format. Using the code from suspect.
+    Eddy current correction for MRS data in the NIfTI format.
 
     @param data -- The MRS data to be corrected.
     @param reference -- The reference data for the correction.
@@ -158,7 +192,6 @@ def nifti_ecc_smoothed(data, reference, report=None):
     @returns -- The corrected MRS data.
     """
     from fsl_mrs.utils.preproc.nifti_mrs_proc import DimensionsDoNotMatch
-    from suspect.processing.denoising import sliding_gaussian
 
     if data.shape != reference.shape \
             and reference.ndim > 4:
@@ -175,7 +208,7 @@ def nifti_ecc_smoothed(data, reference, report=None):
             # only one reference FID, only iterate over spatial voxels
             ref = reference[idx[0], idx[1], idx[2], :]
 
-        ec_smooth = sliding_gaussian(np.unwrap(np.angle(ref)), 32)
+        ec_smooth = _sliding_gaussian_phase(ref, 32)
         ecc = np.exp(-1j * ec_smooth)
         corrected_obj[idx] = dd * ecc
 
