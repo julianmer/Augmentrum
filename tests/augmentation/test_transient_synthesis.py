@@ -144,3 +144,18 @@ def test_events_hit_a_contiguous_stretch():
 
     freq = _estimated_freq(np.asarray(train))
     assert np.abs(freq).max() > 0.5, "no event landed despite the rate"
+
+
+def test_events_are_recorded_where_the_tracks_kick():
+    """tracks() leaves its motion events behind, and the frequency kicks sit in them."""
+    module = _quiet(n_transients=48, events_per_min=20.0, seed=5)
+    freq, _, _, _ = module.tracks(module.rng.numpy_rng())
+
+    events = module.last_events_
+    assert events and all(0 <= e['start'] < e['stop'] <= 48 for e in events)
+    assert set(events[0]) == {'start', 'stop', 'disruptive', 'persistent'}
+
+    touched = np.zeros(48, dtype=bool)
+    for event in events:
+        touched[event['start']:48 if event['persistent'] else event['stop']] = True
+    assert np.all(freq[~touched] == 0.0), "a kick outside every recorded event"

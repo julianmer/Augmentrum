@@ -22,8 +22,13 @@ from augmentrum.core import NIfTI_MRS_Plus, Backend
 from nifti_mrs_plus.core import DataState
 from nifti_mrs_plus import ops
 from nifti_mrs_plus.random import SeedGenerator
+from augmentrum.core import precision as prec
 from augmentrum.core.pool import (masks_of, set_masks, origin_of, set_origin, rewrap,
                                   water_masks)
+
+
+#: A header fact not read yet (None is a valid answer: "not there").
+_UNREAD = object()
 
 
 #**************************************************************************************************#
@@ -99,6 +104,12 @@ class BaseModule(ABC):
     # keeps its pool origin, and consumers may use results the pool cached.
     PRESERVES_VALUES: bool = False
 
+    # The working precision, set by every module's "precision" argument: 'single', 'double',
+    # or None to follow the data. The data are cast to it on the way in (augmentrum.core.
+    # precision), so a module that follows the dtype of what it is given computes, and
+    # returns, in that precision.
+    precision: Optional[str] = None
+
     def __init_subclass__(cls, **kwargs):
         """
         Wrap a subclass's "__init__" so its arguments are recorded automatically.
@@ -118,7 +129,7 @@ class BaseModule(ABC):
         kinds = {p.name: p.kind for p in signature.parameters.values()}
 
         @functools.wraps(init)
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args, precision=None, **kwargs):
             init(self, *args, **kwargs)
 
             bound = signature.bind(self, *args, **kwargs)
@@ -133,6 +144,11 @@ class BaseModule(ABC):
                 else:
                     params[name] = value
 
+            # every module takes "precision", whatever its own signature (pipeline.
+            # constructor_params adds it); set last, so an outer class's value wins
+            self.precision = prec.check(precision)
+            if precision is not None:
+                params['precision'] = precision
             self.params = params
             self.rng = SeedGenerator(params.get('seed'))
 
@@ -308,6 +324,11 @@ class BaseModule(ABC):
         # Log provenance (only if not volatile)
         operation_name = self.__class__.__name__
         operation_details = {'method': 'process_nifti_list', 'params': self.params, **kwargs}
+        # NIfTI objects keep the dtype they are stored in: a list-path module works on
+        # that, and its output is put into the working precision
+        cast_out = lambda out: (out if out is None or self.precision is None else out.set_data(
+            prec.cast(out.get_data(out.backend if out.backend != Backend.NIFTI_LIST
+                                   else Backend.NUMPY), self.precision)))
 
         # Wrap back into NIfTI_MRS_Plus
         data_out = NIfTI_MRS_Plus(
@@ -317,6 +338,7 @@ class BaseModule(ABC):
             state=self.output_state(data.state)
         )
 
+        data_out = cast_out(data_out)
         # Update metadata if not volatile
         if not data.volatile:
             data_out.update_metadata(operation_name, operation_details)
@@ -329,6 +351,7 @@ class BaseModule(ABC):
                 volatile=water.volatile if water else data.volatile,
                 state=self.output_state(water.state if water else data.state)
             )
+            water_out = cast_out(water_out)
             if water and not water.volatile:
                 water_out.update_metadata(operation_name, operation_details)
 
@@ -387,17 +410,48 @@ class BaseModule(ABC):
             if sf is not None:
                 kwargs['sf_mhz'] = sf[0] if hasattr(sf, '__getitem__') else sf
 
+        # One batch can hold scans of different sessions, whose centre frequencies
+        # differ by the scanner's own referencing (COWS: 905 Hz over 90 scans). The
+        # scalar above is the first scan's, so without this every other sample would
+        # be processed at a frequency that is not its own, and what a scan comes out
+        # as would depend on who shares its batch. Modules that care read the
+        # per-sample values; the scalar stays for everything else.
+        # A pooled batch reads its headers once for all its steps ("PooledBatch"):
+        # the same borrowed objects stand behind every wrapper of the batch.
+        headers = getattr(data, '_headers', None)
+        if 'sf_mhz_samples' not in kwargs and data.n_subjects > 1:
+            values = headers.get('sf_mhz_samples', _UNREAD) if headers is not None else _UNREAD
+            if values is _UNREAD:
+                try:
+                    values = np.asarray(
+                        [float(v[0] if hasattr(v, '__getitem__') else v)
+                         for v in (n.spectrometer_frequency for n in data.nifti_list)],
+                        dtype=float)
+                except Exception:
+                    values = None
+                if headers is not None:
+                    headers['sf_mhz_samples'] = values
+            if values is not None and values.size and not np.all(values == values[0]):
+                kwargs['sf_mhz_samples'] = values.copy()
+
         # Inject spatial geometry (matrix, voxel size, FOV) the same way, so
         # modules that need to reason about k-space read it off the NIfTI-MRS
         # data rather than having it passed in by hand and drifting from it.
         # Absent or unreadable geometry is not an error — most modules never
         # look at it, and a bare-array workflow legitimately has none.
         if 'geometry' not in kwargs and data.n_subjects > 0:
-            try:
-                from augmentrum.sampling.kspace_sampling import KspaceGeometry
-                kwargs['geometry'] = KspaceGeometry.read_header_geometry(data)
-            except Exception:
-                pass
+            key = ('geometry', tuple(data.shape))
+            geometry = headers.get(key, _UNREAD) if headers is not None else _UNREAD
+            if geometry is _UNREAD:
+                try:
+                    from augmentrum.sampling.kspace_sampling import KspaceGeometry
+                    geometry = KspaceGeometry.read_header_geometry(data)
+                except Exception:
+                    geometry = None
+                if headers is not None:
+                    headers[key] = geometry
+            if geometry is not None:
+                kwargs['geometry'] = dict(geometry)
 
         # Inject the dimension tags too. A bare tensor has no way to say which
         # of its trailing axes is coils and which is averages, so a module that
@@ -446,9 +500,11 @@ class BaseModule(ABC):
         if origins[1] is not None:
             kwargs.setdefault('water_pool_origin', origins[1])
 
-        # ── Get data in native backend format (not forced to numpy!) ──
-        data_array = data.get_data(backend)
-        water_array = water.get_data(backend) if water is not None else None
+        # ── Get data in native backend format (not forced to numpy!), in the working precision ──
+        original = data.get_data(backend)
+        water_original = water.get_data(backend) if water is not None else None
+        data_array = prec.cast(original, self.precision)
+        water_array = prec.cast(water_original, self.precision)
 
         # ── Process (receives native tensors — preserves gradients) ──
         moved = self._spectral_axis_last(data_array)
@@ -477,8 +533,9 @@ class BaseModule(ABC):
         set_masks(data_out, masks)
         set_masks(water_out, water_masks(masks))
         if self.PRESERVES_VALUES:
-            set_origin(data_out, origins[0] if processed_data is data_array else None)
-            set_origin(water_out, origins[1] if processed_water is water_array else None)
+            # values still equal the pool's only if nothing, not even a cast, touched them
+            set_origin(data_out, origins[0] if processed_data is original else None)
+            set_origin(water_out, origins[1] if processed_water is water_original else None)
 
         return data_out, water_out
 

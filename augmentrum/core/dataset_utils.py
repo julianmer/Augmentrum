@@ -500,9 +500,12 @@ def _wrap_pair_generator(generator, backend: Backend, framework: str):
             first_data, first_water = batch_list[0]
             data_shape = (None,) + first_data[0][:].shape if hasattr(first_data[0], 'shape') else (None, None)
 
+            # the dtype too, so the data keep their precision (augmentrum.core.precision)
+            data_dtype = tf.as_dtype(np.asarray(first_data[0][:]).dtype)
+            water_dtype = tf.as_dtype(np.asarray(first_water[0][:]).dtype) if first_water else None
             output_signature = (
-                tf.TensorSpec(shape=data_shape, dtype=tf.complex64),
-                tf.TensorSpec(shape=data_shape, dtype=tf.complex64) if first_water else None
+                tf.TensorSpec(shape=data_shape, dtype=data_dtype),
+                tf.TensorSpec(shape=data_shape, dtype=water_dtype) if first_water else None
             )
 
             # Create generator from list

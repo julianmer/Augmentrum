@@ -24,12 +24,22 @@ import warnings
 from nifti_mrs_plus import ops
 
 # own
-from augmentrum.processing.utils import (safe_squeeze, fid_to_spec,
+from augmentrum.processing.utils import (safe_squeeze, fid_to_spec, ppm_reference,
                                          ppm_shift_axis, ppm_window, move_axis)
 from augmentrum.processing.domain import Domain
 from augmentrum.core.base_module import BaseModule
 from augmentrum.core.pool import WATER_SHARED
 from augmentrum.core import Backend
+
+
+#*****************#
+#   precision     #
+#*****************#
+def _complex_like(x):
+    """*x* as a NumPy array of the complex dtype of its own precision: complex64 for single-
+    precision data, complex128 for double (augmentrum.core.precision)."""
+    x = np.asarray(x)
+    return x.astype(np.result_type(x.dtype, np.complex64), copy=False)
 
 
 #**************************************************************************************************#
@@ -40,6 +50,7 @@ from augmentrum.core import Backend
 # differentiable twin on tensors — one module, the backend picks the engine.                       #
 #                                                                                                  #
 #**************************************************************************************************#
+
 class RawProcessor(BaseModule):
     """
     Raw-data processing on any backend — one module, the backend picks the engine.
@@ -342,7 +353,7 @@ class RawProcessor(BaseModule):
         if 'DIM_DYN' in others:
             ref_tc = ops.mean(ref_tc, axis=4 + others.index('DIM_DYN'), keepdims=True)
 
-        ref = ops.to_numpy(ref_tc).astype(np.complex128)
+        ref = _complex_like(ops.to_numpy(ref_tc))
         phase = np.exp(-1j * np.angle(ref))
         lead = ref.shape[:-2]
         flat = (ref * phase).reshape((-1,) + ref.shape[-2:])
@@ -565,6 +576,49 @@ class RawProcessor(BaseModule):
                           'needs ten per coil); combining coils without prewhitening.',
                           RuntimeWarning)
 
+    @staticmethod
+    def _per_sample(values, ndim):
+        """Per-sample values shaped to broadcast against a tensor's leading axis."""
+        return np.asarray(values, dtype=float).reshape((-1,) + (1,) * (ndim - 1))
+
+    @staticmethod
+    def _sf_samples(values, batch, n_points, sw_hz):
+        """
+        The per-sample spectrometer frequencies, or None when one value serves the batch.
+
+        A batch is sliced with one pair of ppm bounds, so the frequencies may differ
+        only by less than a bin - which is what a scanner's own referencing does (parts
+        per million), not what a different field or nucleus does. The latter is refused
+        rather than silently processed at one scan's frequency.
+
+        Args:
+            values: The batch's frequencies in MHz, or None.
+            batch: How many samples the batch has.
+            n_points: Points per FID; the windows are also checked zero-filled and
+                truncated by a point, as the engines slice them.
+            sw_hz: Spectral width in Hz.
+
+        Returns:
+            (batch,) array of frequencies, or None when they agree.
+        """
+        if values is None:
+            return None
+        sf = np.atleast_1d(np.asarray(values, dtype=float)).ravel()
+        if sf.size == 1 or bool(np.all(sf == sf[0])):
+            return None
+        if sf.size != batch:
+            raise ValueError(f"'sf_mhz_samples' has {sf.size} values for a batch of {batch}.")
+        for n in (n_points, 4 * n_points, n_points - 1, 4 * (n_points - 1)):
+            for lim in ((2.9, 3.1), (4.55, 4.7), (0.2, 4.2), (0.0, 8.0), (-0.15, 0.15)):
+                # the bounds move monotonically with the frequency, so the extremes decide
+                if ppm_window(n, sw_hz, float(sf.min()), lim) != \
+                        ppm_window(n, sw_hz, float(sf.max()), lim):
+                    raise ValueError(
+                        'RawProcessor got scans whose spectrometer frequencies resolve '
+                        f'different ppm windows ({sf.min():.6f}-{sf.max():.6f} MHz moves '
+                        f'{lim} ppm across a bin): process them in separate batches.')
+        return sf
+
     def process_tensor(self, data_array, water_array=None, backend=Backend.NUMPY, **kwargs):
         """
         Runs the processing pipeline on a batched tensor, spectral axis last.
@@ -591,11 +645,17 @@ class RawProcessor(BaseModule):
             raise ValueError("RawProcessor needs 'sw_hz' and 'sf_mhz' — provide them or process "
                              "data with header metadata attached.")
 
+        sf_samples = self._sf_samples(kwargs.get('sf_mhz_samples'), ops.shape(data_array)[0],
+                                      ops.shape(data_array)[-1], sw_hz)
+        if sf_samples is not None:
+            sf_mhz = float(sf_samples[0])       # every sample resolves the same ppm windows
+
         masks = {tag: mask for tag, mask in (kwargs.get('dim_masks') or {}).items()
                  if mask is not None}
         self.dim_masks_ = {}
         if masks and self.registration_method != 'torch':
-            return self._process_per_sample(data_array, water_array, backend, masks, **kwargs)
+            return self._process_per_sample(data_array, water_array, backend, masks, sf_samples,
+                                            **kwargs)
 
         met, wat = data_array, water_array
         self._warned_no_prewhiten = False
@@ -620,7 +680,7 @@ class RawProcessor(BaseModule):
         if self.registration_method == 'torch':
             met, wat = self._process_torch(met, wat, tags, wtags, sw_hz, sf_mhz, masks,
                                            kwargs.get('pool_origin'),
-                                           kwargs.get('water_pool_origin'))
+                                           kwargs.get('water_pool_origin'), sf_samples)
             if wat is not None and len(ops.shape(wat)) > 5:
                 wat = move_axis(wat, -1, self.SPECTRAL_AXIS)
             return met, wat
@@ -656,10 +716,10 @@ class RawProcessor(BaseModule):
             wat = wat[..., 1:] if wat is not None else None
 
         if self.remove_water:
-            met = self.water_removal(met, sw_hz, sf_mhz)
+            met = self.water_removal(met, sw_hz, sf_mhz, sf_samples)
 
         if self.shift_ref:
-            met = self.shift_to_reference(met, sw_hz, sf_mhz)
+            met = self.shift_to_reference(met, sw_hz, sf_mhz, sf_samples)
 
         if self.phase_correct:
             met, wat = self.phase_correction(met, wat, sw_hz, sf_mhz)
@@ -747,8 +807,8 @@ class RawProcessor(BaseModule):
         # per-subject noise covariance and whitening, from the FID tails
         noise = ops.to_numpy(met[..., int(0.9 * n_time):])
         noise = np.moveaxis(noise, coil_axis, -1).reshape(n_batch, -1, n_coil)
-        eye = np.eye(n_coil, dtype=np.complex128)
-        cov = np.empty((n_batch, n_coil, n_coil), dtype=np.complex128)
+        eye = np.eye(n_coil, dtype=np.result_type(noise.dtype, np.complex64))
+        cov = np.empty((n_batch, n_coil, n_coil), dtype=eye.dtype)
         white = np.empty_like(cov)
         white_inv = np.empty_like(cov)
         for b, samples in enumerate(noise):
@@ -771,7 +831,7 @@ class RawProcessor(BaseModule):
 
         lead = len(ops.shape(source_tc)) - 2
         shape = (n_batch,) + (1,) * (lead - 1) + (n_coil, n_coil)
-        source = ops.to_numpy(source_tc).astype(np.complex128)
+        source = _complex_like(ops.to_numpy(source_tc))
         _, _, vh = np.linalg.svd(source @ white.reshape(shape), full_matrices=False)
         weights = self._wsvd_weights(vh[..., 0, :], white.reshape(shape),
                                      white_inv.reshape(shape), cov.reshape(shape),
@@ -812,7 +872,7 @@ class RawProcessor(BaseModule):
         ref_tc = (self._transient_mean(wat_tc, wtags) if wat_tc is not None
                   else self._transient_mean(met_tc, tags))
 
-        ref = ops.to_numpy(ref_tc).astype(np.complex128)
+        ref = _complex_like(ops.to_numpy(ref_tc))
         phase = np.exp(-1j * np.angle(ref))
         lead = ref.shape[:-2]
         flat = (ref * phase).reshape((-1,) + ref.shape[-2:])
@@ -1069,7 +1129,7 @@ class RawProcessor(BaseModule):
         wat = wat * ops.match_backend(phasor, wat) if wat is not None else None
         return met, wat
 
-    def water_removal(self, met, sw_hz, sf_mhz):
+    def water_removal(self, met, sw_hz, sf_mhz, sf_samples=None):
         """
         Removes the residual water peak, the tensor form of HLSVD.
 
@@ -1084,6 +1144,7 @@ class RawProcessor(BaseModule):
             met: Metabolite tensor, spectral axis last.
             sw_hz: Spectral width in Hz.
             sf_mhz: Spectrometer frequency in MHz.
+            sf_samples: Per-sample frequencies, when the batch's scans differ.
 
         Returns:
             Metabolite tensor with the water model subtracted.
@@ -1092,20 +1153,21 @@ class RawProcessor(BaseModule):
             raise ValueError(f"Unknown tensor water removal method: {self.water_removal_method}")
         from scipy.sparse.linalg import svds
 
-        arr = ops.to_numpy(met).astype(np.complex128)
+        arr = _complex_like(ops.to_numpy(met))
         n = arr.shape[-1]
         m = n // 2
         k = min(20, n - m - 1, m)
         flat = arr.reshape(-1, n)
-        uk = np.empty((flat.shape[0], n - m, k), dtype=np.complex128)
+        uk = np.empty((flat.shape[0], n - m, k), dtype=arr.dtype)
         for i, fid in enumerate(flat):
             hankel = np.lib.stride_tricks.sliding_window_view(fid, m + 1)   # (n-m, m+1)
             uk[i] = svds(hankel, k=k)[0]
         uk = uk.reshape(arr.shape[:-1] + (n - m, k))
-        model = self._hlsvd_water_model(uk, arr, sw_hz, sf_mhz, (-0.15, 0.15), k=k)
+        sf = sf_mhz if sf_samples is None else self._per_sample(sf_samples, arr.ndim)
+        model = self._hlsvd_water_model(uk, arr, sw_hz, sf, (-0.15, 0.15), k=k)
         return met - ops.match_backend(model, met)
 
-    def shift_to_reference(self, met, sw_hz, sf_mhz):
+    def shift_to_reference(self, met, sw_hz, sf_mhz, sf_samples=None):
         """
         Shifts the peak found in (2.9, 3.1) ppm to the tCr reference 3.027 ppm.
 
@@ -1116,6 +1178,7 @@ class RawProcessor(BaseModule):
             met: Metabolite tensor, spectral axis last.
             sw_hz: Spectral width in Hz.
             sf_mhz: Spectrometer frequency in MHz.
+            sf_samples: Per-sample frequencies, when the batch's scans differ.
 
         Returns:
             Frequency-shifted metabolite tensor.
@@ -1128,7 +1191,12 @@ class RawProcessor(BaseModule):
             [arr, np.zeros(arr.shape[:-1] + (3 * n,), dtype=arr.dtype)], axis=-1))
         first, last = ppm_window(4 * n, sw_hz, sf_mhz, (2.9, 3.1))
         peak = np.argmax(np.abs(spec[..., first:last]), axis=-1)
-        shift_hz = (ppm_shift_axis(4 * n, sw_hz, sf_mhz)[first:last][peak] - 3.027) * sf_mhz
+        if sf_samples is None:
+            shift_hz = (ppm_shift_axis(4 * n, sw_hz, sf_mhz)[first:last][peak] - 3.027) * sf_mhz
+        else:                        # "ppm_shift_axis" per sample, written out to stay vectorized
+            sf = self._per_sample(sf_samples, peak.ndim)
+            hz = np.linspace(-sw_hz / 2, sw_hz / 2, 4 * n)[first:last][peak]
+            shift_hz = (hz / sf + ppm_reference('1H') - 3.027) * sf
         t = np.linspace(0, n / sw_hz, n)                            # FSL freqshift time axis
         return met * ops.match_backend(np.exp(-2j * np.pi * t * shift_hz[..., None]), met)
 
@@ -1170,7 +1238,8 @@ class RawProcessor(BaseModule):
     #*************************#
     #   per-sample fallback   #
     #*************************#
-    def _process_per_sample(self, data_array, water_array, backend, masks, **kwargs):
+    def _process_per_sample(self, data_array, water_array, backend, masks, sf_samples=None,
+                            **kwargs):
         """
         Per-sample masks on the NumPy-estimate engines: every sample's drawn
         subset is gathered and processed on its own, which is exactly what the
@@ -1182,6 +1251,8 @@ class RawProcessor(BaseModule):
             water_array: Water in its untransposed layout, or None.
             backend: The array backend.
             masks: {tag: (batch, n) bool} over the data's dimensions.
+            sf_samples: Every sample's frequency where the batch's scans
+                differ, else None; each sample is processed at its own.
             **kwargs: As for process_tensor.
 
         Returns:
@@ -1196,11 +1267,14 @@ class RawProcessor(BaseModule):
                 "registration_method='torch', which carries them through.")
 
         inner = {key: value for key, value in kwargs.items()
-                 if key not in ('dim_masks', 'pool_origin', 'water_pool_origin')}
+                 if key not in ('dim_masks', 'pool_origin', 'water_pool_origin',
+                                'sf_mhz_samples')}
         outs, water_outs, layout = [], [], None
         for i in range(ops.shape(data_array)[0]):
             sample = data_array[i:i + 1]
             water = water_array[i:i + 1] if water_array is not None else None
+            if sf_samples is not None:
+                inner['sf_mhz'] = float(sf_samples[i])
             for tag, mask in masks.items():
                 keep = np.flatnonzero(np.asarray(ops.to_numpy(mask))[i])
                 sample = ops.take(sample, keep, axis=4 + given.index(tag))
@@ -1225,8 +1299,12 @@ class RawProcessor(BaseModule):
     #: Higher dimensions the torch engine knows how to process.
     TORCH_DIMS = ('DIM_COIL', 'DIM_DYN')
 
+    #: Replay the torch engine as CUDA graphs on a GPU (see "_process_torch"). The numbers are
+    #: the same either way; False launches every kernel from Python, as a debugger may want.
+    CUDA_GRAPHS = True
+
     def _process_torch(self, met, wat, tags, wtags, sw_hz, sf_mhz, masks, origin=None,
-                       water_origin=None):
+                       water_origin=None, sf_samples=None):
         """
         The raw pipeline as batched torch operations on the data's device.
 
@@ -1238,6 +1316,19 @@ class RawProcessor(BaseModule):
         they are exact, since a subset's statistics are sums and sub-matrices
         of the whole's.
 
+        On a GPU the pipeline is replayed as CUDA graphs
+        ("torch_engine.GraphedSteps"): a batch is a few thousand small kernels,
+        which the host takes far longer to launch than the device to run. A
+        replay is the recorded kernels on the recorded tensors, so its numbers
+        are the eager ones. Everything that decides which kernels run is the
+        graphs' signature - shapes, tags, flags, the ppm windows, the pool
+        whose caches are read - and what a graph cannot hold (the batch's
+        spectrometer frequency, a Python value that changes from batch to
+        batch, and MAGMA's solve for the coil weights) runs eagerly between
+        the graphs. Where the scans of a batch differ in frequency, each one's
+        own enters as a tensor on the device, an input like the masks. A batch
+        that needs gradients runs eagerly.
+
         Args:
             met: Data, (B, X, Y, Z, <tags>, T).
             wat: Water, (B, X, Y, Z, <wtags>, T), or None.
@@ -1248,6 +1339,8 @@ class RawProcessor(BaseModule):
             masks: {tag: (B, n) bool} per-sample masks over the data's dimensions.
             origin: PoolOrigin of the data, or None.
             water_origin: PoolOrigin of the water, or None.
+            sf_samples: Every sample's frequency in MHz where the batch's
+                scans differ ("_sf_samples"), else None.
 
         Returns:
             "(met, wat)" with collapsed dimensions removed, spectral axis last,
@@ -1263,14 +1356,134 @@ class RawProcessor(BaseModule):
                 raise ValueError(f"registration_method='torch' processes {self.TORCH_DIMS}, "
                                  f"but the {name} carries {unknown}; use 'fsl-mrs' or "
                                  f"'pattern'.")
-        entry_tags, entry_wtags = list(tags), list(wtags)
-        x, spatial = self._to_torch_layout(met, tags)
-        w = self._to_torch_layout(wat, wtags)[0] if wat is not None else None
-        b, v, c, d, n = x.shape
+        as_torch = lambda a: (a if ops.is_torch(a)
+                              else torch.from_numpy(np.asarray(ops.to_numpy(a))))
+        x, spatial = self._to_torch_layout(as_torch(met), tags)
+        w = self._to_torch_layout(as_torch(wat), wtags)[0] if wat is not None else None
         masks = {tag: torch.as_tensor(np.asarray(ops.to_numpy(mask))) if not ops.is_torch(mask)
                  else mask for tag, mask in masks.items()}
         masks = {tag: mask.to(device=x.device, dtype=torch.bool) for tag, mask in masks.items()}
-        coil_mask, dyn_mask = masks.get('DIM_COIL'), masks.get('DIM_DYN')
+
+        # the pools whose per-subject caches stand in for this batch's statistics
+        b, v, c, d, n = x.shape
+        pools = tuple(held if self._pool_holds(held, role, group, n) else None
+                      for held, role, group in ((origin, 'data', tags),
+                                                (water_origin, 'water', wtags)))
+
+        # A raw batch is a quarter of a gigabyte of coils and transients, and the coil
+        # combination is all that reads it: where the pool's cached moments cover the rest, it
+        # meets its weights in a step and stays out of the graphs, which then neither copy it
+        # nor keep a second one.
+        deferred = (self.coil and not self.conj and 'DIM_COIL' in tags and c > 1
+                    and self.coil_method == 'fsl-mrs' and w is not None and pools[0] is not None)
+        inputs = dict(met=None if deferred else x, wat=w, coil_mask=masks.get('DIM_COIL'),
+                      dyn_mask=masks.get('DIM_DYN'))
+        for key, held in zip(('index', 'water_index'), pools):
+            inputs[key] = (torch.as_tensor(held.indices, device=x.device)
+                           if held is not None else None)
+        pools = tuple(held.pool if held is not None else None for held in pools)
+
+        # every scan's own frequency where the batch's differ: gathered from the pool's cache on
+        # the device where it applies, else uploaded with the batch - never between the graphs
+        if sf_samples is None:
+            inputs['sf'] = None
+        elif pools[0] is not None:
+            inputs['sf'] = pools[0].cached('RawProcessor.sf_mhz',
+                                           self._pool_sf_mhz)[inputs['index']]
+        else:
+            inputs['sf'] = torch.as_tensor(np.asarray(sf_samples, dtype=float), device=x.device)
+
+        # the ppm windows, the only thing the frequency decides that a graph must know
+        n_w = int(w.shape[-1]) if w is not None else n
+        cut = 1 if self.truncate else 0
+        spans = dict(align=engine.window_spans(n, sw_hz, sf_mhz, (0.2, 4.2)),
+                     water_align=engine.window_spans(n_w, sw_hz, sf_mhz, (0, 8)),
+                     shift=engine.window_spans(4 * (n - cut), sw_hz, sf_mhz, (2.9, 3.1)),
+                     water_phase=engine.window_spans(4 * (n_w - cut), sw_hz, sf_mhz,
+                                                     (4.55, 4.7)))
+        steps = lambda given: self._torch_steps(given, list(tags), list(wtags), sw_hz, spans,
+                                                pools, x.shape, spatial)
+        values = {'sf_mhz': sf_mhz, 'sf_samples': sf_samples, 'met': x}
+
+        tensors = [t for t in list(inputs.values()) + [x] if t is not None]
+        if (self.CUDA_GRAPHS and x.device.type == 'cuda'
+                and not (torch.is_grad_enabled() and any(t.requires_grad for t in tensors))):
+            layout = lambda t: None if t is None else (tuple(t.shape), t.stride(), t.dtype)
+            signature = (str(x.device), tuple(tags), tuple(wtags), sw_hz,
+                         tuple(sorted(spans.items())), tuple(id(p) for p in pools),
+                         self._engine_settings(), layout(x), spatial,
+                         tuple((key, layout(t)) for key, t in inputs.items()))
+            graphs = self.__dict__.get('_graphs')
+            if graphs is None:
+                graphs = self._graphs = engine.GraphedSteps()
+            with torch.cuda.device(x.device):
+                report = graphs(signature, steps, inputs, values,
+                                keep=tuple(p for p in pools if p is not None))
+        else:
+            report = engine.run_steps(steps(inputs), values)
+
+        tags[:], wtags[:] = report['tags'], report['wtags']
+        self._dropped_tags |= report['dropped']
+        self._dropped_water_tags |= report['water_dropped']
+        if report['no_prewhiten']:
+            self._warn_no_prewhiten()
+        if report['alignment'] is not None:
+            self.last_alignment_ = report['alignment']
+        if report['keep_mask'] is not None:
+            self.last_keep_mask_ = report['keep_mask']
+        self.dim_masks_ = report['dim_masks']
+        met_out, wat_out = report['met'], report['wat']
+        if not ops.is_torch(met):
+            met_out = ops.match_backend(met_out.numpy(), met)
+            wat_out = ops.match_backend(wat_out.numpy(), wat) if wat_out is not None else None
+            self.dim_masks_ = {tag: mask.numpy() for tag, mask in self.dim_masks_.items()}
+        return met_out, wat_out
+
+    def _engine_settings(self):
+        """Every setting that decides which kernels the torch engine runs."""
+        return (self.conj, self.coil, self.align, self.remove_outliers, self.average, self.ecc,
+                self.truncate, self.remove_water, self.shift_ref, self.phase_correct,
+                self.coil_method, self.remove_method, self.average_method, self.ecc_method,
+                self.water_removal_method, self.shift_ref_method, self.phase_correct_method)
+
+    def _torch_steps(self, inputs, tags, wtags, sw_hz, spans, pools, shape, spatial):
+        """
+        The torch engine as a stepwise computation ("torch_engine.Step").
+
+        It reads nothing that varies from batch to batch but *inputs*, uses the
+        spectrometer frequency only inside its steps, and changes nothing of
+        the processor's: what a call leaves behind is reported instead.
+
+        Args:
+            inputs: 'met' and 'wat' (spectral axis last, water optional), the
+                'coil_mask' and 'dyn_mask' (or None), and the pool indices of
+                data and water, 'index' and 'water_index', where their pool's
+                caches apply (else None).
+            tags: The data's higher-dimension tags, a copy changed as
+                dimensions go.
+            wtags: The water's, likewise.
+            sw_hz: Spectral width in Hz.
+            spans: The bins of every ppm window used, by purpose.
+            pools: The TensorPools of data and water whose caches apply, or None.
+            shape: The data's "(B, V, C, D, T)" layout shape; 'met' is None where the
+                coil combination reads the batch in a step instead (see "_process_torch").
+            spatial: Its spatial shape, for the way back.
+
+        Returns:
+            dict with 'met' and 'wat' in the output layout, 'dim_masks',
+            'alignment' and 'keep_mask' (or None), the remaining 'tags' and
+            'wtags', the 'dropped' and 'water_dropped' tags, and whether
+            prewhitening had to be dropped ('no_prewhiten').
+        """
+        import torch
+        from augmentrum.processing import torch_engine as engine
+
+        report = dict(dropped=set(), water_dropped=set(), no_prewhiten=False, alignment=None,
+                      keep_mask=None)
+        entry_tags, entry_wtags = list(tags), list(wtags)
+        x, w = inputs['met'], inputs['wat']
+        b, v, c, d, n = shape
+        coil_mask, dyn_mask = inputs['coil_mask'], inputs['dyn_mask']
 
         if self.conj:
             x = torch.conj_physical(x)
@@ -1284,30 +1497,31 @@ class RawProcessor(BaseModule):
                 if w.shape[2] != c:
                     raise ValueError('Reference and data coil dimension does not match.')
             if self.coil_method == 'fsl-mrs':
-                x, w = self._torch_wsvd(x, w, coil_mask, dyn_mask, origin, water_origin,
-                                        entry_tags, entry_wtags)
+                x, w = yield from self._torch_wsvd(x, w, coil_mask, dyn_mask, inputs, pools,
+                                                   entry_tags, entry_wtags, report, shape)
             elif self.coil_method == 'adaptive':
                 if coil_mask is not None:
                     raise NotImplementedError("Adaptive coil combination takes no coil masks; "
                                               "use coil_method='fsl-mrs'.")
-                x, w = self._torch_adaptive(x, w, dyn_mask)
+                # its eigenvector estimate is NumPy's: a step outside any graph
+                x, w = yield engine.Step(self._torch_adaptive, x, w, dyn_mask)
             else:
                 raise ValueError(f"Unknown tensor coil combination method: {self.coil_method}")
             tags.remove('DIM_COIL')
-            self._dropped_tags.add('DIM_COIL')
+            report['dropped'].add('DIM_COIL')
             if w is not None:
                 wtags.remove('DIM_COIL')
-                self._dropped_water_tags.add('DIM_COIL')
+                report['water_dropped'].add('DIM_COIL')
             coil_mask = None
 
         if self.align:
             x, coil_mask, estimates = self._torch_align(
-                x, tags, self._dropped_tags, coil_mask, dyn_mask, sw_hz, sf_mhz, (0.2, 4.2))
+                x, tags, report['dropped'], coil_mask, dyn_mask, sw_hz, spans['align'])
             if estimates is not None:
-                self.last_alignment_ = estimates
+                report['alignment'] = estimates
             if w is not None:
-                w = self._torch_align(w, wtags, self._dropped_water_tags, None, None,
-                                      sw_hz, sf_mhz, (0, 8))[0]
+                w = self._torch_align(w, wtags, report['water_dropped'], None, None,
+                                      sw_hz, spans['water_align'])[0]
 
         valid = dyn_mask
         if self.remove_outliers:
@@ -1319,7 +1533,7 @@ class RawProcessor(BaseModule):
                                      'single dynamic dimension (as in FSL-MRS remove_unlike).')
                 every = torch.ones(b, x.shape[3], dtype=torch.bool, device=x.device)
                 valid = engine.unlike_mask(x[:, 0, 0], every if dyn_mask is None else dyn_mask)
-                self.last_keep_mask_ = valid.reshape(b, 1, 1, 1, -1)
+                report['keep_mask'] = valid.reshape(b, 1, 1, 1, -1)
 
         remaining = {}
         if self.average and self.average_method != 'fsl-mrs':
@@ -1334,42 +1548,42 @@ class RawProcessor(BaseModule):
                 if valid is None:
                     x = x.mean(dim=3, keepdim=True)
                 else:
-                    weights = valid.to(torch.float64)
-                    weights = (weights / weights.sum(dim=1, keepdim=True)).to(x.real.dtype)
+                    weights = valid.to(x.real.dtype)
+                    weights = weights / weights.sum(dim=1, keepdim=True)
                     x = (x * weights[:, None, None, :, None]).sum(dim=3, keepdim=True)
                 tags.remove('DIM_DYN')
-                self._dropped_tags.add('DIM_DYN')
+                report['dropped'].add('DIM_DYN')
         if self.average and w is not None and 'DIM_DYN' in wtags and w.shape[3] > 1:
             w = w.mean(dim=3, keepdim=True)
             wtags.remove('DIM_DYN')
-            self._dropped_water_tags.add('DIM_DYN')
+            report['water_dropped'].add('DIM_DYN')
 
         if coil_mask is not None and 'DIM_COIL' in tags:
             x = x * coil_mask.to(x.real.dtype)[:, None, :, None, None]
             remaining['DIM_COIL'] = coil_mask
 
-        for group, dropped, data in ((tags, self._dropped_tags, x),
-                                     (wtags, self._dropped_water_tags, w)):
+        for group, dropped, data in ((tags, report['dropped'], x),
+                                     (wtags, report['water_dropped'], w)):
             if data is not None and ('DIM_DYN' in group or 'DIM_COIL' in group):
                 for tag in list(group):
                     if data.shape[2 if tag == 'DIM_COIL' else 3] == 1:
                         group.remove(tag)
                         dropped.add(tag)
 
-        x, w = self._torch_corrections(x, w, tags, wtags, sw_hz, sf_mhz)
+        x, w = yield from self._torch_corrections(x, w, tags, wtags, sw_hz, spans,
+                                                  inputs['sf'])
 
-        self.dim_masks_ = {tag: mask for tag, mask in remaining.items() if tag in tags}
-        met_out = self._from_torch_layout(x, spatial, tags)
-        wat_out = self._from_torch_layout(w, spatial, wtags) if w is not None else None
-        if not ops.is_torch(met):
-            met_out = ops.match_backend(met_out.numpy(), met)
-            wat_out = ops.match_backend(wat_out.numpy(), wat) if wat_out is not None else None
-            self.dim_masks_ = {tag: mask.numpy() for tag, mask in self.dim_masks_.items()}
-        return met_out, wat_out
+        report.update(
+            met=self._from_torch_layout(x, spatial, tags),
+            wat=self._from_torch_layout(w, spatial, wtags) if w is not None else None,
+            dim_masks={tag: mask for tag, mask in remaining.items() if tag in tags},
+            tags=tags, wtags=wtags)
+        return report
 
-    def _torch_wsvd(self, x, w, coil_mask, dyn_mask, origin, water_origin, tags, wtags):
+    def _torch_wsvd(self, x, w, coil_mask, dyn_mask, inputs, pools, tags, wtags, report, shape):
         """
-        wSVD coil combination of the torch engine, over each sample's drawn coils.
+        wSVD coil combination of the torch engine, over each sample's drawn
+        coils; a stepwise computation, like "_torch_steps".
 
         The noise covariance pools the last tenth of every drawn transient (as
         FSL-MRS estimate_noise_cov does over the gathered array), from moments
@@ -1380,13 +1594,13 @@ class RawProcessor(BaseModule):
         import torch
         from augmentrum.processing import torch_engine as engine
 
-        b, v, c, d, n = x.shape
+        b, v, c, d, n = shape
         tail = n - int((1 - engine.NOISE_FRACTION) * n)
-        if self._pool_holds(origin, 'data', tags, n):
-            second, first = origin.pool.cached(
+        if pools[0] is not None:
+            second, first = pools[0].cached(
                 ('RawProcessor.noise_moments', tuple(tags), n),
                 lambda pool: self._pool_noise_moments(pool.data, tags, tail))
-            index = torch.as_tensor(origin.indices, device=x.device)
+            index = inputs['index']
             second, first = second[index], first[index]
             if self.conj:
                 second, first = second.conj(), first.conj()
@@ -1395,29 +1609,39 @@ class RawProcessor(BaseModule):
         cov, samples = engine.noise_covariance(second, first, v * tail, dyn_mask)
 
         active = (coil_mask if coil_mask is not None
-                  else torch.ones(b, c, dtype=torch.bool, device=x.device))
+                  else torch.ones(b, c, dtype=torch.bool, device=cov.device))
         whiten = samples >= engine.MIN_SAMPLES_PER_COIL * active.sum(dim=1)
         if coil_mask is None and dyn_mask is None and v * d * tail < \
                 engine.MIN_SAMPLES_PER_COIL * c:
-            self._warn_no_prewhiten()
+            report['no_prewhiten'] = True
 
         if w is None:
             gram = engine.reference_gram(x.permute(0, 1, 3, 4, 2))          # (B, V, D, C, C)
-            weights = engine.wsvd_weights(gram, cov, active, whiten, False)
+            weights = yield from engine.wsvd_weight_steps(gram, cov, active, whiten, False)
             return engine.combine_coils(x, weights.to(x.dtype)).unsqueeze(2), None
 
-        if self._pool_holds(water_origin, 'water', wtags, n):
-            gram = water_origin.pool.cached(
+        if pools[1] is not None:
+            gram = pools[1].cached(
                 ('RawProcessor.water_gram', tuple(wtags), n),
                 lambda pool: self._pool_water_gram(pool.water, wtags))
-            gram = gram[torch.as_tensor(water_origin.indices, device=x.device)]
+            gram = gram[inputs['water_index']]
             gram = gram.conj() if self.conj else gram
         else:
             gram = engine.reference_gram(w.mean(dim=3).transpose(-1, -2))   # (B, V, C, C)
-        weights = engine.wsvd_weights(gram, cov, active, whiten, True)       # (B, V, C)
+        weights = yield from engine.wsvd_weight_steps(gram, cov, active, whiten, True)
+        if x is None:
+            return (yield engine.Step(self._combine_raw, weights, w, late=('met',)))
         x = engine.combine_coils(x, weights.to(x.dtype))
         w = engine.combine_coils(w, weights.to(w.dtype))
         return x.unsqueeze(2), w.unsqueeze(2)
+
+    @staticmethod
+    def _combine_raw(weights, water, met):
+        """The coil combination of a batch that stayed outside the graphs (see "_torch_steps")."""
+        from augmentrum.processing import torch_engine as engine
+
+        return (engine.combine_coils(met, weights.to(met.dtype)).unsqueeze(2),
+                engine.combine_coils(water, weights.to(water.dtype)).unsqueeze(2))
 
     @staticmethod
     def _pool_holds(origin, role, tags, n):
@@ -1438,6 +1662,15 @@ class RawProcessor(BaseModule):
         moments = [engine.noise_moments(chunk[..., chunk.shape[-1] - tail:])
                    for chunk in layout.split(subjects)]
         return torch.cat([m[0] for m in moments]), torch.cat([m[1] for m in moments])
+
+    @staticmethod
+    def _pool_sf_mhz(pool):
+        """The pooled subjects' spectrometer frequencies in MHz, a tensor on the pool's device."""
+        import torch
+
+        values = [float(v[0] if hasattr(v, '__getitem__') else v)
+                  for v in (n.spectrometer_frequency for n in pool.source[0].nifti_list)]
+        return torch.tensor(values, dtype=torch.float64, device=pool.device)
 
     def _pool_water_gram(self, pool_water, wtags):
         """The Gram matrix of every pooled water, averaged over its transients."""
@@ -1461,7 +1694,7 @@ class RawProcessor(BaseModule):
         else:
             weights = dyn_mask.to(x.real.dtype)[:, None, None, :, None]
             ref = (x * weights).sum(dim=3) / weights.sum(dim=3)
-        ref = ops.to_numpy(ref).astype(np.complex128).transpose(0, 1, 3, 2)   # (B, V, T, C)
+        ref = _complex_like(ops.to_numpy(ref)).transpose(0, 1, 3, 2)   # (B, V, T, C)
         phase = np.exp(-1j * np.angle(ref))
         flat = (ref * phase).reshape((-1,) + ref.shape[-2:])
         csm = np.stack([estimate_csm(voxel)[:, 0] for voxel in flat])
@@ -1474,13 +1707,13 @@ class RawProcessor(BaseModule):
             w = torch.einsum('bvcdt,bvtc->bvdt', w, weights.to(w.dtype)).unsqueeze(2)
         return x, w
 
-    def _torch_align(self, x, tags, dropped, coil_mask, dyn_mask, sw_hz, sf_mhz, ppmlim):
+    def _torch_align(self, x, tags, dropped, coil_mask, dyn_mask, sw_hz, spans):
         """
         Registration along DIM_DYN, where there is more than one transient.
 
         A coil dimension still present is cut to its first drawn element first,
         as the list path's copy(remove_dim='DIM_COIL') does with the gathered
-        array.
+        array. The comparison window is given by its bins, *spans*.
 
         Returns:
             "(x, coil_mask, estimates)": the aligned tensor, the coil mask left
@@ -1503,12 +1736,17 @@ class RawProcessor(BaseModule):
         flat = x[:, :, 0].reshape(b * v, d, n)
         valid = (torch.ones(b * v, d, dtype=torch.bool, device=x.device) if dyn_mask is None
                  else dyn_mask.repeat_interleave(v, dim=0))
-        phi, eps = engine.align(flat, valid, sw_hz, sf_mhz, ppmlim)
+        phi, eps = engine.align(flat, valid, sw_hz, None, None, spans=spans)
         x = flat * engine.alignment_phasor(phi, eps, n, sw_hz, x.dtype)
         return x.reshape(b, v, 1, d, n), coil_mask, (phi.reshape(b, v, d), eps.reshape(b, v, d))
 
-    def _torch_corrections(self, x, w, tags, wtags, sw_hz, sf_mhz):
-        """Eddy current correction, truncation, water removal, referencing and phasing."""
+    def _torch_corrections(self, x, w, tags, wtags, sw_hz, spans, sf=None):
+        """
+        Eddy current correction, truncation, water removal, referencing and
+        phasing; a stepwise computation, like "_torch_steps", on the windows'
+        bins *spans*. *sf* is every sample's own spectrometer frequency (MHz,
+        a (B,) tensor on the device) where the batch's scans differ, else None.
+        """
         import torch
         from augmentrum.processing import torch_engine as engine
 
@@ -1520,7 +1758,7 @@ class RawProcessor(BaseModule):
             if self.ecc_method == 'smoothed':
                 phase = engine.ecc_phase(ref)
             elif self.ecc_method == 'fsl-mrs':
-                phase = torch.angle(ref.to(torch.complex128))
+                phase = torch.angle(ref.to(engine.complex_of(ref)))
             else:
                 raise ValueError(f"Unknown ECC method: {self.ecc_method}")
             phasor = torch.polar(torch.ones_like(phase), -phase)
@@ -1532,14 +1770,21 @@ class RawProcessor(BaseModule):
             w = w[..., 1:] if w is not None else None
 
         if self.remove_water:
-            x = self.water_removal(x, sw_hz, sf_mhz)
+            # HLSVD runs in NumPy, on each scan's frequency
+            x = yield engine.Step(self.water_removal, x, sw_hz, late=('sf_mhz', 'sf_samples'))
 
         n = x.shape[-1]
         if self.shift_ref:
             if self.shift_ref_method != 'fsl-mrs':
                 raise ValueError(f"Unknown tensor frequency shifting method: "
                                  f"{self.shift_ref_method}")
-            shift = engine.peak_shift_hz(x.reshape(-1, n), sw_hz, sf_mhz, (2.9, 3.1), 3.027)
+            flat = x.reshape(-1, n)
+            if sf is None:
+                shift = yield from engine.peak_shift_steps(flat, sw_hz, spans['shift'], 3.027)
+            else:
+                # every FID against its own scan's frequency, inside the graph
+                own = sf[:, None].expand(x.shape[0], flat.shape[0] // x.shape[0]).reshape(-1)
+                shift = engine.peak_shift_each(flat, sw_hz, spans['shift'], 3.027, own)
             x = x * engine.shift_phasor(shift, n, sw_hz, x.dtype).reshape(x.shape[:-1] + (n,))
 
         if self.phase_correct:
@@ -1548,12 +1793,13 @@ class RawProcessor(BaseModule):
                                  f"{self.phase_correct_method}")
 
             def phased(data, window):
-                angle = engine.peak_phase(data.reshape(-1, data.shape[-1]), sw_hz, sf_mhz, window)
+                angle = engine.peak_phase(data.reshape(-1, data.shape[-1]), sw_hz, None, None,
+                                          window)
                 factor = torch.polar(torch.ones_like(angle), angle)
                 return data * factor.reshape(data.shape[:-1] + (1,)).to(data.dtype)
 
-            x = phased(x, (2.9, 3.1))
-            w = phased(w, (4.55, 4.7)) if w is not None else None
+            x = phased(x, spans['shift'])
+            w = phased(w, spans['water_phase']) if w is not None else None
         return x, w
 
     @staticmethod
@@ -1662,7 +1908,7 @@ class RawProcessor(BaseModule):
         Returns:
             Accumulated (phi, eps) per transient, each (..., D).
         """
-        fids = np.asarray(fids, dtype=np.complex128)
+        fids = _complex_like(fids)
         n = fids.shape[-1]
         t = np.linspace(1.0 / sw_hz, n / sw_hz, n)                  # FSL timeAxis (starts at dwell)
         first, last = ppm_window(n, sw_hz, sf_mhz, ppmlim)
@@ -1760,7 +2006,7 @@ class RawProcessor(BaseModule):
         Returns:
             Boolean keep mask, (..., D).
         """
-        fids = np.asarray(fids, dtype=np.complex128)
+        fids = _complex_like(fids)
         specs = fid_to_spec(fids)
         target = np.median(fids.real, axis=-2) + 1j * np.median(fids.imag, axis=-2)
         keep = np.ones(fids.shape[:-1], dtype=bool)
@@ -1823,7 +2069,7 @@ class RawProcessor(BaseModule):
             The modeled water FID, (..., T) complex.
         """
         dwell = 1.0 / sw_hz
-        fids = np.asarray(fids, dtype=np.complex128)
+        fids = _complex_like(fids)
         n = fids.shape[-1]
 
         # complex matmul raises spurious fp-flag warnings on some BLAS builds

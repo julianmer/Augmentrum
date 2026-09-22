@@ -169,6 +169,34 @@ def test_semi_parametrized_broadens_and_reproduces():
     assert np.allclose(broad, again)
 
 
+@pytest.mark.parametrize('source', [
+    SemiParametrized(),
+    SemiParametrized(broaden_ppm=(0.0, 0.0), amp_mod=0.3),
+    SemiParametrized(amp_mod=0.0),
+    SemiParametrized(base=Parametrized(amp_jitter=0.3)),
+    Parametrized(ppm_jitter=0.02),
+])
+def test_a_batch_of_profiles_is_the_calls_one_by_one(source):
+    """The batched build takes the same draws and gives the same bits as calling per sample."""
+    ppm = ppm_axis()
+    batch = source.profiles(ppm, np.random.default_rng(3), 5)
+    rng = np.random.default_rng(3)
+    calls = np.stack([source.profile(ppm, rng) for _ in range(5)])
+    assert np.array_equal(batch, calls)
+
+
+def test_a_fixed_template_is_built_once_per_axis():
+    """The cached template is handed out as a copy, so a caller cannot change it."""
+    source = Parametrized()
+    first = source.profile(ppm_axis(), None)
+    first[:] = 0
+    assert np.array_equal(source.profile(ppm_axis(), None),
+                          Parametrized().profile(ppm_axis(), None))
+    assert len(source._fixed) == 1
+    source.profile(ppm_axis(n=512), None)
+    assert len(source._fixed) == 2
+
+
 #**************************************************************************************************#
 #                                        per-sample draws                                          #
 #**************************************************************************************************#

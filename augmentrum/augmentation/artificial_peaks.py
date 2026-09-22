@@ -19,10 +19,10 @@ from typing import Optional, List, Dict
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from augmentrum.processing.utils import (ppm_axis, ppm_reference, batch_profile,
-                                         causal_lineshape)
+                                         causal_lineshape, causal_lineshapes, device_values,
+                                         on_cuda, to_backend)
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
-from nifti_mrs_plus.ops import match_backend
 
 
 #**************************************************************************************************#
@@ -177,6 +177,40 @@ class ArtificialPeaks(BaseModule):
             contam += amp_frac * shape * np.exp(1j * np.deg2rad(phase_deg))
         return contam
 
+    def _profiles(self, batch: int, ppm: np.ndarray, table: List[Dict],
+                  sf_mhz: float, like=None):
+        """
+        Every sample's "_profile" at once, "(batch, N)", bit for bit.
+
+        Each peak's lineshapes are built for the whole batch in one go, and
+        added only to the samples that give it a width, as the per-sample loop
+        skips the others. With a CUDA *like* the same float64 sums run on its
+        device and the result is a complex128 tensor there.
+        """
+        device = like is not None and on_cuda(like)
+        if device:
+            import torch
+            contam = torch.zeros((batch, ppm.size), dtype=torch.complex128, device=like.device)
+        else:
+            contam = np.zeros((batch, ppm.size), dtype=np.complex128)
+        for drawn in table:
+            lb_hz, gb_hz = drawn['lb_hz'][:batch], drawn['gb_hz'][:batch]
+            keep = (lb_hz > 0) | (gb_hz > 0)
+            if not keep.any():
+                continue
+            shapes = causal_lineshapes(ppm, drawn['ppm'][:batch], lb_hz / float(sf_mhz),
+                                       gb_hz / float(sf_mhz), like=like)
+            phase = np.exp(1j * np.deg2rad(drawn['phase_deg'][:batch]))
+            if device:
+                term = (device_values(drawn['amp'][:batch, None], like) * shapes
+                        * device_values(phase[:, None], like))
+                contam = torch.where(device_values(keep[:, None], like) > 0, contam + term,
+                                     contam)
+            else:
+                np.add(contam, drawn['amp'][:batch, None] * shapes * phase[:, None], out=contam,
+                       where=keep[:, None])
+        return contam
+
     def _axis(self, n_points: int, sw_hz: float, sf_mhz: float, nucleus) -> np.ndarray:
         """The ppm axis, on the nucleus' reference unless "ref_ppm" overrides it."""
         ppm = ppm_axis(n_points, sw_hz, sf_mhz, nucleus)
@@ -236,7 +270,7 @@ class ArtificialPeaks(BaseModule):
         Everything touching the data runs on the data's own backend, so
         gradients and device placement survive. Only the peak shapes are built
         in NumPy: they depend on the FID grid and the drawn parameters alone,
-        one profile per sample, promoted once with "match_backend".
+        one profile per sample, promoted once with "to_backend".
 
         Args:
             data_array: Input spectra of shape "(batch, ..., n_points)"
@@ -263,16 +297,18 @@ class ArtificialPeaks(BaseModule):
         # 1. ppm axis and one contamination profile per sample (NumPy)
         ppm = self._axis(n_points, float(sw_hz), float(sf_mhz), nucleus)
         table = self._draw(batch)
-        unit_contam = np.stack([self._profile(i, ppm, table, float(sf_mhz))
-                                for i in range(batch)])
-        unit_contam = batch_profile(unit_contam, ndim)
+        if on_cuda(spec) and ndim > 1:
+            profiles = self._profiles(batch, ppm, table, float(sf_mhz), like=spec)
+            unit_contam = profiles.reshape((batch,) + (1,) * (ndim - 2) + (n_points,))
+        else:
+            unit_contam = batch_profile(self._profiles(batch, ppm, table, float(sf_mhz)), ndim)
 
         # 2. One amplitude per FID, on the data's own backend
         magnitude = ops.abs(spec if self.amp_mode == 'abs' else ops.real(spec))
         peak_ref = ops.amax(magnitude, axis=-1, keepdims=True)
         peak_ref = ops.where(peak_ref > 0, peak_ref, ops.cast_like(peak_ref * 0.0 + 1.0, peak_ref))
 
-        contam = ops.cast_like(match_backend(unit_contam, spec), spec) \
+        contam = ops.cast_like(to_backend(unit_contam, spec), spec) \
             * ops.cast_like(peak_ref, spec)
 
         # 3. Add contamination in the spectral domain (backend-native)

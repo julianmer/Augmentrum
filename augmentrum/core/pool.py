@@ -159,17 +159,24 @@ class PooledBatch(NIfTI_MRS_Plus):
     guarantee holds along the whole pipeline.
     """
 
-    def __init__(self, nifti_list, backend=None, volatile=False, metadata=None, state=None):
-        # A pool is uniform by construction, so the per-object tag check of
-        # the base class - which parses every header, for every wrapper of
-        # every step - is skipped: it is built around the first object alone.
+    def __init__(self, nifti_list, backend=None, volatile=False, metadata=None, state=None,
+                 headers=None):
+        # A pool is uniform by construction and its objects were checked when it
+        # was built, so the base class's check - which parses a header, for every
+        # wrapper of every step - is skipped: it starts as the empty batch. What
+        # the headers say (the objects' shape, their frequencies, ...) is read
+        # once per batch into *headers* and shared by every wrapper around the
+        # same objects ("rewrap"), since borrowed headers never change.
         objects = list(nifti_list.nifti_list if isinstance(nifti_list, NIfTI_MRS_Plus)
                        else nifti_list)
-        super().__init__(objects[:1], backend=backend, volatile=True, state=state)
+        super().__init__([], backend=backend, volatile=True, state=state)
         self.volatile = volatile
         self.nifti_list = objects
         self.n_subjects = len(objects)
-        self._shape = ((self.n_subjects,) + tuple(objects[0].shape) if objects else (0,))
+        self._headers = headers if headers is not None else {}
+        if objects and 'object_shape' not in self._headers:
+            self._headers['object_shape'] = tuple(objects[0].shape)
+        self._shape = ((self.n_subjects,) + self._headers['object_shape'] if objects else (0,))
         if not volatile:
             self._init_metadata(objects, metadata)
         self._borrowed = True
@@ -188,6 +195,7 @@ class PooledBatch(NIfTI_MRS_Plus):
         """
         if not self._borrowed:
             return super().materialize()
+        self._headers = {}                  # the objects about to be built have headers of their own
         if self._tensor_dirty and self._cached_tensor is not None:
             arr = ops.to_numpy(self._cached_tensor)
             self.nifti_list = [self._rebuild(nifti, arr[i])
@@ -266,8 +274,10 @@ def rewrap(source, nifti_list, backend, volatile, state):
     the source's, and an earlier stage must not change under a later one.
     """
     if isinstance(source, PooledBatch):
+        # the same objects carry the same headers, so what was read from them carries over
+        same = nifti_list is source.nifti_list and source._borrowed
         out = PooledBatch(nifti_list=nifti_list, backend=backend, volatile=volatile,
-                          state=state)
+                          state=state, headers=source._headers if same else None)
         out._pending_provenance = list(source._pending_provenance)
         return out
     return NIfTI_MRS_Plus(nifti_list=nifti_list, backend=backend, volatile=volatile,

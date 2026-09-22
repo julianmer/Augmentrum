@@ -21,6 +21,7 @@ from typing import Optional, List
 from abc import ABC, abstractmethod
 
 from augmentrum.core.base_module import BaseModule
+from augmentrum.core import precision as prec
 from augmentrum.processing.utils import to_backend
 from nifti_mrs_plus import Backend, ops
 
@@ -69,7 +70,7 @@ class NoiseCovariance(ABC):
         """Unit diagonal, so psi says only how the channels relate."""
         scale = np.sqrt(np.abs(np.diag(psi)))
         scale = np.where(scale > 0, scale, 1.0)
-        return (psi / scale[:, None] / scale[None, :]).astype(np.complex64)
+        return (psi / scale[:, None] / scale[None, :]).astype(np.complex128)
 
 
 #**************************************************************************************************#
@@ -84,7 +85,7 @@ class Independent(NoiseCovariance):
 
     def matrix(self, n_coils: int) -> np.ndarray:
         """The identity: every channel draws on its own."""
-        return np.eye(n_coils, dtype=np.complex64)
+        return np.eye(n_coils, dtype=np.complex128)
 
 
 #**************************************************************************************************#
@@ -187,7 +188,7 @@ class NoiseProfile(ABC):
     def _unit_mean(profile: np.ndarray) -> np.ndarray:
         """Scaled to average one, so it says only where, never how much."""
         mean = float(np.mean(profile))
-        return (profile / mean if mean > 0 else np.ones_like(profile)).astype(np.float32)
+        return (profile / mean if mean > 0 else np.ones_like(profile)).astype(np.float64)
 
 
 #**************************************************************************************************#
@@ -202,7 +203,7 @@ class Flat(NoiseProfile):
 
     def sigma(self, matrix) -> np.ndarray:
         """Ones, so nothing is modulated."""
-        return np.ones(tuple(int(n) for n in matrix), np.float32)
+        return np.ones(tuple(int(n) for n in matrix), np.float64)
 
 
 #**************************************************************************************************#
@@ -216,7 +217,7 @@ class SuppliedProfile(NoiseProfile):
     """A profile the caller already has."""
 
     def __init__(self, profile):
-        self.profile = np.asarray(profile, dtype=np.float32)
+        self.profile = np.asarray(profile, dtype=np.float64)
 
     def sigma(self, matrix) -> np.ndarray:
         """Hand it over, once it is known to fit."""
@@ -653,10 +654,10 @@ class Noise(BaseModule):
             ndim: Rank of the data the level will multiply.
 
         Returns:
-            A float32 tensor of shape "(1 or batch, 1, ..., 1)".
+            A tensor of shape "(1 or batch, 1, ..., 1)", real, in *like*'s precision.
         """
         arr = np.asarray(value, dtype=np.float64).reshape((-1,) + (1,) * (ndim - 1))
-        return to_backend(arr, like, dtype='float32')
+        return to_backend(arr, like, dtype=prec.real_name(like))
 
     #***************#
     #   how where   #
@@ -712,8 +713,8 @@ class Noise(BaseModule):
             The data with its noise.
         """
         shape = ops.shape(data_array)
-        real = self.rng.normal(shape, like=data_array)
-        imag = self.rng.normal(shape, like=data_array)
+        real = self.rng.normal(shape, like=data_array, dtype=prec.real_name(data_array))
+        imag = self.rng.normal(shape, like=data_array, dtype=prec.real_name(data_array))
         widened = ops.cast_like(scale, real)
 
         if not ops.is_complex(data_array):
@@ -795,7 +796,7 @@ class Noise(BaseModule):
         n_coils = int(shape[axis])
         factor = np.linalg.cholesky(
             self.covariance.matrix(n_coils)
-            + 1e-8 * np.eye(n_coils, dtype=np.complex64))
+            + 1e-8 * np.eye(n_coils, dtype=np.complex128))
 
         # Mix along the coil axis. The factor is lower triangular, so channel i
         # is a combination of the first i+1 white channels and nothing more.
@@ -807,7 +808,7 @@ class Noise(BaseModule):
                 if weight == 0:
                     continue
                 term = ops.take(noise, np.array([j]), axis=axis) * ops.cast_like(
-                    ops.match_backend(np.array(weight, np.complex64), noise), noise)
+                    ops.match_backend(np.array(weight, np.complex128), noise), noise)
                 mixed = term if mixed is None else mixed + term
             columns.append(mixed)
 

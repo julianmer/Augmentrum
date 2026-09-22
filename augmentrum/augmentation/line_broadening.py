@@ -19,6 +19,7 @@ import numpy as np
 from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
+from augmentrum.core import precision as prec
 from augmentrum.processing.domain import Domain
 from augmentrum.processing.utils import to_backend
 from nifti_mrs_plus import Backend, ops
@@ -175,7 +176,7 @@ class LineBroadening(BaseModule):
         """Build the broadening envelope on *fid*'s backend, shaped to broadcast."""
         n_pts = fid.shape[-1]
         ndim = len(fid.shape)
-        t = ops.arange_like(fid, n_pts) / float(sw_hz)
+        t = ops.arange_like(fid, n_pts, dtype=prec.real_name(fid)) / float(sw_hz)
 
         # Reshape t for broadcasting: (1, 1, ..., N)
         t = ops.reshape(t, [1] * (ndim - 1) + [n_pts])

@@ -173,6 +173,9 @@ class BaselineAugmentation(BaseModule):
         # parameters they were built from. One build serves every batch.
         self._operators = {}
 
+        # Their copies on a tensor backend, per operator, device and dtype (see "_promoted").
+        self._promoted_operators = {}
+
     #*****************#
     #   entry points  #
     #*****************#
@@ -306,7 +309,7 @@ class BaselineAugmentation(BaseModule):
         """
         basis = self._polynomial_basis(ppm)
         traces = ops.shape(like)[0]
-        basis_t = ops.match_backend(np.ascontiguousarray(basis.T), like)
+        basis_t, = self._promoted(self._polynomial_key(ppm), (lambda: basis.T,), like)
         return ops.matmul(self._draw((traces, basis.shape[1]), like), basis_t)
 
     def _bspline(self, like, ppm):
@@ -317,8 +320,10 @@ class BaselineAugmentation(BaseModule):
         basis_c, smoother = self._bspline_operator(ppm)
         traces, n_pts = ops.shape(like)
         noise = self._draw((traces, n_pts), like)
-        coeffs = ops.matmul(noise, ops.match_backend(np.ascontiguousarray(smoother.T), like))
-        return ops.matmul(coeffs, ops.match_backend(np.ascontiguousarray(basis_c.T), like))
+        smoother_t, basis_t = self._promoted(self._bspline_key(ppm),
+                                             (lambda: smoother.T, lambda: basis_c.T), like)
+        coeffs = ops.matmul(noise, smoother_t)
+        return ops.matmul(coeffs, basis_t)
 
     def _random_walk(self, like):
         """
@@ -436,7 +441,14 @@ class BaselineAugmentation(BaseModule):
             one_sided[1:(n_pts + 1) // 2] = 2.0
 
         transform = ops.fft(ops.cast_like(curve, like))
-        return ops.ifft(transform * ops.match_backend(one_sided, transform))
+        if ops.is_torch(transform):
+            # A constant of the length: uploaded once per device, not with every batch
+            from augmentrum.processing.torch_engine import constant
+            weights = constant(('analytic one-sided', n_pts), lambda: one_sided,
+                               transform.device).to(transform.dtype)
+        else:
+            weights = ops.match_backend(one_sided, transform)
+        return ops.ifft(transform * weights)
 
     #*******************#
     #   the operators   #
@@ -461,7 +473,7 @@ class BaselineAugmentation(BaseModule):
         order = int(self.order)
         windows = None if self.ppm_windows is None else tuple(
             (float(a), float(b)) for a, b in self.ppm_windows)
-        key = ('polynomial', self._axis_key(ppm), order, windows)
+        key = self._polynomial_key(ppm)
         if key in self._operators:
             return self._operators[key]
 
@@ -499,7 +511,7 @@ class BaselineAugmentation(BaseModule):
             "(basis_c, smoother)": "(n_points, n_b)" and "(n_b, n_points)", so that
             a baseline is "z @ smoother.T @ basis_c.T" for white noise "z".
         """
-        key = ('bspline', self._axis_key(ppm), int(self.knots_per_ppm), float(self.ed_per_ppm))
+        key = self._bspline_key(ppm)
         if key in self._operators:
             return self._operators[key]
 
@@ -595,6 +607,48 @@ class BaselineAugmentation(BaseModule):
     def _axis_key(ppm):
         """What identifies a linear axis: its length and two of its points."""
         return (int(ppm.size), float(ppm[1]), float(ppm[-1]))
+
+    def _bspline_key(self, ppm):
+        """The key of this axis' spline operators in "_operators"."""
+        return ('bspline', self._axis_key(ppm), int(self.knots_per_ppm), float(self.ed_per_ppm))
+
+    def _polynomial_key(self, ppm):
+        """The key of this axis' polynomial basis in "_operators"."""
+        windows = None if self.ppm_windows is None else tuple(
+            (float(a), float(b)) for a, b in self.ppm_windows)
+        return ('polynomial', self._axis_key(ppm), int(self.order), windows)
+
+    #: Operator sets kept on a device at once. An axis per spectrometer frequency, and a
+    #: pool of scans can hold dozens; a spline set is a few megabytes.
+    PROMOTED_SLOTS = 64
+
+    def _promoted(self, key, builds, like):
+        """
+        Host operators as *like*'s backend sees them, kept for torch.
+
+        An operator is a constant of its axis, so converting it for every
+        batch - megabytes for a spline basis, and on an accelerator a wait for
+        the device each time - buys nothing. A torch batch gets the copies made
+        once for its device and dtype, uploaded without waiting; the values are
+        the ones a fresh conversion gives. Other backends convert per call.
+
+        Args:
+            key: The operators' key in "_operators".
+            builds: Callables returning the host arrays, only called on a miss.
+            like: The tensor whose backend, device and dtype the copies adopt.
+
+        Returns:
+            The converted operators, in the order of *builds*.
+        """
+        if not ops.is_torch(like):
+            return [ops.match_backend(np.ascontiguousarray(build()), like) for build in builds]
+        slot = (key, str(like.device), str(like.dtype))
+        cache = self._promoted_operators
+        if slot not in cache:
+            if len(cache) >= self.PROMOTED_SLOTS:
+                cache.pop(next(iter(cache)))
+            cache[slot] = [to_backend(np.ascontiguousarray(build()), like) for build in builds]
+        return cache[slot]
 
     def _draw(self, shape, like):
         """Standard normal draws on *like*'s backend and device, in its precision."""

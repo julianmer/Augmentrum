@@ -9,7 +9,10 @@
 # Purpose: The batched device engine of RawProcessor. Every estimate of the FSL-MRS raw pipeline   #
 #          - coil weights, spectral registration, unlike-transient detection, eddy current phase,  #
 #          reference peaks - as whole-batch torch operations on the data's own device, with        #
-#          per-sample coil and transient masks standing in for ragged subsets.                     #
+#          per-sample coil and transient masks standing in for ragged subsets - and the replay of  #
+#          such a computation as CUDA graphs. Everything runs in the precision of the data it is   #
+#          given (augmentrum.core.precision): complex64 data are processed in single precision,    #
+#          complex128 in double.                                                                   #
 #                                                                                                  #
 ####################################################################################################
 
@@ -17,19 +20,22 @@
 #*************#
 #   imports   #
 #*************#
+import functools
 import math
+from collections import OrderedDict
 
 import numpy as np
 import torch
 
 # own
-from augmentrum.processing.utils import ppm_shift_axis, ppm_window
+from augmentrum.processing.utils import ppm_reference, ppm_shift_axis, ppm_window
 
 
-__all__ = ['fid_to_spec', 'masked_median', 'noise_moments', 'noise_covariance', 'reference_gram',
+__all__ = ['real_of', 'complex_of', 'tiny', 'fid_to_spec', 'masked_median', 'noise_moments', 'noise_covariance', 'reference_gram',
            'combine_coils', 'principal_vector', 'wsvd_weights', 'align', 'alignment_phasor',
            'unlike_mask', 'unwrap', 'ecc_phase', 'peak_phase', 'peak_shift_hz', 'shift_phasor',
-           'first_true', 'upload', 'constant']
+           'first_true', 'upload', 'constant', 'window_spans', 'Step', 'run_steps', 'GraphedSteps',
+           'wsvd_weight_steps', 'peak_shift_steps', 'peak_shift_each']
 
 
 #: FSL-MRS estimate_noise_cov: the last tenth of every FID is noise.
@@ -37,6 +43,31 @@ NOISE_FRACTION = 0.1
 
 #: FSL-MRS estimate_noise_cov refuses a covariance from fewer samples per coil than this.
 MIN_SAMPLES_PER_COIL = 10
+
+
+#********************#
+#   working dtypes   #
+#********************#
+_DOUBLE = (torch.float64, torch.complex128)
+
+
+def _dtype(x):
+    return x if isinstance(x, torch.dtype) else x.dtype
+
+
+def real_of(x):
+    """The real dtype of the precision of *x* (a tensor or dtype): float64 or float32."""
+    return torch.float64 if _dtype(x) in _DOUBLE else torch.float32
+
+
+def complex_of(x):
+    """The complex dtype of the precision of *x* (a tensor or dtype): complex128 or complex64."""
+    return torch.complex128 if _dtype(x) in _DOUBLE else torch.complex64
+
+
+def tiny(x):
+    """The smallest normal number in the precision of *x*: the floor of a norm that divides."""
+    return torch.finfo(real_of(x)).tiny
 
 
 #********************#
@@ -65,6 +96,9 @@ def first_true(mask):
 # per device and kept; per-batch values go through pinned memory without waiting.
 _CONSTANTS = {}
 
+#: Lists collecting every constant handed out while a graph is captured (see "GraphedSteps").
+_RECORDERS = []
+
 
 def upload(array, device, dtype=None):
     """*array* on *device*, without waiting for the device where it can be avoided."""
@@ -74,14 +108,234 @@ def upload(array, device, dtype=None):
     return tensor.pin_memory().to(device, non_blocking=True)
 
 
-def constant(key, build, device):
-    """A host-built constant, uploaded to *device* once and kept (bounded)."""
-    key = (key, str(device))
+def constant(key, build, device, dtype=None):
+    """A host-built constant, uploaded to *device* once (as *dtype* if given) and kept (bounded)."""
+    key = (key, str(device), dtype)
     if key not in _CONSTANTS:
         if len(_CONSTANTS) > 256:
             _CONSTANTS.clear()
-        _CONSTANTS[key] = torch.as_tensor(build()).to(device)
+        _CONSTANTS[key] = upload(build(), device, dtype)
+    for recorder in _RECORDERS:
+        recorder.append(_CONSTANTS[key])
     return _CONSTANTS[key]
+
+
+@functools.lru_cache(maxsize=4096)
+def window_spans(n, sw_hz, sf_mhz, ppmlim):
+    """"ppm_window" for a hashable *ppmlim*, remembered: the same few windows every batch."""
+    return ppm_window(n, sw_hz, sf_mhz, ppmlim)
+
+
+#****************************#
+#   stepwise computations    #
+#****************************#
+# A batched estimate launches thousands of small kernels, and on a GPU the host
+# spends far longer launching them than the device running them. A CUDA graph
+# records the kernels once and relaunches them in one call, with the very same
+# arithmetic - as long as nothing in between needs the host. The few things that
+# do are handed out as Steps by computations written as generators, which run
+# either eagerly ("run_steps") or as graphs around the steps ("GraphedSteps").
+class Step:
+    """
+    What a stepwise computation cannot do inside a CUDA graph, handed out to run eagerly.
+
+    A stepwise computation is a generator. Where it needs an operation a graph
+    cannot hold - a library call that allocates device memory of its own, or
+    arithmetic on a Python value that changes from call to call and would be
+    baked into a graph - it yields a Step and is sent the result back. Such
+    values never reach the computation itself: a Step names them in *late*,
+    and whoever runs it supplies them.
+
+    Args:
+        fn: The operation.
+        *args: Its positional arguments.
+        late: Names of keyword arguments supplied when it runs.
+        **kwargs: Its fixed keyword arguments.
+    """
+
+    __slots__ = ('fn', 'args', 'kwargs', 'late')
+
+    def __init__(self, fn, *args, late=(), **kwargs):
+        self.fn, self.args, self.kwargs, self.late = fn, args, kwargs, tuple(late)
+
+    def run(self, values=None):
+        """The operation's result, *values* supplying the late arguments."""
+        extra = {name: (values or {})[name] for name in self.late}
+        return self.fn(*self.args, **self.kwargs, **extra)
+
+
+def run_steps(steps, values=None):
+    """
+    Run a stepwise computation eagerly, start to end.
+
+    Args:
+        steps: The computation's generator.
+        values: The late values its steps name.
+
+    Returns:
+        What the computation returns.
+    """
+    try:
+        request = next(steps)
+        while True:
+            request = steps.send(request.run(values))
+    except StopIteration as done:
+        return done.value
+
+
+def _copied(value):
+    """*value* with every tensor cloned and every container rebuilt, other leaves shared."""
+    if torch.is_tensor(value):
+        return value.clone()
+    if isinstance(value, (list, tuple)):
+        return type(value)(_copied(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _copied(v) for k, v in value.items()}
+    if isinstance(value, set):
+        return set(value)
+    return value
+
+
+def _copy_into(target, value):
+    """Write *value*'s tensors into *target*'s, a structure of the same shape."""
+    if torch.is_tensor(target):
+        target.copy_(value)
+    elif isinstance(target, (list, tuple)):
+        for t, v in zip(target, value):
+            _copy_into(t, v)
+    elif isinstance(target, dict):
+        for k in target:
+            _copy_into(target[k], value[k])
+
+
+class GraphedSteps:
+    """
+    Stepwise computations replayed as CUDA graphs, one set per signature.
+
+    Recording needs everything that decides which kernels run to be fixed -
+    shapes, flags, the Python values a computation reads - so a caller states
+    all of it as a *signature*. The tensors that vary from call to call are
+    the *inputs*: a replay copies them into the graphs' own, runs the graph up
+    to the first step, the step, the next graph, and so on. A signature runs
+    eagerly for its first *warmup* calls, is recorded on the next, and is
+    replayed from then on; the *capacity* most recently used are kept.
+
+    A replay is the recorded kernels on the recorded tensors, so its results
+    are the eager ones bit for bit. They are handed out as copies, which
+    outlive the next replay.
+    """
+
+    def __init__(self, warmup=2, capacity=4):
+        self.warmup = int(warmup)
+        self.capacity = int(capacity)
+        self._entries = OrderedDict()
+
+    def __call__(self, signature, steps, inputs, values=None, keep=()):
+        """
+        Run a computation, as graphs where they are recorded.
+
+        Args:
+            signature: Hashable; everything besides *inputs* and *values*
+                the computation depends on.
+            steps: Callable taking *inputs* and returning a fresh generator
+                of the computation.
+            inputs: {name: tensor or None}; a replay expects the same names,
+                and tensors of the same shape, strides, dtype and device.
+            values: The late values of the computation's steps.
+            keep: What the computation reads besides its inputs - cached
+                tensors - kept alive for as long as the graphs, which read
+                its memory.
+
+        Returns:
+            The computation's result; its tensors are the caller's.
+        """
+        entry = self._entries.get(signature)
+        if entry is None:
+            while len(self._entries) >= max(self.capacity, 1):
+                self._entries.popitem(last=False)
+            entry = self._entries[signature] = _GraphEntry()
+        self._entries.move_to_end(signature)
+        if entry.graphs is None:
+            if entry.calls < self.warmup:
+                entry.calls += 1
+                return run_steps(steps(inputs), values)
+            entry.record(steps, inputs, values, keep)
+        return entry.replay(inputs, values)
+
+    def clear(self):
+        """Forget every recorded graph, and the memory it holds."""
+        self._entries.clear()
+
+    def __len__(self):
+        return sum(entry.graphs is not None for entry in self._entries.values())
+
+    def __getstate__(self):
+        # graphs belong to a process and a device: a copy starts without any
+        return {'warmup': self.warmup, 'capacity': self.capacity}
+
+    def __setstate__(self, state):
+        self.__init__(**state)
+
+
+class _GraphEntry:
+    """One signature: its inputs, its graphs and the steps between them."""
+
+    def __init__(self):
+        self.calls = 0
+        self.graphs = None
+
+    def record(self, steps, inputs, values, keep):
+        """
+        Record the computation on the graphs' own copies of *inputs*.
+
+        A run on a side stream comes first, as torch.cuda.graph asks, so that
+        library handles and workspaces exist before recording. The graphs
+        share one memory pool, which is safe because they are replayed in the
+        order they were recorded. Constants the computation fetches while it
+        is recorded are kept with the graphs.
+        """
+        self.inputs = {name: (tensor.clone() if tensor is not None else None)
+                       for name, tensor in inputs.items()}
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            run_steps(steps(self.inputs), values)
+        torch.cuda.current_stream().wait_stream(side)
+
+        pool = torch.cuda.graph_pool_handle()
+        graphs, requests, sent, constants = [], [], [], []
+        _RECORDERS.append(constants)
+        try:
+            run, value = steps(self.inputs), None
+            while True:
+                graph = torch.cuda.CUDAGraph()
+                graphs.append(graph)
+                try:
+                    with torch.cuda.graph(graph, pool=pool):
+                        request = run.send(value)
+                except StopIteration as done:
+                    result = done.value
+                    break
+                requests.append(request)
+                # the step's result, in memory of its own: the next graph's input
+                value = _copied(request.run(values))
+                sent.append(value)
+        finally:
+            _RECORDERS.remove(constants)
+        self.result, self.requests, self.sent = result, requests, sent
+        self.held = (keep, constants, pool)
+        self.graphs = graphs
+
+    def replay(self, inputs, values):
+        """The computation on *inputs*: copy them in, then graph, step, graph, ..."""
+        for name, tensor in inputs.items():
+            if tensor is not None:
+                self.inputs[name].copy_(tensor)
+        for index, graph in enumerate(self.graphs):
+            graph.replay()
+            if index < len(self.requests):
+                _copy_into(self.sent[index], self.requests[index].run(values))
+        return _copied(self.result)
 
 
 #***********************#
@@ -131,10 +385,10 @@ def noise_moments(tails):
 
     Returns:
         "(second, first)": sum of x x^H, (B, D, C, C), and sum of x, (B, D, C),
-        both over voxels and points, in complex128.
+        both over voxels and points, in the precision of *tails*.
     """
     b, v, c, d, l = tails.shape
-    x = tails.to(torch.complex128).permute(0, 3, 1, 4, 2).reshape(b, d, v * l, c)
+    x = tails.to(complex_of(tails)).permute(0, 3, 1, 4, 2).reshape(b, d, v * l, c)
     return x.mT @ x.conj(), x.sum(dim=-2)
 
 
@@ -153,7 +407,7 @@ def noise_covariance(second, first, samples_per_transient, dyn_mask=None):
     """
     if dyn_mask is None:
         dyn_mask = torch.ones(second.shape[:2], dtype=torch.bool, device=second.device)
-    weights = dyn_mask.to(torch.float64)
+    weights = dyn_mask.to(real_of(second))
     total = (second * weights[..., None, None]).sum(dim=1)
     mean_sum = (first * weights[..., None]).sum(dim=1)
     n = weights.sum(dim=1) * samples_per_transient
@@ -164,7 +418,7 @@ def noise_covariance(second, first, samples_per_transient, dyn_mask=None):
 
 def reference_gram(reference):
     """X^H X of reference FIDs laid out (..., T, C): the right-singular problem of wSVD."""
-    x = reference.to(torch.complex128)
+    x = reference.to(complex_of(reference))
     return x.mH @ x
 
 
@@ -208,18 +462,24 @@ def wsvd_weights(gram, cov, coil_mask, whiten, with_reference):
             for 'svd' (a transient combined with its own decomposition).
 
     Returns:
-        Complex128 weights, (B, ..., C), zero on masked coils; with a single
+        Complex weights in the precision of *gram*, (B, ..., C), zero on masked coils; with a single
         active coil, exactly one on it (FSL-MRS leaves such data uncombined).
     """
+    return run_steps(wsvd_weight_steps(gram, cov, coil_mask, whiten, with_reference))
+
+
+def wsvd_weight_steps(gram, cov, coil_mask, whiten, with_reference):
+    """"wsvd_weights" as a stepwise computation (see "Step"); the same arithmetic."""
     b, c = coil_mask.shape
     lead = gram.shape[1:-2]
     shape = (b,) + (1,) * len(lead)
-    mask = coil_mask.to(torch.float64)
-    pair = (mask[:, :, None] * mask[:, None, :]).to(torch.complex128)
-    eye = torch.eye(c, dtype=torch.complex128, device=gram.device)
-    free = torch.diag_embed((1.0 - mask).to(torch.complex128))
+    real, cplx = real_of(gram), complex_of(gram)
+    mask = coil_mask.to(real)
+    pair = (mask[:, :, None] * mask[:, None, :]).to(cplx)
+    eye = torch.eye(c, dtype=cplx, device=gram.device)
+    free = torch.diag_embed((1.0 - mask).to(cplx))
 
-    whitened = cov.to(torch.complex128) * pair + free
+    whitened = cov.to(cplx) * pair + free
     cov_eff = torch.where(whiten[:, None, None], whitened, eye.expand(b, c, c))
     chol = torch.linalg.cholesky_ex(cov_eff).L.reshape(shape + (c, c))
 
@@ -235,8 +495,15 @@ def wsvd_weights(gram, cov, coil_mask, whiten, with_reference):
     amp0 = amp.gather(-1, first)
     rescale = torch.linalg.vector_norm(amp, dim=-1, keepdim=True) * amp0 / amp0.abs()
 
+    # still a generator for the callers that "yield from" it, though nothing in it leaves the graph
+    yield from ()
     if with_reference:
-        weights = torch.cholesky_solve(amp.conj()[..., None], chol)[..., 0] * rescale
+        # chol chol^H x = b as the two triangular solves "torch.cholesky_solve" makes: its batched
+        # MAGMA version makes the host wait for the device (on a shared GPU that is a whole round
+        # of the other processes' turns) and allocates outside any CUDA graph; cuBLAS does neither
+        half = torch.linalg.solve_triangular(chol, amp.conj()[..., None], upper=False)
+        solved = torch.linalg.solve_triangular(chol.mH, half, upper=True)
+        weights = solved[..., 0] * rescale
     else:
         weights = torch.linalg.solve_triangular(
             chol.mH, principal[..., None], upper=True)[..., 0] * rescale
@@ -258,15 +525,16 @@ def principal_vector(gram, squarings=12, steps=2):
     reference array shows - and two power steps on the matrix itself restore
     the precision the squarings cost. The phase is arbitrary, as an SVD's is.
     """
-    power = gram / torch.linalg.matrix_norm(gram, keepdim=True).clamp(min=1e-300)
+    floor = tiny(gram)
+    power = gram / torch.linalg.matrix_norm(gram, keepdim=True).clamp(min=floor)
     for _ in range(squarings):
         power = power @ power
-        power = power / torch.linalg.matrix_norm(power, keepdim=True).clamp(min=1e-300)
+        power = power / torch.linalg.matrix_norm(power, keepdim=True).clamp(min=floor)
     column = torch.linalg.vector_norm(power, dim=-2).argmax(dim=-1)
     vector = power.gather(-1, column[..., None, None].expand(*power.shape[:-1], 1))[..., 0]
     for _ in range(steps):
         vector = (gram @ vector[..., None])[..., 0]
-        vector = vector / torch.linalg.vector_norm(vector, dim=-1, keepdim=True).clamp(min=1e-300)
+        vector = vector / torch.linalg.vector_norm(vector, dim=-1, keepdim=True).clamp(min=floor)
     return vector
 
 
@@ -283,6 +551,45 @@ def phasor(angle):
     if angle.device.type == 'cpu':
         return torch.complex(torch.cos(angle), torch.sin(angle))
     return torch.polar(torch.ones_like(angle), angle)
+
+
+# A cost evaluation of the alignment needs, per transient, the dot products of its weighted rows
+# with cos and sin of theta_t = 2 pi t nu. As torch operations that is theta, its cosine and its
+# sine written out for every point, and two matrix-vector products that read the rows twice. One
+# Triton kernel ("_shift_kernel") forms the same angles in registers (in float32, in the same
+# order) and reads every row once; libdevice's cos and sin keep full precision at the angles of
+# a whole FID.
+_SHIFT_KERNEL = []
+
+
+def _load_shift_kernel():
+    """The Triton kernels, imported once; None without Triton."""
+    if not _SHIFT_KERNEL:
+        try:
+            from augmentrum.processing import _shift_kernel
+            _SHIFT_KERNEL.append(_shift_kernel)
+        except ImportError:
+            _SHIFT_KERNEL.append(None)
+    return _SHIFT_KERNEL[0]
+
+
+def shift_sums(rows, nu):
+    """
+    "(rows @ cos(theta), rows @ sin(theta))" with theta_t = 2 pi t nu, (..., R) each, in one
+    pass over *rows* (..., R, T) for shifts *nu* (...) in cycles per sample; None where the
+    fused kernel does not apply (not float32 on CUDA, or no Triton).
+    """
+    if not (rows.is_cuda and rows.dtype == torch.float32 and nu.dtype == torch.float32
+            and rows.is_contiguous()):
+        return None
+    if _load_shift_kernel() is None:
+        return None
+    lead, r, n = rows.shape[:-2], rows.shape[-2], rows.shape[-1]
+    flat = nu.reshape(-1).contiguous()
+    cos = torch.empty((flat.numel(), r), dtype=rows.dtype, device=rows.device)
+    sin = torch.empty_like(cos)
+    _SHIFT_KERNEL[0].launch(rows.reshape(-1, r, n), flat, cos, sin)
+    return cos.reshape(lead + (r,)), sin.reshape(lead + (r,))
 
 
 class ShiftProfile:
@@ -307,8 +614,8 @@ class ShiftProfile:
     arithmetic, which torch runs several times faster than complex on CPU.
 
     Args:
-        x: Transients, (B, D, T) complex128.
-        target: One target per sample, (B, T) complex128.
+        x: Transients, (B, D, T) complex; the profile is in their precision.
+        target: One target per sample, (B, T), in the same precision.
         first: First bin of the ppm window (FSL-MRS limit_to_range).
         last: Bin after the window's last.
     """
@@ -328,11 +635,12 @@ class ShiftProfile:
         spectrum = torch.fft.fft(xt, n=2 * n, dim=-1)
         autocorr = torch.fft.ifft(spectrum.real ** 2 + spectrum.imag ** 2, dim=-1)[..., :n]
         q = autocorr * constant(('window kernel', n, first, last),
-                                lambda: _window_kernel(n, first, last), x.device)
+                                lambda: _window_kernel(n, first, last), x.device,
+                                complex_of(x))
         self.q0 = q[..., 0].real.clone()
         q[..., 0] = 0
 
-        self.lag = torch.arange(n, device=x.device, dtype=torch.float64)
+        self.lag = torch.arange(n, device=x.device, dtype=real_of(x))
         index = self.lag + 1
         # rows: (h, q) x (re, im) x (moment 0, 1, 2); h is weighted by n + 1, q by n
         rows = []
@@ -356,10 +664,14 @@ class ShiftProfile:
         K and E at one shift per transient, (B, D); with *derivatives*, as
         "((K, K', K''), (E, E', E''))" in nu.
         """
-        theta = 2 * math.pi * self.lag * nu[..., None]              # (B, D, T)
         rows = self.rows if derivatives else self.plain
-        cos = (rows @ torch.cos(theta)[..., None])[..., 0]
-        sin = (rows @ torch.sin(theta)[..., None])[..., 0]
+        fused = shift_sums(rows, nu)
+        if fused is not None:
+            cos, sin = fused
+        else:
+            theta = 2 * math.pi * self.lag * nu[..., None]          # (B, D, T)
+            cos = (rows @ torch.cos(theta)[..., None])[..., 0]
+            sin = (rows @ torch.sin(theta)[..., None])[..., 0]
         k, e = self._combine(cos, sin, 3 if derivatives else 1)
 
         rate = 2 * math.pi
@@ -446,7 +758,8 @@ def _bracket(profile, phi, sw_hz, iterations, base=None):
 
     if base is None:
         probes = constant(('bracket probes', sw_hz),
-                          lambda: np.array([0.0, 1.0, 1.0 + GOLD, -GOLD]) / sw_hz, phi.device)
+                          lambda: np.array([0.0, 1.0, 1.0 + GOLD, -GOLD]) / sw_hz, phi.device,
+                          real_of(phi))
         k, e = profile.shared(probes)
         f0, f1, f_pos, f_neg = profile.cost(phi[..., None], k, e).unbind(dim=-1)
         swap = f0 < f1
@@ -604,7 +917,7 @@ def _newton(profile, nu, low, high, step_cap, steps, phi=None):
             grad = e1 - 2 * (turn * k1).real
             hess = e2 - 2 * (turn * k2).real
         else:
-            mag = k.abs().clamp(min=1e-300)
+            mag = k.abs().clamp(min=tiny(k))
             slope = (k.conj() * k1).real / mag
             curve = ((k1.abs() ** 2 + (k.conj() * k2).real) - slope ** 2) / mag
             grad = e1 - 2 * slope
@@ -656,9 +969,11 @@ def align(fids, mask, sw_hz, sf_mhz, ppmlim, **options):
             (the last entry for any further pass).
         max_shift_hz: Bound on the shift (default a quarter of the spectral
             width).
+        spans: The (first, last) bins of *ppmlim*, where the caller has them;
+            *sf_mhz* and *ppmlim* are then not read.
 
     Returns:
-        "(phi, eps)" in radians and Hz, (B, D) float64.
+        "(phi, eps)" in radians and Hz, (B, D), in the precision of *fids*.
     """
     rows = _rows_per_chunk(fids, 12 * 8)
     if rows >= fids.shape[0]:
@@ -669,22 +984,35 @@ def align(fids, mask, sw_hz, sf_mhz, ppmlim, **options):
 
 
 def _align(fids, mask, sw_hz, sf_mhz, ppmlim, passes=2, bracket_iterations=1,
-           brent_iterations=2, locked_steps=0, free_steps=(2, 3), max_shift_hz=None):
+           brent_iterations=2, locked_steps=0, free_steps=(2, 3), max_shift_hz=None,
+           spans=None):
     """"align" on one chunk of samples."""
-    x = fids.to(torch.complex128)
+    x = fids.to(complex_of(fids))
     b, d, n = x.shape
-    first, last = ppm_window(n, sw_hz, sf_mhz, ppmlim)
+    first, last = spans if spans is not None else ppm_window(n, sw_hz, sf_mhz, ppmlim)
     reach = (sw_hz / 4 if max_shift_hz is None else max_shift_hz) / sw_hz
 
     # the target: the transient nearest the mean of the valid ones, first of any tie
-    weights = mask.to(torch.float64)
+    weights = mask.to(real_of(x))
     avg = (x * weights[..., None]).sum(dim=1, keepdim=True) / weights.sum(dim=1)[:, None, None]
     dist = torch.linalg.vector_norm(x - avg, dim=-1).masked_fill(~mask, torch.inf)
     near = dist <= dist.min(dim=-1, keepdim=True).values * (1 + 1e-9)
     target = x.gather(1, first_true(near)[:, None, None].expand(b, 1, n))[:, 0]
 
     profile = ShiftProfile(x, target, first, last)
-    nu = torch.zeros(b, d, dtype=torch.float64, device=x.device)
+    fused = x.is_cuda and _load_shift_kernel() is not None
+    if (fused and x.is_cuda and profile.rows.dtype == torch.float32 and passes == 2
+            and bracket_iterations == 1 and brent_iterations == 2 and locked_steps == 0
+            and tuple(free_steps) == (2, 3) and max_shift_hz is None):
+        # the whole search below, one transient per program ("_shift_kernel.align_search")
+        per = lambda v: v[:, None].expand(b, d).reshape(-1).contiguous()
+        phi, nu = _SHIFT_KERNEL[0].align_search(profile.rows.reshape(-1, 12, n),
+                                                profile.q0.reshape(-1).contiguous(),
+                                                per(profile.y_energy), per(profile.norm), sw_hz)
+        phi, eps = phi.reshape(b, d), nu.reshape(b, d) * sw_hz
+        moving = mask & (mask.sum(dim=-1, keepdim=True) > 1)
+        return torch.where(moving, phi, 0.0), torch.where(moving, eps, 0.0)
+    nu = torch.zeros(b, d, dtype=real_of(x), device=x.device)
     k, _ = profile.at(nu)
     for step in range(passes):
         # the phase line search ends at the phase that is optimal where the pass starts
@@ -725,7 +1053,7 @@ def _align(fids, mask, sw_hz, sf_mhz, ppmlim, passes=2, bracket_iterations=1,
 
 def alignment_phasor(phi, eps, n, sw_hz, dtype):
     """e^{-i phi} e^{-2 pi i t eps} on FSL-MRS's time axis (dwell .. n dwell), (..., T)."""
-    t = torch.linspace(1.0 / sw_hz, n / sw_hz, n, dtype=torch.float64, device=phi.device)
+    t = torch.linspace(1.0 / sw_hz, n / sw_hz, n, dtype=real_of(dtype), device=phi.device)
     angle = -phi[..., None] - 2 * math.pi * t * eps[..., None]
     return torch.polar(torch.ones_like(angle), angle).to(dtype)
 
@@ -756,9 +1084,9 @@ def unlike_mask(fids, mask, sdlimit=1.96, niter=2):
     """
     b, d, n = fids.shape
     parts = torch.view_as_real(fids).permute(0, 2, 3, 1).contiguous()    # (B, T, 2, D)
-    halved = torch.view_as_real(halve_first(fids.to(torch.complex128))).reshape(b, d, 2 * n)
+    halved = torch.view_as_real(halve_first(fids.to(complex_of(fids)))).reshape(b, d, 2 * n)
     energy = (halved ** 2).sum(dim=-1)
-    weights = mask.to(torch.float64)
+    weights = mask.to(real_of(fids))
     count = weights.sum(dim=-1, keepdim=True)
 
     keep = mask
@@ -779,7 +1107,7 @@ def unlike_mask(fids, mask, sdlimit=1.96, niter=2):
 
 def _real_median(parts, mask):
     """
-    NumPy's median over the valid transients of (B, T, 2, D) parts, in float64 (B, T, 2).
+    NumPy's median over the valid transients of (B, T, 2, D) parts, (B, T, 2), in their precision.
 
     The mean of the two middle values for an even count - torch.median would
     return the lower one - with the invalid entries sorted behind the valid.
@@ -789,7 +1117,7 @@ def _real_median(parts, mask):
     shape = ordered.shape[:-1] + (1,)
     low = ((count - 1) // 2).reshape(-1, 1, 1, 1).expand(shape)
     high = (count // 2).reshape(-1, 1, 1, 1).expand(shape)
-    pair = ordered.gather(-1, low).to(torch.float64) + ordered.gather(-1, high).to(torch.float64)
+    pair = ordered.gather(-1, low) + ordered.gather(-1, high)
     return 0.5 * pair[..., 0]
 
 
@@ -812,10 +1140,10 @@ def ecc_phase(refs, width=32):
     suspect's sliding_gaussian as nifti_ecc_smoothed uses it: edge-padded with
     10-point edge means, correlated with a normalised Gaussian window.
     """
-    phase = unwrap(torch.angle(refs.to(torch.complex128)))
+    phase = unwrap(torch.angle(refs.to(complex_of(refs))))
     lead, n = phase.shape[:-1], phase.shape[-1]
     flat = phase.reshape(-1, n)
-    window = torch.exp(-torch.linspace(-3, 3, width, dtype=torch.float64,
+    window = torch.exp(-torch.linspace(-3, 3, width, dtype=phase.dtype,
                                        device=phase.device) ** 2)
     window = window / window.sum()
     offset = (width - 1) // 2
@@ -829,34 +1157,74 @@ def ecc_phase(refs, width=32):
 #*******************#
 #   peak searches   #
 #*******************#
-def _padded_window(fids, sw_hz, sf_mhz, window):
-    """The four-fold zero-filled spectrum inside *window* (ppm), and that window's bounds."""
+def _padded_window(fids, sw_hz, sf_mhz, window, spans=None):
+    """
+    The four-fold zero-filled spectrum inside *window* (ppm), and that window's
+    bounds; *spans* gives the bounds directly (then *sf_mhz* is not read).
+    """
     n = fids.shape[-1]
     padded = torch.cat([fids, torch.zeros(fids.shape[:-1] + (3 * n,), dtype=fids.dtype,
                                           device=fids.device)], dim=-1)
-    first, last = ppm_window(4 * n, sw_hz, sf_mhz, window)
-    return fid_to_spec(padded.to(torch.complex128))[..., first:last], first, last
+    first, last = spans if spans is not None else ppm_window(4 * n, sw_hz, sf_mhz, window)
+    return fid_to_spec(padded.to(complex_of(padded)))[..., first:last], first, last
 
 
-def peak_phase(fids, sw_hz, sf_mhz, window):
-    """Zero-order phase of FSL-MRS phaseCorrect: minus the angle at the window's peak, (...)."""
-    spec, _, _ = _padded_window(fids, sw_hz, sf_mhz, window)
+def peak_phase(fids, sw_hz, sf_mhz, window, spans=None):
+    """
+    Zero-order phase of FSL-MRS phaseCorrect: minus the angle at the window's
+    peak, (...); *spans* as for "_padded_window".
+    """
+    spec, _, _ = _padded_window(fids, sw_hz, sf_mhz, window, spans)
     peak = spec.abs().argmax(dim=-1, keepdim=True)
     return -torch.angle(spec.gather(-1, peak))[..., 0]
 
 
 def peak_shift_hz(fids, sw_hz, sf_mhz, window, reference_ppm):
     """The shift of FSL-MRS shiftToRef: window peak minus the reference, in Hz, (...)."""
-    spec, first, last = _padded_window(fids, sw_hz, sf_mhz, window)
-    n = 4 * fids.shape[-1]
-    axis = constant(('ppm axis', n, sw_hz, sf_mhz, first, last),
-                    lambda: ppm_shift_axis(n, sw_hz, sf_mhz)[first:last], fids.device)
+    spans = ppm_window(4 * fids.shape[-1], sw_hz, sf_mhz, window)
+    return run_steps(peak_shift_steps(fids, sw_hz, spans, reference_ppm), {'sf_mhz': sf_mhz})
+
+
+def peak_shift_steps(fids, sw_hz, spans, reference_ppm):
+    """
+    "peak_shift_hz" on the window's bounds, as a stepwise computation.
+
+    The ppm axis and the spectrometer frequency the peak is read against
+    differ from scan to scan, so that last conversion is a step, late in
+    'sf_mhz'.
+    """
+    spec, first, last = _padded_window(fids, sw_hz, None, None, spans)
     peak = spec.abs().argmax(dim=-1)
+    return (yield Step(_peak_hz, peak, n=4 * fids.shape[-1], sw_hz=sw_hz, spans=(first, last),
+                       reference_ppm=reference_ppm, late=('sf_mhz',)))
+
+
+def _peak_hz(peak, n, sw_hz, spans, reference_ppm, sf_mhz):
+    """The ppm of the peak bins *peak* on the shifted axis, less the reference, in Hz."""
+    first, last = spans
+    axis = constant(('ppm axis', n, sw_hz, sf_mhz, first, last),
+                    lambda: ppm_shift_axis(n, sw_hz, sf_mhz)[first:last], peak.device)
     return (axis[peak] - reference_ppm) * sf_mhz
+
+
+def peak_shift_each(fids, sw_hz, spans, reference_ppm, sf_mhz):
+    """
+    "peak_shift_hz" with every FID read against its own spectrometer frequency,
+    *sf_mhz* a (...) tensor on the FIDs' device: a batch of scans from different
+    sessions, whose ppm windows "RawProcessor._sf_samples" has checked to be the
+    same. The arithmetic is "_peak_hz"'s, in its order, on device values, so it
+    needs no step and runs inside a graph.
+    """
+    spec, first, last = _padded_window(fids, sw_hz, None, None, spans)
+    peak = spec.abs().argmax(dim=-1)
+    n = 4 * fids.shape[-1]
+    hz = constant(('shift axis hz', n, sw_hz, first, last),
+                  lambda: np.linspace(-sw_hz / 2, sw_hz / 2, n)[first:last], fids.device)
+    return (hz[peak] / sf_mhz + ppm_reference('1H') - reference_ppm) * sf_mhz
 
 
 def shift_phasor(shift_hz, n, sw_hz, dtype):
     """e^{-2 pi i t shift} on FSL-MRS freqshift's time axis (0 .. n dwell), (..., T)."""
-    t = torch.linspace(0, n / sw_hz, n, dtype=torch.float64, device=shift_hz.device)
+    t = torch.linspace(0, n / sw_hz, n, dtype=real_of(dtype), device=shift_hz.device)
     angle = -2 * math.pi * t * shift_hz[..., None]
     return torch.polar(torch.ones_like(angle), angle).to(dtype)

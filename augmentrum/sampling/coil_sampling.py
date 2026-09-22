@@ -25,6 +25,7 @@ from nifti_mrs_plus import ops
 from abc import ABC, abstractmethod
 
 from augmentrum.core import Backend
+from augmentrum.core import precision as prec
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from augmentrum.utils import download
@@ -702,7 +703,7 @@ class CoilSampler(DimensionSampler):
 
         # Broadcast the maps across batch and spectral points, and open a coil
         # axis on the data for them to multiply into.
-        maps = ops.match_backend(maps.astype(np.complex64), data_array)
+        maps = ops.match_backend(maps.astype(prec.complex_name(data_array)), data_array)
         maps = ops.reshape(maps, (1,) + shape[1:4] + (1, n_coils))
 
         return ops.reshape(data_array, shape + (1,)) * maps, water_array
@@ -749,7 +750,8 @@ class CoilSampler(DimensionSampler):
         n_have = shape[coil_axis]
 
         # ── estimate the array the data carries (detached) ──
-        x = ops.to_numpy(data_array).astype(np.complex128)
+        x = ops.to_numpy(data_array)
+        x = x.astype(np.result_type(x.dtype, np.complex64), copy=False)  # its own precision
         per_voxel = np.moveaxis(np.moveaxis(x, coil_axis, -1), 4, -2)   # (..., T, C)
         lead = per_voxel.shape[:-2]
         flat = per_voxel.reshape((-1,) + per_voxel.shape[-2:])
@@ -772,7 +774,7 @@ class CoilSampler(DimensionSampler):
         combined_shape[coil_axis] = 1
 
         maps = ops.match_backend(
-            maps.astype(np.complex64).reshape(tuple(new_shape)), data_array)
+            maps.astype(prec.complex_name(data_array)).reshape(tuple(new_shape)), data_array)
         return ops.reshape(combined, tuple(combined_shape)) * maps, water_array
 
     @staticmethod
@@ -793,7 +795,7 @@ class CoilSampler(DimensionSampler):
         """
         n_have = flat.shape[-1]
         cov = np.einsum('ntc,ntd->ncd', flat, np.conj(flat))
-        csm = np.ones((flat.shape[0], n_have), dtype=np.complex128)
+        csm = np.ones((flat.shape[0], n_have), dtype=flat.dtype)
         for _ in range(2):
             csm = np.einsum('ncd,nd->nc', cov, csm)
             norm = np.linalg.norm(csm, axis=-1, keepdims=True)
@@ -875,7 +877,8 @@ class CoilSampler(DimensionSampler):
         coil_axis = 4 + tags.index('DIM_COIL')
 
         data = nifti[:]
-        x = np.asarray(data, dtype=np.complex128)
+        x = np.asarray(data)
+        x = x.astype(np.result_type(x.dtype, np.complex64), copy=False)  # its own precision
         per_voxel = np.moveaxis(np.moveaxis(x, coil_axis, -1), 3, -2)   # (..., T, C)
         lead = per_voxel.shape[:-2]
         flat = per_voxel.reshape((-1,) + per_voxel.shape[-2:])

@@ -20,8 +20,9 @@ from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
+from augmentrum.processing.utils import device_axis, device_values, on_cuda, to_backend
 from nifti_mrs_plus import Backend
-from nifti_mrs_plus.ops import fft, ifft, fftshift, ifftshift, match_backend
+from nifti_mrs_plus.ops import fft, ifft, fftshift, ifftshift
 
 
 #**************************************************************************************************#
@@ -157,7 +158,7 @@ class PhaseShift(BaseModule):
                                              len(fid.shape)))
             # complex factor * any-backend tensor — works everywhere
             phase_factor = np.exp(-1j * phi)
-            fid = fid * match_backend(np.asarray(phase_factor), fid)
+            fid = fid * to_backend(np.asarray(phase_factor), fid)
 
         # First-order: needs spectral domain
         if self.first_order_deg != 0.0:
@@ -170,7 +171,7 @@ class PhaseShift(BaseModule):
         """Apply zero-order phase shift (any backend tensor)."""
         phi_rad = math.radians(phase_deg)
         factor = np.array(np.exp(-1j * phi_rad))
-        return fid * match_backend(factor, fid)
+        return fid * to_backend(factor, fid)
 
     @staticmethod
     def _first_order_phase(fid, phc1_deg: float):
@@ -185,14 +186,23 @@ class PhaseShift(BaseModule):
         # frequency domain, so the module is put there before it runs.
         spec = fid
         N = fid.shape[-1]
+        ramp_shape = [1] * (len(fid.shape) - 1) + [N]
+
+        if on_cuda(spec):
+            # the same float64 ramp (deg2rad is a multiply by pi / 180), on the device
+            import torch
+            u = device_axis(('unit_ramp', N), lambda: np.linspace(0.0, 1.0, N, dtype=np.float64),
+                            spec)
+            angle = (float(phc1_deg) * u) * (np.pi / 180.0)
+            ramp = torch.polar(torch.ones_like(angle), angle).reshape(ramp_shape)
+            return spec * ramp.to(spec.dtype)
 
         # Linear ramp (numpy — no gradients needed for coordinates)
         u = np.linspace(0.0, 1.0, N, dtype=np.float64)
-        ramp_shape = [1] * (len(fid.shape) - 1) + [N]
         ramp = np.exp(1j * np.deg2rad(phc1_deg * u)).reshape(ramp_shape)
 
         # Apply the ramp; the caller puts the data back where it was
-        return spec * match_backend(ramp, spec)
+        return spec * to_backend(ramp, spec)
 
 
 #**************************************************************************************************#
@@ -305,15 +315,23 @@ class FrequencyShift(BaseModule):
             return fid
 
         N = fid.shape[-1]
+        shape = [1] * (len(fid.shape) - 1) + [N]
+        shift = self.per_sample(np.asarray(shift_hz, dtype=np.float64), len(fid.shape))
+
+        if on_cuda(fid):
+            # the same float64 phase, formed in the same order, on the device
+            import torch
+            t = device_axis(('time', N, float(sw_hz)),
+                            lambda: np.arange(N, dtype=np.float64) / float(sw_hz), fid)
+            phase = (2.0 * math.pi * device_values(shift, fid)) * t.reshape(shape)
+            return fid * torch.polar(torch.ones_like(phase), phase).to(fid.dtype)
 
         # Time axis (numpy — no gradients needed for coordinates)
         t = np.arange(N, dtype=np.float64) / float(sw_hz)
-        t = t.reshape([1] * (len(fid.shape) - 1) + [N])
+        t = t.reshape(shape)
 
         # Shift phasor (numpy complex), one row per sample for a vector shift
-        shift = self.per_sample(np.asarray(shift_hz, dtype=np.float64),
-                                len(fid.shape))
         shift_factor = np.exp(1j * 2.0 * math.pi * shift * t)
 
         # Multiply: convert phasor to same backend, preserves gradients
-        return fid * match_backend(shift_factor, fid)
+        return fid * to_backend(shift_factor, fid)

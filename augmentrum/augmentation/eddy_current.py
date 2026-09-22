@@ -19,10 +19,10 @@ from typing import Optional, List, Tuple
 from scipy.signal import butter, filtfilt
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import batch_profile
+from augmentrum.processing.utils import batch_profile, device_values, on_cuda, to_backend
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
-from nifti_mrs_plus.ops import to_numpy, match_backend
+from nifti_mrs_plus.ops import to_numpy
 
 
 #**************************************************************************************************#
@@ -212,13 +212,21 @@ class EddyCurrent(BaseModule):
     #   trajectories   #
     #*******************#
     def _low_pass(self, phi: np.ndarray, sw_hz: float) -> np.ndarray:
-        """The trajectory below the cutoff, zero-phase so nothing is delayed."""
+        """
+        The trajectory below the cutoff, zero-phase so nothing is delayed.
+
+        Trajectories may be stacked as rows; each is filtered on its own. The
+        filter is a constant of the cutoff and the bandwidth, designed once.
+        """
         if self.lp_cut_hz is None or self.lp_cut_hz <= 0:
             return phi
         nyq = 0.5 * float(sw_hz)
         Wn = min(max(self.lp_cut_hz / nyq, 1e-6), 0.999999)
-        b, a = butter(2, Wn, btype='low')
-        return filtfilt(b, a, phi)
+        designs = self.__dict__.setdefault('_filters', {})
+        if Wn not in designs:
+            designs[Wn] = butter(2, Wn, btype='low')
+        b, a = designs[Wn]
+        return filtfilt(b, a, phi, axis=-1)
 
     def _ec_phase_from_water(self, fid_water: np.ndarray, sw_hz: float) -> np.ndarray:
         """
@@ -237,7 +245,8 @@ class EddyCurrent(BaseModule):
         Returns:
             Phase values in radians, one per point of the water
         """
-        w = np.asarray(fid_water, dtype=np.complex128).ravel()
+        w = np.asarray(fid_water).ravel()
+        w = w.astype(np.result_type(w.dtype, np.complex64), copy=False)     # its own precision
         n = w.size
         t = np.arange(n, dtype=float) / float(sw_hz)
         mag = np.abs(w)
@@ -288,11 +297,44 @@ class EddyCurrent(BaseModule):
         phi = self._low_pass(noise, sw_hz)[pad:pad + N]
 
         if self.remove_linear:
-            A = np.c_[np.ones(N), t]
-            k0, k1 = np.linalg.lstsq(A, phi, rcond=None)[0]
-            phi = phi - (k0 + k1 * t)
+            phi = self._detrend(phi, t)
 
         return phi - phi[0]
+
+    @staticmethod
+    def _detrend(phi: np.ndarray, t: np.ndarray) -> np.ndarray:
+        """
+        *phi* minus its least-squares line in *t*, row by row.
+
+        The closed-form fit of a line against one shared axis: the same
+        arithmetic for one row as for a stack of them, so a batch detrends each
+        sample exactly as a single call does, without a solver call per row.
+        """
+        tc = t - t.mean()
+        k1 = (phi * tc).sum(axis=-1, keepdims=True) / (tc * tc).sum()
+        k0 = phi.mean(axis=-1, keepdims=True) - k1 * t.mean()
+        return phi - (k0 + k1 * t)
+
+    def _synth_ec_phases(self, batch: int, N: int, sw_hz: float,
+                         rng: np.random.Generator) -> np.ndarray:
+        """
+        "_synth_ec_phase" for *batch* samples at once, "(batch, N)", bit for bit.
+
+        The noise of all samples is one draw of the same numbers in the same
+        order, and filtering, detrending ("_detrend") and anchoring work row by
+        row.
+        """
+        t = np.arange(N, dtype=float) / float(sw_hz)
+        pad = 0
+        if self.lp_cut_hz is not None and self.lp_cut_hz > 0:
+            pad = int(np.ceil(3.0 * float(sw_hz) / float(self.lp_cut_hz)))
+        noise = rng.normal(scale=self.std_rad, size=(batch, N + 2 * pad))
+        phi = self._low_pass(noise, sw_hz)[:, pad:pad + N]
+
+        if self.remove_linear:
+            phi = self._detrend(phi, t)
+
+        return phi - phi[:, :1]
 
     def _phases(self, batch: int, n_points: int, sw_hz: float, rng: np.random.Generator,
                 water_of=None) -> np.ndarray:
@@ -324,7 +366,7 @@ class EddyCurrent(BaseModule):
                                            sw_water, n_points, sw_hz))
             return np.stack(rows)
 
-        return np.stack([self._synth_ec_phase(n_points, sw_hz, rng) for _ in range(batch)])
+        return self._synth_ec_phases(batch, n_points, sw_hz, rng)
 
     def _phasors(self, phases: np.ndarray) -> np.ndarray:
         """"exp(i·strength·φ)" per sample, the strength read per sample."""
@@ -386,7 +428,7 @@ class EddyCurrent(BaseModule):
 
         The phase trajectories are generated in NumPy (SciPy filters), one
         per sample, then applied as a complex phasor multiplication which
-        stays in the native backend — "data * match_backend(phasor, data)".
+        stays in the native backend — "data * to_backend(phasor, data)".
 
         Args:
             data_array: Input tensor of shape "(batch, ..., n_points)"
@@ -409,16 +451,27 @@ class EddyCurrent(BaseModule):
         n_points = int(shape[-1])
         batch = int(shape[0]) if ndim > 1 else 1
 
+        # Only a water-mode draw without a library reads the water: fetching it
+        # from a device otherwise costs a wait for nothing.
         water_of = None
-        if water_array is not None:
+        if water_array is not None and self.mode == 'water' and not self._library:
             rows = self._water_rows(to_numpy(water_array), batched=True)
             # The water shares the data's dwell time; only its length may differ
             water_of = lambda i: (rows[min(i, rows.shape[0] - 1)], float(sw_hz))
 
         phases = self._phases(batch, n_points, float(sw_hz), self.rng.numpy_rng(),
                               water_of=water_of)
-        phasor = batch_profile(self._phasors(phases), ndim)
+        if on_cuda(data_array) and ndim > 1:
+            # the trajectories travel as they are; the phasor is formed on the device
+            import torch
+            strength = np.array([float(self.sample_of(self.strength, i))
+                                 for i in range(phases.shape[0])])[:, None]
+            angle = device_values(strength, data_array) * device_values(phases, data_array)
+            phasor = torch.polar(torch.ones_like(angle), angle).reshape(
+                (batch,) + (1,) * (ndim - 2) + (n_points,))
+        else:
+            phasor = batch_profile(self._phasors(phases), ndim)
 
         # Apply phasor: backend-native multiply (preserves gradients for data)
-        return data_array * ops.cast_like(match_backend(phasor, data_array), data_array), \
+        return data_array * ops.cast_like(to_backend(phasor, data_array), data_array), \
             water_array

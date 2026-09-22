@@ -462,10 +462,15 @@ def resample_signal_lp(data, npoints, bandwidth, axis=1):
 #   fsl-mrs axis conventions   #
 #******************************#
 def fid_to_spec(fids):
-    """FSL-MRS FIDToSpec along the last axis: ortho fft, first point halved."""
-    fids = np.array(fids, dtype=np.complex128)
+    """
+    FSL-MRS FIDToSpec along the last axis: ortho fft, first point halved; in the precision of
+    *fids* (NumPy's FFT computes in double, so the result is put back).
+    """
+    fids = np.array(fids)
+    fids = fids.astype(np.result_type(fids.dtype, np.complex64), copy=False)
     fids[..., 0] *= 0.5
-    return np.fft.fftshift(np.fft.fft(fids, axis=-1, norm='ortho'), axes=-1)
+    spec = np.fft.fftshift(np.fft.fft(fids, axis=-1, norm='ortho'), axes=-1)
+    return spec.astype(fids.dtype, copy=False)
 
 
 #: fsl_mrs.utils.constants.PPM_SHIFT, copied so the axis helpers work without FSL-MRS.
@@ -614,6 +619,75 @@ def causal_lineshape(ppm, center_ppm, lorentz_ppm=0.0, gauss_ppm=0.0):
     return spectrum / np.max(np.real(spectrum))
 
 
+def _causal_lineshapes_device(winding, lorentz, gauss, step, n, like):
+    """"causal_lineshapes" past its per-row winding factors, in float64 on *like*'s device."""
+    import torch
+    t = device_axis(('index', n), lambda: np.arange(n, dtype=np.float64), like)
+    fid = torch.exp(device_values(winding, like).reshape(-1, 1) * t)
+    lorentz_d, gauss_d = device_values(lorentz, like), device_values(gauss, like)
+    if np.any(lorentz > 0):
+        damped = fid * torch.exp(-np.pi * (lorentz_d / abs(step)) * t / n)
+        fid = torch.where(lorentz_d > 0, damped, fid)
+    if np.any(gauss > 0):
+        damped = fid * torch.exp(-(np.pi * (gauss_d / abs(step)) * t / n) ** 2
+                                 / (4.0 * np.log(2.0)))
+        fid = torch.where(gauss_d > 0, damped, fid)
+    spectrum = torch.fft.fftshift(torch.fft.ifft(fid, dim=-1), dim=-1)
+    return spectrum / torch.amax(spectrum.real, dim=-1, keepdim=True)
+
+
+def causal_lineshapes(ppm, center_ppm, lorentz_ppm=0.0, gauss_ppm=0.0, like=None):
+    """
+    "causal_lineshape" for a batch of resonances at once, "(batch, n)".
+
+    Row b is "causal_lineshape(ppm, center_ppm[b], lorentz_ppm[b], gauss_ppm[b])"
+    bit for bit: the per-row factors are formed exactly as the scalar ones
+    are, a width is applied only to the rows where it is positive, and the
+    transforms run row by row on the batch. It exists so that a module drawing
+    a resonance per sample pays for one set of array operations instead of one
+    per sample.
+
+    Args:
+        ppm: The ppm of every bin, as for "causal_lineshape".
+        center_ppm: "(batch,)" peak positions.
+        lorentz_ppm: Lorentzian FWHMs in ppm, a scalar or "(batch,)"; 0 for none.
+        gauss_ppm: Gaussian FWHMs in ppm, a scalar or "(batch,)"; 0 for none.
+        like: A tensor; a CUDA one has the rows built on its device ("on_cuda").
+
+    Returns:
+        A "(batch, n)" complex array whose rows' real parts peak at 1 (complex128,
+        on *like*'s device when built there).
+    """
+    ppm = np.asarray(ppm, dtype=np.float64)
+    centers = np.asarray(center_ppm, dtype=np.float64).reshape(-1)
+    batch, n = centers.size, ppm.size
+    if n < 2:
+        return np.ones((batch, n), dtype=np.complex128)
+    lorentz = np.broadcast_to(np.asarray(lorentz_ppm, dtype=np.float64), (batch,))[:, None]
+    gauss = np.broadcast_to(np.asarray(gauss_ppm, dtype=np.float64), (batch,))[:, None]
+
+    step = float(np.median(np.diff(ppm)))
+    t = np.arange(n, dtype=np.float64)
+
+    # The winding factor goes through Python complex arithmetic as in the scalar
+    # version (which divides where NumPy's complex division would multiply by
+    # the reciprocal), so every row starts from the same complex number.
+    winding = np.array([2j * np.pi * (n // 2 - (n // 2 + (float(c) - ppm[n // 2]) / step)) / n
+                        for c in centers])
+    if like is not None and on_cuda(like):
+        return _causal_lineshapes_device(winding, lorentz, gauss, step, n, like)
+    fid = np.exp(winding[:, None] * t)
+    if np.any(lorentz > 0):
+        damped = fid * np.exp(-np.pi * (lorentz / abs(step)) * t / n)
+        fid = np.where(lorentz > 0, damped, fid)
+    if np.any(gauss > 0):
+        damped = fid * np.exp(-(np.pi * (gauss / abs(step)) * t / n) ** 2 / (4.0 * np.log(2.0)))
+        fid = np.where(gauss > 0, damped, fid)
+
+    spectrum = np.fft.fftshift(np.fft.ifft(fid, axis=-1), axes=-1)
+    return spectrum / np.max(np.real(spectrum), axis=-1, keepdims=True)
+
+
 #***********************#
 #   per-sample values   #
 #***********************#
@@ -657,6 +731,33 @@ def per_sample_factor(value, ndim, like):
     return to_backend(arr.reshape((-1,) + (1,) * (ndim - 1)), like)
 
 
+def on_cuda(like):
+    """
+    Whether *like* is a CUDA tensor, whose per-batch profiles are then built on its device.
+
+    A module that builds a "(batch, N)" profile in NumPy pays for the host
+    arithmetic and for an upload every batch. On a CUDA tensor the same float64
+    arithmetic runs on the device from the host-drawn parameters instead, so
+    only those parameters travel; the result agrees with the NumPy build to
+    float64 rounding, far below the precision the profile is applied in.
+    """
+    return ops.is_torch(like) and like.device.type == 'cuda'
+
+
+def device_values(values, like):
+    """Host-drawn parameter *values* on *like*'s CUDA device, as float64 (complex128 if complex)."""
+    from augmentrum.processing.torch_engine import upload
+    arr = np.asarray(values)
+    arr = arr.astype(np.complex128 if np.iscomplexobj(arr) else np.float64, copy=False)
+    return upload(arr, like.device)
+
+
+def device_axis(key, build, like):
+    """A float64 axis built on the host once (NumPy, as the host path builds it) and kept on the device."""
+    from augmentrum.processing.torch_engine import constant
+    return constant(key, lambda: np.asarray(build(), dtype=np.float64), like.device)
+
+
 def to_backend(param, like, dtype=None):
     """
     "ops.match_backend" - or, with *dtype*, "ops.asarray_like" - without the wait.
@@ -675,6 +776,8 @@ def to_backend(param, like, dtype=None):
         import torch
         from augmentrum.processing.torch_engine import upload
         target = getattr(torch, dtype) if dtype is not None else like.dtype
+        if isinstance(param, torch.Tensor):      # built on the device already ("on_cuda")
+            return param.to(like.device).to(target)
         return upload(param, like.device).to(target)
     if dtype is not None:
         return ops.asarray_like(like, param, dtype=dtype)
