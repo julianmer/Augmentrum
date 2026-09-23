@@ -513,5 +513,127 @@ class TestLorentzianNarrowing:
         assert np.allclose(out.cpu().numpy(), expected, rtol=1e-5)
 
 
+#**************************************************************************************************#
+#                                     Class TestLineshapeKernel                                    #
+#**************************************************************************************************#
+#                                                                                                  #
+# Test the optional lineshape kernel (a B0 distribution convolved into every line).                #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestLineshapeKernel:
+    """kernel=None changes nothing; a kernel multiplies the FID by its characteristic function."""
+
+    SW = 1000.0
+    N = 512
+
+    def _t(self):
+        return np.arange(self.N) / self.SW
+
+    def _fid(self, batch=3, seed=0):
+        rng = np.random.default_rng(seed)
+        return rng.standard_normal((batch, self.N)) + 1j * rng.standard_normal((batch, self.N))
+
+    def test_off_by_default(self):
+        """Without a kernel the output equals the plain Voigt."""
+        fid = self._fid()
+        a, _ = LineBroadening(lb_hz=2.0, gb_hz=1.0).process_tensor(fid, sw_hz=self.SW)
+        b = fid * np.exp(-np.pi * 2.0 * self._t() - (np.pi * 1.0 * self._t()) ** 2
+                         / (4 * np.log(2)))
+        assert np.array_equal(a, LineBroadening(lb_hz=2.0, gb_hz=1.0, kernel=None)
+                              .process_tensor(fid, sw_hz=self.SW)[0])
+        assert np.allclose(a, b)
+
+    def test_single_point_kernel_is_identity(self):
+        fid = self._fid()
+        out, _ = LineBroadening(kernel=[3.0], kernel_step_hz=1.0).process_tensor(fid, sw_hz=self.SW)
+        assert np.allclose(out, fid)
+
+    def test_given_kernel_is_a_convolution(self):
+        """Two equal points 4 Hz apart: the mean of the FID shifted by -2 and +2 Hz."""
+        fid = self._fid()
+        out, _ = LineBroadening(kernel=[1.0, 1.0], kernel_step_hz=4.0).process_tensor(
+            fid, sw_hz=self.SW)
+        t = self._t()
+        expected = fid * 0.5 * (np.exp(-2j * np.pi * 2.0 * t) + np.exp(2j * np.pi * 2.0 * t))
+        assert np.allclose(out, expected)
+
+    def test_given_kernel_convolves_the_spectrum(self):
+        """The spectrum of the output is the spectrum convolved with the kernel (whole bins)."""
+        fid = self._fid(batch=1)[0]
+        step = self.SW / self.N                           # one bin
+        w = np.array([0.2, 1.0, 0.0, 0.5])
+        out, _ = LineBroadening(kernel=w, kernel_step_hz=step).process_tensor(
+            fid[None], sw_hz=self.SW)
+        spec = np.fft.fft(fid)
+        # offsets -1.5 .. +1.5 bins; half a bin more makes them the whole bins -1 .. 2
+        half = np.exp(2j * np.pi * 0.5 * step * self._t())
+        conv = sum(wk * np.roll(np.fft.fft(fid), k - 1) for k, wk in enumerate(w / w.sum()))
+        assert np.allclose(np.fft.fft(out[0] * half), conv)
+
+    def test_one_component_no_spread_is_gaussian(self):
+        """A random kernel with one component and zero spread is Gaussian broadening."""
+        fid = self._fid()
+        a, _ = LineBroadening(kernel='random', kernel_components=1, kernel_spread_hz=0.0,
+                              kernel_width_hz=2.5, seed=1).process_tensor(fid, sw_hz=self.SW)
+        b, _ = LineBroadening(gb_hz=2.5, mode='gaussian').process_tensor(fid, sw_hz=self.SW)
+        assert np.allclose(a, b)
+
+    def test_random_kernel_keeps_area_and_centre(self):
+        """Unit area (the first FID point is kept) and zero mean offset (no net shift)."""
+        fid = np.ones((64, self.N), complex)
+        out, _ = LineBroadening(kernel='random', seed=3).process_tensor(fid, sw_hz=self.SW)
+        assert np.allclose(out[:, 0], 1.0)
+        # the phase of the second point is 2 pi t1 (mean offset) + O(t1^3 skewness): ~0 Hz
+        slope = np.angle(out[:, 1]) * self.SW / (2 * np.pi)
+        assert np.all(np.abs(slope) < 1e-4)
+        assert np.all(np.abs(out) <= 1.0 + 1e-12)          # a kernel only broadens
+
+    def test_random_kernels_differ_per_sample_and_replay_with_seed(self):
+        fid = np.ones((8, self.N), complex)
+        a, _ = LineBroadening(kernel='random', seed=5).process_tensor(fid, sw_hz=self.SW)
+        b, _ = LineBroadening(kernel='random', seed=5).process_tensor(fid, sw_hz=self.SW)
+        assert np.array_equal(a, b)
+        assert not np.allclose(a[0], a[1])
+
+    def test_kernel_on_top_of_voigt(self):
+        fid = self._fid()
+        voigt, _ = LineBroadening(lb_hz=1.0, gb_hz=2.0).process_tensor(fid, sw_hz=self.SW)
+        both, _ = LineBroadening(lb_hz=1.0, gb_hz=2.0, kernel=[1.0, 1.0],
+                                 kernel_step_hz=2.0).process_tensor(fid, sw_hz=self.SW)
+        assert np.allclose(both, voigt * np.cos(2 * np.pi * 1.0 * self._t()))
+
+    @pytest.mark.parametrize('kernel, step', [([-1.0, 2.0], 1.0), ([0.0, 0.0], 1.0),
+                                              ([1.0, 1.0], None), ('box', 1.0)])
+    def test_invalid_kernels_raise(self, kernel, step):
+        with pytest.raises(ValueError):
+            LineBroadening(kernel=kernel, kernel_step_hz=step)
+
+    def test_nifti_list_path(self, dummy_nifti_list):
+        """One kernel per subject on the NIfTI-list backend; replays with the seed."""
+        outs = []
+        for _ in range(2):
+            nifti_plus = NIfTI_MRS_Plus(nifti_list=[n.copy() if hasattr(n, 'copy') else n
+                                                    for n in dummy_nifti_list],
+                                        backend=Backend.NIFTI_LIST)
+            original = nifti_plus[0][:].copy()
+            out, _ = LineBroadening(kernel='random', seed=7)(nifti_plus, None)
+            assert not np.allclose(out[0][:], original)
+            outs.append(out[0][:].copy())
+        assert np.allclose(outs[0], outs[1])
+
+    @pytest.mark.parametrize('device', ['cpu', 'cuda'])
+    def test_torch_matches_numpy(self, device):
+        torch = pytest.importorskip('torch')
+        if device == 'cuda' and not torch.cuda.is_available():
+            pytest.skip('no CUDA')
+        fid = self._fid(batch=4)
+        a, _ = LineBroadening(lb_hz=1.0, kernel='random', seed=2).process_tensor(
+            fid, sw_hz=self.SW)
+        b, _ = LineBroadening(lb_hz=1.0, kernel='random', seed=2).process_tensor(
+            torch.as_tensor(fid, device=device), sw_hz=self.SW)
+        assert b.device.type == device
+        assert np.allclose(b.cpu().numpy(), a)
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

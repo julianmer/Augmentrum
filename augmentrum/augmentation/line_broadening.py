@@ -7,8 +7,8 @@
 #                                                                                                  #
 # Created: 2026-02-07                                                                              #
 #                                                                                                  #
-# Purpose: Implements Lorentzian, Gaussian, and Voigt line broadening for MRS data, and           #
-#          Lorentzian narrowing for negative widths.                                               #
+# Purpose: Implements Lorentzian, Gaussian, and Voigt line broadening for MRS data, Lorentzian    #
+#          narrowing for negative widths, and an optional lineshape kernel (a B0 distribution).    #
 #                                                                                                  #
 ####################################################################################################
 
@@ -60,6 +60,23 @@ class LineBroadening(BaseModule):
         narrowing envelope stops growing. It limits how much late-FID noise is
         amplified, at the cost of a small change to the line shape. None
         (default) narrows exactly.
+    kernel : None, 'random' or array-like, optional
+        An extra lineshape convolved into every line, on top of the Voigt: the
+        distribution of B0 over the voxel, which a Voigt cannot describe when
+        it is asymmetric or has shoulders. None (default) adds none. 'random'
+        draws one per sample (see the kernel_* parameters). An array gives the
+        kernel's non-negative weights on a grid kernel_step_hz apart, centred
+        on the middle entry; it is normalised to unit area.
+    kernel_components : int or (int, int)
+        'random' only: the number of Gaussian components of a kernel.
+    kernel_spread_hz : float or (float, float)
+        'random' only: the standard deviation (Hz) of the components' offsets.
+    kernel_width_hz : float or (float, float)
+        'random' only: the FWHM (Hz) of each component.
+    kernel_step_hz : float, optional
+        For an array kernel: the spacing of its entries in Hz (required).
+    seed : int, optional
+        Seed of the random kernels.
 
     Notes
     -----
@@ -81,6 +98,17 @@ class LineBroadening(BaseModule):
     - A Gaussian cannot be narrowed this way (its FID would grow as exp(+t^2)),
       so a negative gb_hz raises a ValueError.
 
+    A kernel k(f) >= 0 of unit area is applied as a convolution of the
+    spectrum, i.e. the FID is multiplied by its characteristic function
+    K(t) = sum_j w_j exp(2 pi i f_j t) G_j(t): exact, whatever the grid. A
+    random kernel is a mixture of Gaussians (weights w_j drawn uniformly on the
+    simplex, offsets f_j ~ N(0, kernel_spread_hz), each of FWHM
+    kernel_width_hz), shifted so that its mean offset is zero: it reshapes the
+    lines without moving them (that is FrequencyShift's job). Unit area keeps
+    every line's area, so concentrations are unchanged. A kernel only
+    broadens; a zero spread and one component is exactly Gaussian broadening
+    of kernel_width_hz.
+
     Examples
     --------
     >>> # Lorentzian broadening only
@@ -95,6 +123,12 @@ class LineBroadening(BaseModule):
     >>> # Lorentzian narrowing by up to 1 Hz or broadening by up to 3 Hz, the
     >>> # narrowing envelope capped at 0.2 s
     >>> broadening = LineBroadening(lb_hz=(-1.0, 3.0), mode='lorentzian', narrow_cap_s=0.2)
+    >>>
+    >>> # Voigt broadening plus a random B0-distribution kernel per sample
+    >>> broadening = LineBroadening(lb_hz=(0.0, 3.0), gb_hz=(0.0, 3.0), kernel='random')
+    >>>
+    >>> # A given asymmetric kernel: a main line and a shoulder 3 Hz above it
+    >>> broadening = LineBroadening(kernel=[1.0, 0.0, 0.0, 0.3], kernel_step_hz=1.0)
     """
 
     SUPPORTED_BACKENDS = tuple(Backend)
@@ -107,10 +141,15 @@ class LineBroadening(BaseModule):
     DOMAIN = Domain(spectral='time')
 
     # The envelope broadcasts, so a batch can carry one width per sample.
-    PER_SAMPLE_PARAMS = ('lb_hz', 'gb_hz')
+    PER_SAMPLE_PARAMS = ('lb_hz', 'gb_hz', 'kernel_components', 'kernel_spread_hz',
+                         'kernel_width_hz')
+    INTEGER_PARAMS = ('kernel_components',)
 
     def __init__(self, lb_hz: float = 0.0, gb_hz: float = 0.0, mode: str = 'voigt',
-                 narrow_cap_s: Optional[float] = None):
+                 narrow_cap_s: Optional[float] = None, kernel=None,
+                 kernel_components=(1, 3), kernel_spread_hz=(0.0, 2.0),
+                 kernel_width_hz=(0.5, 3.0), kernel_step_hz: Optional[float] = None,
+                 seed: Optional[int] = None):
         """Initialize line broadening module."""
         super().__init__()
 
@@ -119,11 +158,17 @@ class LineBroadening(BaseModule):
         self.mode = mode.lower()
         self.narrow_cap_s = narrow_cap_s
         self._warned_narrowing = False
+        self._nifti_draw = None
+        self.kernel_components = kernel_components
+        self.kernel_spread_hz = kernel_spread_hz
+        self.kernel_width_hz = kernel_width_hz
+        self.kernel_step_hz = kernel_step_hz
 
         if self.mode not in ['lorentzian', 'gaussian', 'voigt']:
             raise ValueError(f"mode must be 'lorentzian', 'gaussian', or 'voigt', got '{mode}'")
         if narrow_cap_s is not None and not narrow_cap_s > 0:
             raise ValueError(f'narrow_cap_s must be > 0 seconds or None, got {narrow_cap_s}')
+        self.kernel = self._check_kernel(kernel, kernel_step_hz)
 
     def _check_widths(self, lb_hz, gb_hz):
         """Reject a negative Gaussian width; warn once when a Lorentzian width narrows."""
@@ -157,6 +202,7 @@ class LineBroadening(BaseModule):
             Tuple of (processed_data_list, processed_water_list)
         """
         processed_data = []
+        self._nifti_draw = None
 
         for i, nifti in enumerate(data_list):
             # Get spectral width from NIFTI_MRS
@@ -178,6 +224,9 @@ class LineBroadening(BaseModule):
                 fid_broadened = self._apply_gaussian(fid, sw_hz, gb_hz)
             else:  # voigt
                 fid_broadened = self._apply_voigt(fid, sw_hz, lb_hz, gb_hz, cap)
+            if self.kernel is not None:
+                fid_broadened = fid_broadened * self._kernel_envelope(
+                    fid_broadened, sw_hz, index=i, batch=len(data_list))
 
             # Update NIFTI_MRS data
             nifti[:] = fid_broadened
@@ -213,8 +262,101 @@ class LineBroadening(BaseModule):
             result = self._apply_gaussian(data_array, sw_hz, self.gb_hz)
         else:  # voigt
             result = self._apply_voigt(data_array, sw_hz, self.lb_hz, self.gb_hz, cap)
+        if self.kernel is not None:
+            result = result * self._kernel_envelope(result, sw_hz)
 
         return result, water_array
+
+    #*************#
+    #   kernels   #
+    #*************#
+    @staticmethod
+    def _check_kernel(kernel, step_hz):
+        """None, 'random', or a given kernel as (offsets in Hz, unit-area weights)."""
+        if kernel is None or (isinstance(kernel, str) and kernel == 'random'):
+            return kernel
+        if isinstance(kernel, str):
+            raise ValueError(f"kernel must be None, 'random' or an array, got {kernel!r}")
+        w = np.asarray(kernel, dtype=np.float64).ravel()
+        if w.size == 0 or np.any(w < 0) or not w.sum() > 0:
+            raise ValueError('a kernel must be non-negative with a positive sum (it is a '
+                             'distribution of B0 over the voxel)')
+        if step_hz is None or not step_hz > 0:
+            raise ValueError('an array kernel needs kernel_step_hz > 0 (the spacing of its '
+                             'entries in Hz)')
+        offsets = (np.arange(w.size) - (w.size - 1) / 2.0) * float(step_hz)
+        return offsets, w / w.sum()
+
+    @staticmethod
+    def _per_sample_values(value, batch, rng, integer=False):
+        """*batch* values: drawn from a (low, high) range, a given vector, or a repeated scalar."""
+        if isinstance(value, (tuple, list)) and len(value) == 2:
+            lo, hi = value
+            if integer:
+                return rng.integers(int(lo), int(hi) + 1, size=batch)
+            return rng.uniform(float(lo), float(hi), size=batch)
+        arr = np.asarray(value, dtype=np.float64)
+        if arr.ndim == 0:
+            arr = np.full(batch, float(arr))
+        arr = arr.ravel()[np.arange(batch) % arr.size]
+        return np.rint(arr).astype(int) if integer else arr
+
+    def _draw_kernels(self, batch):
+        """
+        This batch's kernels as (offsets, FWHMs, weights), each "(batch, n_components)".
+
+        Components past a sample's drawn count carry zero weight.
+        """
+        if self.kernel != 'random':
+            offsets, w = self.kernel
+            k = offsets.size
+            return (np.broadcast_to(offsets, (batch, k)), np.zeros((batch, k)),
+                    np.broadcast_to(w, (batch, k)))
+        rng = self.rng.numpy_rng()
+        count = self._per_sample_values(self.kernel_components, batch, rng, integer=True)
+        if np.any(count < 1):
+            raise ValueError(f'kernel_components must be >= 1, got {self.kernel_components}')
+        spread = self._per_sample_values(self.kernel_spread_hz, batch, rng)
+        k = int(count.max())
+        offsets = rng.standard_normal((batch, k)) * spread[:, None]
+        if isinstance(self.kernel_width_hz, (tuple, list)) and len(self.kernel_width_hz) == 2:
+            lo, hi = self.kernel_width_hz
+            fwhm = rng.uniform(float(lo), float(hi), size=(batch, k))
+        else:
+            fwhm = np.repeat(self._per_sample_values(self.kernel_width_hz, batch, rng)[:, None],
+                             k, axis=1)
+        if np.any(spread < 0) or np.any(fwhm < 0):
+            raise ValueError('kernel_spread_hz and kernel_width_hz must be >= 0')
+        w = rng.exponential(size=(batch, k)) * (np.arange(k)[None, :] < count[:, None])
+        w = w / w.sum(axis=1, keepdims=True)                 # uniform on each sample's simplex
+        offsets = offsets - (w * offsets).sum(axis=1, keepdims=True)
+        return offsets, fwhm, w
+
+    def _kernel_envelope(self, fid, sw_hz, index=None, batch=None):
+        """
+        The kernels' characteristic functions on *fid*'s backend, shaped to broadcast.
+
+        With *index* the NIfTI path takes that subject's kernel out of a draw for
+        *batch* subjects; otherwise one kernel per row of *fid*.
+        """
+        n_pts = fid.shape[-1]
+        ndim = len(fid.shape)
+        if index is None:
+            batch = fid.shape[0] if ndim > 1 else 1
+            offsets, fwhm, w = self._draw_kernels(batch)
+        else:
+            if self._nifti_draw is None or self._nifti_draw[0] != batch:
+                self._nifti_draw = (batch, self._draw_kernels(batch))
+            offsets, fwhm, w = (a[index:index + 1] for a in self._nifti_draw[1])
+        t = np.arange(n_pts) / float(sw_hz)
+        env = np.einsum('bk,bkt->bt', w, np.exp(
+            2j * np.pi * offsets[:, :, None] * t
+            - ((np.pi * fwhm[:, :, None] * t) ** 2) / (4 * np.log(2))))
+        if index is not None or ndim == 1:
+            env = env.reshape((1,) * (ndim - 1) + (n_pts,))
+        else:
+            env = env.reshape((env.shape[0],) + (1,) * (ndim - 2) + (n_pts,))
+        return ops.cast_like(to_backend(env, fid), fid)
 
     #**********************#
     #   envelope helpers   #

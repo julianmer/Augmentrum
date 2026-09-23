@@ -164,6 +164,8 @@ SPECS: List[ModuleSpec] = [
     ModuleSpec("LineBroadening[lorentzian]", None, {"lb_hz": 5.0, "mode": "lorentzian"}),
     ModuleSpec("LineBroadening[gaussian]", None, {"gb_hz": 5.0, "mode": "gaussian"}),
     ModuleSpec("LineBroadening[voigt]", None, {"lb_hz": 3.0, "gb_hz": 2.0, "mode": "voigt"}),
+    ModuleSpec("LineBroadening[kernel]", None, {"lb_hz": 1.0, "gb_hz": 1.0, "kernel": "random",
+                                                "seed": 0}),
 
     # On the list backend every executed step writes its own FSL-MRS provenance
     # entry — 'Coil combination' being present IS coil=True — hence
