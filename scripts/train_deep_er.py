@@ -580,13 +580,20 @@ def make_loss(device, use_ssim: bool = True):
 
 
 def metrics(reco, target, mask):
-    """Per-item NRMSE and SSIM inside the brain mask, on the loss's scale."""
+    """
+    Per item, inside the brain mask and on the loss's scale: the error and
+    target energies (for an NRMSE pooled over a subject's timepoints) and SSIM.
+
+    NRMSE is pooled, not averaged per timepoint: late in the FID the target
+    is nearly zero, so a per-timepoint ratio runs into the thousands and
+    would decide the mean on its own.
+    """
     from torchmetrics.functional.image import structural_similarity_index_measure as ssim
     m = mask[:, None]
-    nrmse = (torch.linalg.vector_norm((reco - target) * m, dim=(1, 2, 3, 4))
-             / torch.linalg.vector_norm(target * m, dim=(1, 2, 3, 4)).clamp(min=1e-12))
+    err = (((reco - target) * m) ** 2).sum(dim=(1, 2, 3, 4))
+    energy = ((target * m) ** 2).sum(dim=(1, 2, 3, 4))
     s = ssim(reco * m, target * m, data_range=1.0, reduction='none')
-    return nrmse, s
+    return err, energy, s
 
 
 #**********#
@@ -921,15 +928,17 @@ def evaluate(model, loss_func, batches, amp: bool):
     rows = []
     for batch in batches:
         n = batch['inputs_img'].shape[0]
-        losses, nrmses, ssims = [], [], []
+        losses, errs, energies, ssims = [], [], [], []
         for lo in range(0, n, EVAL_CHUNK):
             part = {k: (v if k == 'sense' else v[lo:lo + EVAL_CHUNK]) for k, v in batch.items()}
             loss, reco = run_batch(model, loss_func, part, amp)
-            nrmse, ssim = metrics(reco, part['img_gt'], part['mask'])
-            losses.append(loss.item() * len(nrmse))
-            nrmses.append(nrmse)
+            err, energy, ssim = metrics(reco, part['img_gt'], part['mask'])
+            losses.append(loss.item() * len(err))
+            errs.append(err)
+            energies.append(energy)
             ssims.append(ssim)
-        rows.append({'loss': sum(losses) / n, 'nrmse': torch.cat(nrmses).mean().item(),
+        nrmse = (torch.cat(errs).sum() / torch.cat(energies).sum().clamp(min=1e-12)).sqrt()
+        rows.append({'loss': sum(losses) / n, 'nrmse': nrmse.item(),
                      'ssim': torch.cat(ssims).mean().item()})
     model.train()
     return {key: float(np.mean([r[key] for r in rows])) for key in rows[0]}, rows
