@@ -19,16 +19,18 @@
 # by learnable mixing and coil-sensitivity-aware domain transfer, trained per FID timepoint        #
 # with an MSE + (1 - SSIM) image loss. No upstream code is used or required.                       #
 #                                                                                                  #
-# Examples:                                                                                        #
-#     python scripts/train_deep_er.py --dry-run                                                    #
-#     python scripts/train_deep_er.py --bench 50                                                   #
-#     python scripts/train_deep_er.py --arm augmentrum --spatial all --noise                       #
-#     python scripts/train_deep_er.py --arm none --spatial flip --steps 100000                     #
+# The whole ablation, from the repository root — the default, no arguments needed:               #
+#     python scripts/train_deep_er.py                                                              #
+# It downloads the data once (~170 GB), trains all 30 conditions on every visible GPU, one run     #
+# per GPU at a time, resumes interrupted runs, skips finished ones, and collects every test        #
+# result in <out-dir>/summary.csv. Defaults are set for an A100 (bf16, subjects on the GPU).       #
+# Not converged (see each run's log.csv)? Run it again with a larger --steps: every run resumes    #
+# from its checkpoint up to the new budget and is tested again.                                    #
 #                                                                                                  #
-# The whole ablation on any GPU(s), from the repository root:                                      #
-#     python scripts/train_deep_er.py --fetch            # all 32 subjects once, ~170 GB           #
-#     python scripts/train_deep_er.py --tune             # fastest speed flags for this GPU        #
-#     python scripts/train_deep_er.py --grid --gpus 0 1 --per-gpu 2 --steps 100000 --wandb <flags> #
+# One run, or a look before training:                                                              #
+#     python scripts/train_deep_er.py --arm augmentrum --spatial all --noise                       #
+#     python scripts/train_deep_er.py --dry-run                                                    #
+#     python scripts/train_deep_er.py --bench 50          (or --tune: compare the speed options)   #
 # Needs torchmetrics (the SSIM loss) and wandb for --wandb, beside augmentrum's torch extra.       #
 #                                                                                                  #
 ####################################################################################################
@@ -39,6 +41,7 @@
 import argparse
 import csv
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -907,16 +910,27 @@ def run_batch(model, loss_func, batch, amp: bool):
     return loss_func(reco_img, batch['img_gt'], batch['mask']), reco_img
 
 
+#: Timepoints the model sees at once when evaluating; a test subject has 32.
+EVAL_CHUNK = 8
+
+
 @torch.no_grad()
 def evaluate(model, loss_func, batches, amp: bool):
     """Mean loss, NRMSE and SSIM over fixed batches, and the same per batch."""
     model.eval()
     rows = []
     for batch in batches:
-        loss, reco = run_batch(model, loss_func, batch, amp)
-        nrmse, ssim = metrics(reco, batch['img_gt'], batch['mask'])
-        rows.append({'loss': loss.item(), 'nrmse': nrmse.mean().item(),
-                     'ssim': ssim.mean().item()})
+        n = batch['inputs_img'].shape[0]
+        losses, nrmses, ssims = [], [], []
+        for lo in range(0, n, EVAL_CHUNK):
+            part = {k: (v if k == 'sense' else v[lo:lo + EVAL_CHUNK]) for k, v in batch.items()}
+            loss, reco = run_batch(model, loss_func, part, amp)
+            nrmse, ssim = metrics(reco, part['img_gt'], part['mask'])
+            losses.append(loss.item() * len(nrmse))
+            nrmses.append(nrmse)
+            ssims.append(ssim)
+        rows.append({'loss': sum(losses) / n, 'nrmse': torch.cat(nrmses).mean().item(),
+                     'ssim': torch.cat(ssims).mean().item()})
     model.train()
     return {key: float(np.mean([r[key] for r in rows])) for key in rows[0]}, rows
 
@@ -1140,7 +1154,7 @@ def condition_argv(arm, spatial, noise):
 
 
 #: Options that pick a run or drive the grid; everything else is passed on.
-GRID_OWN = {'arm', 'spatial', 'noise', 'seed', 'device', 'grid', 'gpus', 'per_gpu',
+GRID_OWN = {'arm', 'spatial', 'noise', 'seed', 'device', 'gpus', 'per_gpu',
             'seeds', 'stagger', 'tune', 'fetch', 'resume', 'bench', 'dry_run', 'preview'}
 
 
@@ -1201,7 +1215,7 @@ def tune(parser, args):
     if not rows:
         sys.exit("no variant ran")
     step, name, flags = min(rows)
-    print(f"\nfastest: {name}, {step:.0f} ms/step. Add to --grid: {' '.join(flags) or '(nothing)'}")
+    print(f"\nfastest: {name}, {step:.0f} ms/step. Add to the ablation command: {' '.join(flags) or '(nothing)'}")
 
 
 def grid(parser, args):
@@ -1210,6 +1224,11 @@ def grid(parser, args):
     started --stagger seconds apart. Finished runs (test.json) are skipped,
     interrupted ones resume; each run logs to <run>/run.log.
     """
+    gpus = args.gpus if args.gpus else list(range(torch.cuda.device_count()))
+    if not gpus:
+        sys.exit("no GPU visible: the ablation needs at least one (or --device cpu for one run)")
+    fetch_all(args)                     # once, before any run: no races between downloads
+
     common = passed_on(parser, args)
     jobs = []
     for seed in args.seeds:
@@ -1218,10 +1237,10 @@ def grid(parser, args):
             out = Path(args.out_dir) / run_name(argparse.Namespace(
                 **{**vars(args), **{k: getattr(run_args, k)
                                     for k in ('arm', 'spatial', 'noise', 'seed')}}))
-            if not (out / 'test.json').exists():
+            if not finished(out, args.steps):
                 jobs.append((condition, seed, out))
-    slots = [gpu for gpu in args.gpus for _ in range(args.per_gpu)]
-    print(f"{len(jobs)} runs to do on GPUs {args.gpus}, {args.per_gpu} per GPU; "
+    slots = [gpu for gpu in gpus for _ in range(args.per_gpu)]
+    print(f"{len(jobs)} runs to do on GPUs {gpus}, {args.per_gpu} per GPU; "
           f"passed on: {' '.join(common) or '(defaults)'}")
 
     running, failed = {}, []
@@ -1239,15 +1258,59 @@ def grid(parser, args):
             condition, seed, out = jobs.pop(0)
             out.mkdir(parents=True, exist_ok=True)
             cmd = [sys.executable, __file__, *condition_argv(*condition), '--seed', str(seed),
-                   '--device', f'cuda:{slots[free[0]]}', '--resume', *common]
+                   '--device', 'cuda', '--resume', *common]
+            # each run sees only its own GPU, so nothing of it can land on another
+            env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(slots[free[0]]))
             running[free[0]] = (subprocess.Popen(cmd, stdout=open(out / 'run.log', 'a'),
-                                                 stderr=subprocess.STDOUT), out.name)
+                                                 stderr=subprocess.STDOUT, env=env), out.name)
             print(f"{time.strftime('%H:%M')}  started {out.name} on GPU {slots[free[0]]}",
                   flush=True)
             time.sleep(args.stagger)
             continue
         time.sleep(10)
     print(f"grid finished, {len(failed)} failed" + (f": {failed}" if failed else ""))
+    summarize(args.out_dir)
+
+
+def finished(out: Path, steps: int) -> bool:
+    """Tested, at *steps* or more: a larger budget later resumes and retests the run."""
+    log = out / 'log.csv'
+    if not (out / 'test.json').exists() or not log.exists():
+        return False
+    last = log.read_text().strip().splitlines()[-1].split(',')[0]
+    return last.isdigit() and int(last) >= steps
+
+
+def summarize(out_dir):
+    """
+    Every finished run's test results in one table, <out_dir>/summary.csv:
+    one row per run, weights (last/best), acceleration and test track.
+    """
+    rows = []
+    for path in sorted(Path(out_dir).glob('*/test.json')):
+        config = json.loads((path.parent / 'config.json').read_text())['args']
+        for weights, results in json.loads(path.read_text()).items():
+            for key, result in results.items():
+                acc, track = key.split('/')
+                rows.append({'run': path.parent.name, 'arm': config['arm'],
+                             'spatial': config['spatial'], 'noise': config['noise'],
+                             'seed': config['seed'], 'weights': weights,
+                             'acceleration': acc[3:], 'track': track, **result['mean']})
+    if not rows:
+        print("no finished runs to summarize")
+        return
+    path = Path(out_dir) / 'summary.csv'
+    with open(path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"\n{len(rows)} results of {len({r['run'] for r in rows})} runs in {path}")
+    print("best weights, mean over tracks and accelerations:")
+    runs = sorted({r['run'] for r in rows})
+    for run in runs:
+        mine = [r for r in rows if r['run'] == run and r['weights'] == 'best']
+        print(f"  {run:48s} nrmse {np.mean([r['nrmse'] for r in mine]):.4f}   "
+              f"ssim {np.mean([r['ssim'] for r in mine]):.4f}")
 
 
 #**********#
@@ -1259,9 +1322,10 @@ def main():
     parser.add_argument('--data-dir', default='data/mrsi_challenge',
                         help="Release root; missing subjects are fetched from Zenodo.")
     parser.add_argument('--out-dir', default='results/deep_er/ablation')
-    parser.add_argument('--arm', choices=sorted(ARMS), default='augmentrum')
+    parser.add_argument('--arm', choices=sorted(ARMS), default=None,
+                        help="Train this one condition. Without it, the whole ablation runs.")
     parser.add_argument('--spatial', choices=('none',) + SPATIAL_KINDS + ('all',),
-                        default='none', help="Spatial transform(s) on top of the arm.")
+                        default=None, help="Spatial transform(s) on top of the arm (default none).")
     parser.add_argument('--noise', action='store_true',
                         help="Extra noise per coil on the input, level drawn per batch.")
     parser.add_argument('--trajectory', choices=sorted(TRAJECTORIES),
@@ -1288,7 +1352,8 @@ def main():
                              "challenge's own noise, SD 1.0e-3 per point (Sub1, outside "
                              "the brain, measured at acceleration 1).")
     parser.add_argument('--lr', type=float, default=1e-5)
-    parser.add_argument('--steps', type=int, default=100_000)
+    parser.add_argument('--steps', type=int, default=20_000,
+                        help="Training steps per run (one pull of 4 timepoints each).")
     parser.add_argument('--eval-every', type=int, default=1000)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--device', default=None)
@@ -1320,22 +1385,24 @@ def main():
                         help="Download every subject of the ablation once, then exit.")
     parser.add_argument('--tune', action='store_true',
                         help="Time the speed options on this GPU and print the fastest flags.")
-    parser.add_argument('--grid', action='store_true',
-                        help="Run every ablation condition (see conditions()).")
-    parser.add_argument('--gpus', type=int, nargs='+', default=[0])
+    parser.add_argument('--gpus', type=int, nargs='+', default=None,
+                        help="GPUs for the ablation (default: every visible one).")
     parser.add_argument('--per-gpu', type=int, default=1)
     parser.add_argument('--seeds', type=int, nargs='+', default=[42])
     parser.add_argument('--stagger', type=int, default=60,
-                        help="Seconds between --grid starts.")
+                        help="Seconds between ablation run starts.")
 
     args = parser.parse_args()
+    one_run = args.arm is not None or args.dry_run or args.bench or args.preview
     if args.fetch:
         fetch_all(args)
     elif args.tune:
         tune(parser, args)
-    elif args.grid:
+    elif not one_run:
         grid(parser, args)
     else:
+        args.arm = args.arm or 'augmentrum'
+        args.spatial = args.spatial or 'none'
         train(args)
 
 
