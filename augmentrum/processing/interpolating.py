@@ -21,6 +21,7 @@
 from __future__ import annotations           # so torch annotations never evaluate
 
 import math
+import warnings
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Optional, Sequence, Tuple
 
@@ -276,41 +277,107 @@ class KaiserBesselInterpolator(GriddingKernel):
                 flat_w = (flat_w[:, :, None] * per_axis_w[d][:, None, :]).reshape(len(coords), -1)
         return flat_idx, flat_w.astype(np.float64)
 
+    #: Complex entries a gather or scatter handles at once; channels are
+    #: batched up to this, so memory stays bounded however many there are.
+    CHUNK_ENTRIES = 2 ** 26
+
+    def _channel_chunks(self, n_chan: int, per_channel: int):
+        """Channel ranges of at most CHUNK_ENTRIES entries each."""
+        size = max(1, self.CHUNK_ENTRIES // max(1, per_channel))
+        return [(c, min(c + size, n_chan)) for c in range(0, n_chan, size)]
+
+    #*************************#
+    #   sparse torch kernel   #
+    #*************************#
+    def _kernel_matrix(self, coords: np.ndarray, like, transpose: bool = False):
+        """
+        The kernel as a real sparse matrix, "[K, cells]" (or its transpose), on
+        *like*'s device, in *like*'s real precision.
+
+        Gathering and scattering then become one sparse product each, which
+        reads every value once; the dense form copies each value per tap.
+        Real, because the kernel is: real and imaginary parts ride as two
+        columns. The last pair built is kept, since forward and adjoint of one
+        acquisition use the same coordinates.
+        """
+        import torch
+        dtype = torch.float64 if like.dtype == torch.complex128 else torch.float32
+        key = (coords.shape, hash(coords.tobytes()), like.device, dtype)
+        cache = getattr(self, '_matrix_cache', None)
+        if cache is None or cache[0] != key:
+            idx, weight = self.neighbors(coords)
+            n_rows, n_taps = idx.shape
+            rows = torch.arange(n_rows, device=like.device).repeat_interleave(n_taps)
+            cols = torch.as_tensor(idx.reshape(-1), device=like.device)
+            vals = torch.as_tensor(weight.reshape(-1), device=like.device, dtype=dtype)
+            n_cells = int(np.prod(self.grid_size))
+            matrix = torch.sparse_coo_tensor(torch.stack((rows, cols)), vals,
+                                             (n_rows, n_cells)).coalesce()
+            with warnings.catch_warnings():         # "sparse CSR support is in beta"
+                warnings.simplefilter('ignore', UserWarning)
+                cache = (key, {False: matrix.to_sparse_csr(),
+                               True: matrix.t().coalesce().to_sparse_csr()})
+            self._matrix_cache = cache
+        return cache[1][transpose]
+
+    @staticmethod
+    def _apply_real_matrix(matrix, values):
+        """"matrix @ values.T" for complex "[C, N]" values: "[C, rows]"."""
+        import torch
+        n_chan = values.shape[0]
+        real = torch.view_as_real(values.contiguous())             # [C, N, 2]
+        cols = real.permute(1, 0, 2).reshape(real.shape[1], 2 * n_chan)
+        out = torch.sparse.mm(matrix, cols)                         # [rows, 2C]
+        out = out.reshape(-1, n_chan, 2).permute(1, 0, 2).contiguous()
+        return torch.view_as_complex(out)
+
     def sample(self, grid, coords):
         """Gather each sample from the bins its kernel touches."""
+        if ops.is_torch(grid) and ops.is_complex(grid):
+            flat = ops.reshape(grid, (int(ops.shape(grid)[0]), -1))
+            return self._apply_real_matrix(self._kernel_matrix(np.asarray(coords), flat), flat)
+
         idx, weight = self.neighbors(np.asarray(coords))
         n_chan = int(ops.shape(grid)[0])
         n_taps = idx.shape[1]
 
         flat = ops.reshape(grid, (n_chan, -1))
         weight_b = ops.cast_like(ops.match_backend(weight, flat), flat)
+        idx_flat = idx.reshape(-1)
 
         rows = []
-        for c in range(n_chan):
-            plane = ops.reshape(ops.take(flat, np.array([c]), axis=0), (-1,))
-            taps = ops.reshape(ops.take(plane, idx.reshape(-1), axis=0),
-                               (len(coords), n_taps))
+        for lo, hi in self._channel_chunks(n_chan, idx.size):
+            block = ops.take(flat, np.arange(lo, hi), axis=0)
+            taps = ops.reshape(ops.take(block, idx_flat, axis=1),
+                               (hi - lo, len(coords), n_taps))
             rows.append(ops.sum(taps * weight_b, axis=-1))
-        return ops.stack(rows, axis=0)
+        return ops.concatenate(rows, axis=0)
 
     def spread(self, values, coords):
         """Scatter each sample across the bins its kernel touches."""
-        idx, weight = self.neighbors(np.asarray(coords))
         n_chan = int(ops.shape(values)[0])
+        if ops.is_torch(values) and ops.is_complex(values):
+            matrix = self._kernel_matrix(np.asarray(coords), values, transpose=True)
+            return ops.reshape(self._apply_real_matrix(matrix, values),
+                               (n_chan,) + self.grid_size)
+
+        idx, weight = self.neighbors(np.asarray(coords))
         n_cells = int(np.prod(self.grid_size))
         n_taps = idx.shape[1]
 
-        weight_b = ops.cast_like(ops.match_backend(weight.reshape(-1), values), values)
+        weight_b = ops.cast_like(ops.match_backend(weight.reshape(-1, 1), values), values)
         idx_flat = idx.reshape(-1)
 
         planes = []
-        for c in range(n_chan):
-            # One sample feeds every tap it touches, so repeat it across them
-            samples = ops.reshape(ops.take(values, np.array([c]), axis=0), (-1,))
-            spread = ops.reshape(ops.stack([samples] * n_taps, axis=-1), (-1,))
-            planes.append(resample.scatter_add((n_cells,), idx_flat, spread * weight_b))
+        for lo, hi in self._channel_chunks(n_chan, idx.size):
+            # channels ride in a trailing axis, which scatter_add carries along;
+            # one sample feeds every tap it touches, so repeat it across them
+            samples = ops.transpose(ops.take(values, np.arange(lo, hi), axis=0), (1, 0))
+            spread = ops.reshape(ops.stack([samples] * n_taps, axis=1), (-1, hi - lo))
+            planes.append(ops.transpose(resample.scatter_add(
+                (n_cells, hi - lo), idx_flat, spread * weight_b), (1, 0)))
 
-        return ops.reshape(ops.stack(planes, axis=0), (n_chan,) + self.grid_size)
+        return ops.reshape(ops.concatenate(planes, axis=0), (n_chan,) + self.grid_size)
 
 
 #**************************************************************************************************#

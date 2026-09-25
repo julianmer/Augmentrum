@@ -119,12 +119,7 @@ class GriddingNUFFT:
             )
 
         grid = self.interpolator.spread(kdata, np.asarray(coords))
-
-        axes = tuple(range(1, self.ndim + 1))
-        image = ops.ifftn(ops.ifftshift(grid, axis=axes), axes, norm="ortho")
-        image = ops.fftshift(image, axis=axes)
-
-        return self._deapodize(self._crop(image))
+        return self._deapodize(self._centered(grid, inverse=True))
 
     #*************#
     #   forward   #
@@ -143,13 +138,41 @@ class GriddingNUFFT:
         Returns:
             Samples "[C, K]" on image's backend.
         """
-        padded = self._pad(self._deapodize(image))
-
-        axes = tuple(range(1, self.ndim + 1))
-        grid = ops.fftshift(
-            ops.fftn(ops.ifftshift(padded, axis=axes), axes, norm="ortho"), axis=axes)
-
+        grid = self._centered(self._deapodize(image), inverse=False)
         return self.interpolator.sample(grid, self._for_interpolator(coords))
+
+    def _centered(self, x, inverse: bool):
+        """
+        The centered (i)FFT between image and oversampled grid:
+        forward, pad then fftshift(fftn(ifftshift(.))); inverse,
+        fftshift(ifftn(ifftshift(.))) then crop.
+
+        On an even grid the shifts are a sign pattern: the transform equals
+        s * M * (i)fftn(M * x), with M = (-1)^(sum of indices) and
+        s = prod((-1)^(n/2)). Two multiplies replace two full copies (the
+        shifts), and the one on the image side runs on the image before the
+        pad (after the crop), which the zeros around it cannot tell apart.
+        """
+        axes = tuple(range(1, self.ndim + 1))
+        transform = ops.ifftn if inverse else ops.fftn
+        if any(n % 2 for n in self.grid_size):
+            if not inverse:
+                x = self._pad(x)
+            out = ops.fftshift(transform(ops.ifftshift(x, axis=axes), axes, norm="ortho"),
+                               axis=axes)
+            return self._crop(out) if inverse else out
+        if getattr(self, '_boards', None) is None:
+            board = (1 - 2 * (np.indices(self.grid_size).sum(axis=0) % 2)).astype(np.float64)
+            sign = -1.0 if sum(n // 2 for n in self.grid_size) % 2 else 1.0
+            starts = [(g - n) // 2 for n, g in zip(self.im_size, self.grid_size)]
+            inner = board[tuple(slice(a, a + n) for a, n in zip(starts, self.im_size))]
+            # (image-side board, grid-side board), each with its sign placed once
+            self._boards = (inner[None], sign * board[None])
+        image_board, grid_board = (ops.cast_like(ops.match_backend(b, x), x)
+                                   for b in self._boards)
+        if inverse:
+            return self._crop(transform(x * grid_board, axes, norm="ortho")) * image_board
+        return transform(self._pad(x * image_board), axes, norm="ortho") * grid_board
 
     def _for_interpolator(self, coords: np.ndarray) -> np.ndarray:
         """
