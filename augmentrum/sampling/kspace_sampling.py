@@ -3742,7 +3742,7 @@ class KspaceUndersampling(BaseModule):
     #*************************#
     #   nufft undersampling   #
     #*************************#
-    def _apply_nufft(self, data_array, matrix, geometry, rng):
+    def _apply_nufft(self, data_array, matrix, geometry, rng, coils: int = 1):
         """
         Measure along the real trajectory and invert, instead of masking the grid.
 
@@ -3767,11 +3767,12 @@ class KspaceUndersampling(BaseModule):
         us_params.setdefault('seed', int(rng.integers(0, 2 ** 31 - 1)))
         us_params.setdefault('vd_beta', self.vd_beta)
         us_params.setdefault('acs_radius_fraction', self.acs_frac)
+        traj_params = self._seeded_traj_params(rng)
 
         shots, shot_mask, meta = KspaceSampler.get_kspace_shots_and_mask(
             header, self.trajectory, self.undersampling,
             float(self.acceleration_factor),
-            traj_params=dict(self.traj_params), us_params=us_params,
+            traj_params=traj_params, us_params=us_params,
             like=None,
         )
         self.last_meta_ = meta
@@ -3797,7 +3798,7 @@ class KspaceUndersampling(BaseModule):
         pts = self._transform_trajectory(pts)
         if self.nufft_impl == 'torchkbnufft':
             return self._nufft_torchkbnufft(data_array, matrix, pts, kmax, ndim)
-        return self._nufft_gridding(data_array, matrix, pts, kmax, ndim)
+        return self._nufft_gridding(data_array, matrix, pts, kmax, ndim, coils=coils)
 
     def _object_affine(self, ndim: int) -> np.ndarray:
         """
@@ -3872,7 +3873,7 @@ class KspaceUndersampling(BaseModule):
         return pts * self.traj_scale if self.traj_scale != 1.0 else pts
 
     def _nufft_gridding(self, data_array, matrix, pts, kmax, ndim,
-                        recon_pts=None, amplitude: float = 1.0):
+                        recon_pts=None, amplitude: float = 1.0, coils: int = 1):
         """
         Measure and reconstruct with the backend-agnostic gridding NUFFT.
 
@@ -3884,6 +3885,9 @@ class KspaceUndersampling(BaseModule):
                 from the sampled one (the dual pair). None regrids where the
                 samples were taken, which is the plain acquisition model.
             amplitude: The "|det A|" Jacobian of the dual pair's image map.
+            coils: Elements of a receive array folded into the spectral axis,
+                coil-major (see "_apply_per_coil"). Noise and the output
+                scale are then per element, as if each went through alone.
         """
         from augmentrum.processing.interpolating import LinearInterpolator
         from augmentrum.sampling.kspace_reconstructor import GriddingNUFFT
@@ -3928,15 +3932,20 @@ class KspaceUndersampling(BaseModule):
                                         * shift[None, :]).sum(axis=1)
                 weights = weights * np.exp(1j * phase)
 
-        recon = []
+        recon, noise = [], None
         for b in range(n_batch):
             plane = ops.reshape(ops.take(stack, np.array([b]), axis=0),
                                 (-1,) + im_size)
             # Measure with the chosen interpolator, always reconstruct with
             # Kaiser-Bessel: the point is to study the forward approximation.
             kdata = nufft.forward(plane, coords)
-            if self.noise_sigma_k:
+            if self.noise_sigma_k and coils == 1:
                 kdata = self._add_kspace_noise(kdata)
+            elif self.noise_sigma_k:
+                if noise is None:
+                    noise = self._coil_noise(kdata, coils, n_batch,
+                                             outer=nz if ndim == 2 else 1)
+                kdata = kdata + noise[b]
 
             if not dual:
                 recon.append(gridder.adjoint(kdata, coords))
@@ -3966,7 +3975,9 @@ class KspaceUndersampling(BaseModule):
 
         # The dual path is already unit-calibrated against the identity pair;
         # matching the input's global norm again would erase |det A|.
-        out = out if dual else self._match_scale(out, vol, data_array)
+        if not dual:
+            out = (self._match_scale(out, vol, data_array) if coils == 1 else
+                   self._match_scale_per_coil(out, vol, coils))
 
         # NumPy's FFT computes in double whatever it is handed, so on that
         # backend the reconstruction comes back complex128. A pipeline stage
@@ -4024,6 +4035,18 @@ class KspaceUndersampling(BaseModule):
         return ops.to_numpy(out) if was_numpy else out
 
     @staticmethod
+    def _match_scale_per_coil(out, vol, coils: int):
+        """"_match_scale" for each element of a folded array, coil-major last axis."""
+        shape = tuple(int(n) for n in ops.shape(out))
+        split = shape[:4] + (coils, shape[4] // coils)
+        out_c, vol_c = ops.reshape(out, split), ops.reshape(vol, split)
+        axes = (0, 1, 2, 3, 5)
+        num = ops.sqrt(ops.sum(ops.abs(vol_c) ** 2, axis=axes, keepdims=True))
+        den = ops.sqrt(ops.sum(ops.abs(out_c) ** 2, axis=axes, keepdims=True))
+        scale = num / ops.where(den > 1e-12, den, den * 0 + 1e-12)
+        return ops.reshape(out_c * ops.cast_like(scale, out_c), shape)
+
+    @staticmethod
     def _match_scale(out, vol, like):
         """
         Restore the input's overall scale.
@@ -4065,10 +4088,11 @@ class KspaceUndersampling(BaseModule):
         us_params.setdefault('seed', int(rng.integers(0, 2 ** 31 - 1)))
         us_params.setdefault('vd_beta', self.vd_beta)
         us_params.setdefault('acs_radius_fraction', self.acs_frac)
+        traj_params = self._seeded_traj_params(rng)
 
         coords, shot_mask, meta = KspaceSampler.get_kspace_shots_and_mask(
             header, self.trajectory, self.undersampling, accel,
-            traj_params=dict(self.traj_params), us_params=us_params,
+            traj_params=traj_params, us_params=us_params,
             like=None,
         )
         self.last_meta_ = meta
@@ -4158,7 +4182,7 @@ class KspaceUndersampling(BaseModule):
         n_batch = int(data_array.shape[0])
         matrix = tuple(int(s) for s in data_array.shape[1:4])
 
-        rng = np.random.default_rng(self.us_seed)
+        rng = np.random.default_rng(self._acquisition_seed(kwargs))
         if self.ksp_mode == 'nufft':
             return self._apply_nufft(data_array, matrix, geometry, rng), water_array
 
@@ -4173,17 +4197,20 @@ class KspaceUndersampling(BaseModule):
     #***********#
     def _apply_per_coil(self, data_array, **kwargs):
         """
-        Undersample a receive array, one element at a time.
+        Undersample a receive array, every element by the same acquisition.
 
         An acquisition visits one trajectory and every element of the array
-        measures along it, so each coil must see the same pattern. Each pass
-        redraws from "us_seed" rather than advancing a shared generator, which
-        gives exactly that. Thermal noise does advance, since it is independent
-        per element.
+        measures along it, so each coil must see the same pattern: one seed is
+        drawn for the call ("_acquisition_seed") and every element uses it.
+        Thermal noise is independent per element.
 
-        Looping also keeps memory where it is: the NUFFT already carries the
-        spectral axis in its channel slot, and multiplying that by the coil
-        count would put tens of thousands of channels through one transform.
+        The gridding NUFFT folds the coils into the spectral axis, which it
+        already carries in its channel slot, and measures the whole array in
+        one pass: one trajectory, one operator, instead of rebuilding both per
+        element. Noise is drawn and the output scaled per element exactly as
+        separate passes would. Memory grows with coils x spectral points, so
+        this is sized for training on a few timepoints; the other modes (and a
+        dual trajectory) still go element by element.
 
         Args:
             data_array: "(batch, X, Y, Z, T, C)" complex, on any backend.
@@ -4193,6 +4220,18 @@ class KspaceUndersampling(BaseModule):
         """
         n_coils = int(ops.shape(data_array)[5])
         shape = tuple(int(n) for n in ops.shape(data_array))[:5]
+        kwargs = dict(kwargs, acquisition_seed=self._acquisition_seed(kwargs))
+
+        if (self.ksp_mode == 'nufft' and self.nufft_impl != 'torchkbnufft'
+                and not self.dual_trajectory):
+            n_batch, nx, ny, nz, n_t = shape
+            folded = ops.reshape(ops.transpose(data_array, (0, 1, 2, 3, 5, 4)),
+                                 (n_batch, nx, ny, nz, n_coils * n_t))
+            rng = np.random.default_rng(kwargs['acquisition_seed'])
+            out = self._apply_nufft(folded, (nx, ny, nz), kwargs.get('geometry'), rng,
+                                    coils=n_coils)
+            return ops.transpose(ops.reshape(out, (n_batch, nx, ny, nz, n_coils, n_t)),
+                                 (0, 1, 2, 3, 5, 4))
 
         per_coil = []
         for c in range(n_coils):
@@ -4207,6 +4246,46 @@ class KspaceUndersampling(BaseModule):
     #*************#
     def _spatial_axes(self, ndim: int = 5) -> Tuple[int, ...]:
         return (1, 2, 3)
+
+    def _acquisition_seed(self, kwargs) -> int:
+        """
+        The seed of this call's acquisition (trajectory and undersampling).
+
+        "us_seed" when set; else the one "_apply_per_coil" drew for the whole
+        array; else one drawn now from the module's own generator, so that a
+        call replays under the pipeline's root seed instead of OS entropy.
+        """
+        if self.us_seed is not None:
+            return self.us_seed
+        if kwargs.get('acquisition_seed') is not None:
+            return int(kwargs['acquisition_seed'])
+        return int(self.rng.numpy_rng().integers(0, 2 ** 31 - 1))
+
+    def _seeded_traj_params(self, rng) -> dict:
+        """The trajectory's parameters, seeded from the acquisition unless given one."""
+        params = dict(self.traj_params)
+        params.setdefault('seed', int(rng.integers(0, 2 ** 31 - 1)))
+        return params
+
+    def _coil_noise(self, k, coils: int, n_batch: int, outer: int):
+        """
+        Thermal noise for every item of a folded receive array, drawn coil by
+        coil and item by item — the order separate passes draw it in — and
+        laid out as the folded channels are: "(outer, coil, T)".
+        """
+        shape = tuple(int(n) for n in ops.shape(k))
+        inner = shape[0] // (outer * coils)
+        per_draw = (outer * inner,) + shape[1:]
+        drawn = [[None] * n_batch for _ in range(coils)]
+        for c in range(coils):
+            for b in range(n_batch):
+                real = self.rng.normal(per_draw, like=ops.real(k), dtype=prec.real_name(k))
+                imag = self.rng.normal(per_draw, like=ops.real(k), dtype=prec.real_name(k))
+                drawn[c][b] = ops.reshape(ops.cast_like(ops.complex_from(real, imag), k),
+                                          (outer, 1, inner) + shape[1:])
+        return [float(self.noise_sigma_k) * ops.reshape(
+                    ops.concatenate([drawn[c][b] for c in range(coils)], axis=1), shape)
+                for b in range(n_batch)]
 
     def _add_kspace_noise(self, k):
         """
