@@ -4195,6 +4195,11 @@ class KspaceUndersampling(BaseModule):
     #***********#
     #   coils   #
     #***********#
+    #: Oversampled-grid entries (coils x spectral points x cells) one folded
+    #: NUFFT pass may hold: 2**27 complex64 is 1 GiB, which fits all 32 coils
+    #: of a 4-timepoint 64x64x32 training batch in a single pass.
+    FOLD_BUDGET = 2 ** 27
+
     def _apply_per_coil(self, data_array, **kwargs):
         """
         Undersample a receive array, every element by the same acquisition.
@@ -4208,9 +4213,10 @@ class KspaceUndersampling(BaseModule):
         already carries in its channel slot, and measures the whole array in
         one pass: one trajectory, one operator, instead of rebuilding both per
         element. Noise is drawn and the output scaled per element exactly as
-        separate passes would. Memory grows with coils x spectral points, so
-        this is sized for training on a few timepoints; the other modes (and a
-        dual trajectory) still go element by element.
+        separate passes would. As many coils share a pass as keep the
+        oversampled grid within "FOLD_BUDGET" entries, so memory stays bounded
+        for many spectral points too; every pass replays the same acquisition.
+        The other modes (and a dual trajectory) still go element by element.
 
         Args:
             data_array: "(batch, X, Y, Z, T, C)" complex, on any backend.
@@ -4225,13 +4231,20 @@ class KspaceUndersampling(BaseModule):
         if (self.ksp_mode == 'nufft' and self.nufft_impl != 'torchkbnufft'
                 and not self.dual_trajectory):
             n_batch, nx, ny, nz, n_t = shape
-            folded = ops.reshape(ops.transpose(data_array, (0, 1, 2, 3, 5, 4)),
-                                 (n_batch, nx, ny, nz, n_coils * n_t))
-            rng = np.random.default_rng(kwargs['acquisition_seed'])
-            out = self._apply_nufft(folded, (nx, ny, nz), kwargs.get('geometry'), rng,
-                                    coils=n_coils)
-            return ops.transpose(ops.reshape(out, (n_batch, nx, ny, nz, n_coils, n_t)),
-                                 (0, 1, 2, 3, 5, 4))
+            grid = n_t * nx * ny * nz * int(np.ceil(self.nufft_osf)) ** 3
+            per_pass = max(1, min(n_coils, self.FOLD_BUDGET // max(1, grid)))
+            parts = []
+            for lo in range(0, n_coils, per_pass):
+                hi = min(lo + per_pass, n_coils)
+                part = ops.take(data_array, np.arange(lo, hi), axis=5)
+                folded = ops.reshape(ops.transpose(part, (0, 1, 2, 3, 5, 4)),
+                                     (n_batch, nx, ny, nz, (hi - lo) * n_t))
+                rng = np.random.default_rng(kwargs['acquisition_seed'])
+                out = self._apply_nufft(folded, (nx, ny, nz), kwargs.get('geometry'), rng,
+                                        coils=hi - lo)
+                parts.append(ops.transpose(
+                    ops.reshape(out, (n_batch, nx, ny, nz, hi - lo, n_t)), (0, 1, 2, 3, 5, 4)))
+            return parts[0] if len(parts) == 1 else ops.concatenate(parts, axis=5)
 
         per_coil = []
         for c in range(n_coils):
