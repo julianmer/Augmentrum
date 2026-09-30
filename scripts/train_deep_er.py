@@ -31,6 +31,7 @@
 #     python scripts/train_deep_er.py --arm augmentrum --spatial all --noise                       #
 #     python scripts/train_deep_er.py --dry-run                                                    #
 #     python scripts/train_deep_er.py --bench 50          (or --tune: compare the speed options)   #
+#     python scripts/train_deep_er.py --figures           (the paper's figures from the runs)      #
 # Needs torchmetrics (the SSIM loss) and wandb for --wandb, beside augmentrum's torch extra.       #
 #                                                                                                  #
 ####################################################################################################
@@ -249,7 +250,7 @@ class TimepointSampler(BaseModule):
     Drawn: late, low-SNR timepoints with a decaying probability (full weight
     over the first quarter of the FID, tapering after), without replacement.
     evenly: n_timepoints fixed ones, evenly spaced over the whole FID.
-    n_timepoints None keeps the whole FID.
+    n_timepoints None keeps the whole FID; a sequence keeps exactly those timepoints.
     """
 
     SUPPORTED_BACKENDS = (Backend.PYTORCH,)
@@ -272,7 +273,9 @@ class TimepointSampler(BaseModule):
         if self.n_timepoints is None:
             self.last_timepoints_ = np.arange(n_total)
             return data_array, water_array
-        if self.evenly:
+        if not np.isscalar(self.n_timepoints):
+            keep = np.asarray(self.n_timepoints)
+        elif self.evenly:
             keep = np.unique(np.round(np.linspace(0, n_total - 1, self.n_timepoints)).astype(int))
         else:
             keep = self.draw(n_total)
@@ -630,6 +633,7 @@ def make_batch(x, y, sense):
         'img_gt':        as_channels(combine(ys)) / scale,
         'mask':          mask.expand(xs.shape[0], -1, -1, -1).contiguous(),
         'sense':         sense,
+        'scale':         scale,
     }
 
 
@@ -801,9 +805,7 @@ def preview(args):
         return spec, 4.7 - freq / sf
 
     def naa_map(vol):
-        spec, ppm = spectra(vol)
-        band = torch.as_tensor((ppm > 1.8) & (ppm < 2.2))
-        return spec[..., band].abs().sum(dim=-1)
+        return band_map(vol, sw, sf, MAP_BANDS['NAA'])
 
     z_mid = x.shape[2] // 2
     vx, vy = x.shape[0] // 2, x.shape[1] // 2
@@ -1164,7 +1166,8 @@ def condition_argv(arm, spatial, noise):
 
 #: Options that pick a run or drive the grid; everything else is passed on.
 GRID_OWN = {'arm', 'spatial', 'noise', 'seed', 'device', 'gpus', 'per_gpu',
-            'seeds', 'stagger', 'tune', 'fetch', 'resume', 'bench', 'dry_run', 'preview'}
+            'seeds', 'stagger', 'tune', 'fetch', 'resume', 'bench', 'dry_run', 'preview',
+            'figures'}
 
 
 def passed_on(parser, args):
@@ -1322,6 +1325,454 @@ def summarize(out_dir):
               f"ssim {np.mean([r['ssim'] for r in mine]):.4f}")
 
 
+#*************#
+#   figures   #
+#*************#
+# The paper's Deep-ER figures from a finished ablation (<out-dir>/figures/{main,appendix}), in the
+# style of the COWS figures (scripts/cows_figures.py, section 'paper'): each figure on its own at
+# the full A4 text width (MRM 6.92 in), text >= 7 pt,
+# Paul Tol's colour-blind-safe colours (https://sronpersonalpages.nl/~pault/) with no augmentation
+# grey and Augmentrum teal; the published method's own augmentation (phase only) warm, like the
+# conventional tools there. Change one, change the other.
+ARM_STYLE = {'none': ('No spectral augmentation', '#4D4D4D', 'o'),
+             'native': ('Phase only (Deep-ER)', '#EE7733', 's'),
+             'augmentrum': ('Augmentrum', '#009988', 'D')}
+ARM_SHORT = {'none': 'No spectral', 'native': 'Phase only', 'augmentrum': 'Augmentrum'}
+CONDITION_NAMES = {('none', False): 'No spatial', ('translation', False): 'Translation',
+                   ('rotation', False): 'Rotation', ('zoom', False): 'Zoom',
+                   ('anisotropic', False): 'Anisotropic zoom', ('shear', False): 'Shear',
+                   ('flip', False): 'Left-right flip', ('all', False): 'All spatial',
+                   ('none', True): 'Extra noise', ('all', True): 'All spatial + noise'}
+#: ppm bands of the metabolite maps (|spectrum| summed over the band)
+MAP_BANDS = {'NAA': (1.8, 2.2), 'tCr': (2.95, 3.1), 'tCho': (3.15, 3.3)}
+COL1, COL2 = 3.42, 6.92                         # MRM single and double column (inches)
+INK, DASH, REF_GREY = '#333333', (0, (3.5, 2)), '#A6A6A6'
+#: Tol's 'iridescent' (sequential, linear in lightness) and 'BuRd' (diverging)
+IRIDESCENT = ['#FEFBE9', '#FCF7D5', '#F5F3C1', '#EAF0B5', '#DDECBF', '#D0E7CA', '#C2E3D2',
+              '#B5DDD8', '#A8D8DC', '#9BD2E1', '#8DCBE4', '#81C4E7', '#7BBCE7', '#7EB2E4',
+              '#88A5DD', '#9398D2', '#9B8AC4', '#9D7DB2', '#9A709E', '#906388', '#805770',
+              '#684957', '#46353A']
+BURD = ['#2166AC', '#4393C3', '#92C5DE', '#D1E5F0', '#F7F7F7', '#FDDBC7', '#F4A582', '#D6604D',
+        '#B2182B']
+
+
+def band_map(vol, sw, sf, band):
+    """|spectrum| summed over a ppm *band* per voxel, from FIDs (..., T)."""
+    spec = torch.fft.fftshift(torch.fft.ifft(vol, dim=-1), dim=-1)
+    ppm = 4.7 - np.fft.fftshift(np.fft.fftfreq(vol.shape[-1], d=1.0 / sw)) / sf
+    return spec[..., torch.as_tensor((ppm > band[0]) & (ppm < band[1]))].abs().sum(dim=-1)
+
+
+def figure_style():
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    plt.rcParams.update({
+        'font.size': 7, 'axes.labelsize': 7.5, 'xtick.labelsize': 7, 'ytick.labelsize': 7,
+        'legend.fontsize': 7, 'axes.linewidth': 0.8, 'xtick.major.width': 0.8,
+        'ytick.major.width': 0.8, 'xtick.major.size': 2.5, 'ytick.major.size': 2.5,
+        'axes.edgecolor': INK, 'xtick.color': INK, 'ytick.color': INK, 'axes.labelcolor': INK,
+        'text.color': INK, 'axes.spines.top': False, 'axes.spines.right': False,
+        'lines.linewidth': 1.5, 'lines.markersize': 4, 'legend.frameon': False,
+        'pdf.fonttype': 42, 'ps.fonttype': 42, 'savefig.pad_inches': 0.02})
+    return plt
+
+
+def save_figure(fig, out: Path, name: str):
+    out.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out / f'{name}.png', dpi=300, bbox_inches='tight', facecolor='white')
+    fig.savefig(out / f'{name}.pdf', dpi=600, bbox_inches='tight', facecolor='white')
+    print(out / f'{name}.png')
+
+
+def ablation_runs(out_dir) -> dict:
+    """{(arm, spatial, noise): run folder} of every tested run (the first seed)."""
+    runs = {}
+    for path in sorted(Path(out_dir).glob('*/test.json')):
+        a = json.loads((path.parent / 'config.json').read_text())['args']
+        runs.setdefault((a['arm'], a['spatial'], a['noise']), path.parent)
+    return runs
+
+
+def test_mean(run: Path, metric: str, acc=None, weights: str = 'best') -> float:
+    """A run's test *metric*, the mean over both tracks (and the accelerations, or at *acc*)."""
+    results = json.loads((run / 'test.json').read_text())[weights]
+    return float(np.mean([v['mean'][metric] for k, v in results.items()
+                          if acc is None or k.split('/')[0] == f'acc{acc:g}']))
+
+
+def selected(runs: dict) -> dict:
+    """Per arm, the spatial condition with the lowest validation NRMSE: {arm: (spatial, noise)}."""
+    import pandas as pd
+    best = {}
+    for (arm, spatial, noise), run in runs.items():
+        v = pd.read_csv(run / 'log.csv').val_nrmse.min()
+        if arm not in best or v < best[arm][0]:
+            best[arm] = (v, (spatial, noise))
+    return {arm: cond for arm, (_, cond) in best.items()}
+
+
+def figure_conditions(runs: dict, out: Path, name: str):
+    """The test NRMSE and SSIM of every spatial condition (rows) and spectral arm (colour)."""
+    from matplotlib.lines import Line2D
+    plt = figure_style()
+    conds = list(CONDITION_NAMES)
+    fig, axes = plt.subplots(1, 2, figsize=(COL2, 0.27 * len(conds) + 0.9), sharey=True)
+    for ax, metric, xlabel in zip(axes, ('nrmse', 'ssim'), ('Test NRMSE', 'Test SSIM')):
+        for i in range(0, len(conds), 2):
+            ax.axhspan(i - 0.5, i + 0.5, color='#F2F2F2', lw=0, zorder=0)
+        for (arm, (text, color, marker)), dy in zip(ARM_STYLE.items(), (-0.22, 0.0, 0.22)):
+            pts = [(test_mean(runs[(arm, *c)], metric), i + dy) for i, c in enumerate(conds)
+                   if (arm, *c) in runs]
+            if pts:
+                ax.plot(*zip(*pts), ls='none', marker=marker, color=color, ms=4.5, mec='white',
+                        mew=0.4, zorder=3)
+            if (arm, 'none', False) in runs:
+                ax.axvline(test_mean(runs[(arm, 'none', False)], metric), color=color, lw=0.8,
+                           alpha=0.5, zorder=1)
+        ax.set_xlabel(xlabel)
+        ax.grid(True, axis='x', alpha=0.25, lw=0.6)
+        ax.set_axisbelow(True)
+        ax.tick_params(axis='y', length=0)
+        ax.spines['left'].set_visible(False)
+    axes[0].set_yticks(range(len(conds)))
+    axes[0].set_yticklabels([CONDITION_NAMES[c] for c in conds])
+    axes[0].set_ylim(len(conds) - 0.5, -0.5)
+    fig.legend(handles=[Line2D([], [], ls='none', marker=m, color=c, ms=4.5, label=t)
+                        for t, c, m in ARM_STYLE.values()],
+               loc='upper center', ncol=3, bbox_to_anchor=(0.55, 1.02))
+    fig.tight_layout(rect=(0, 0, 1, 0.93), w_pad=1.5)
+    save_figure(fig, out, name)
+    plt.close(fig)
+
+
+def figure_acceleration(runs: dict, metric: str, ylabel: str, out: Path, name: str):
+    """The test score against the acceleration, every run: one panel per spatial condition,
+    one line per spectral arm."""
+    from matplotlib.lines import Line2D
+    plt = figure_style()
+    accs = EVALUATION['test_acc']
+    conds = list(CONDITION_NAMES)
+    fig, axes = plt.subplots(2, 5, figsize=(COL2, 2.85), sharex=True, sharey=True)
+    for ax, cond in zip(axes.ravel(), conds):
+        for arm, (_, color, marker) in ARM_STYLE.items():
+            if (arm, *cond) in runs:
+                ax.plot(accs, [test_mean(runs[(arm, *cond)], metric, acc=a) for a in accs],
+                        '-', marker=marker, color=color, ms=3.4, lw=1.1, mec='white', mew=0.3)
+        ax.set_title(CONDITION_NAMES[cond], fontsize=7, pad=3)
+        ax.set_xticks(accs)
+        ax.grid(True, axis='y', alpha=0.25, lw=0.6)
+    for ax in axes[1]:
+        ax.set_xlabel('Acceleration')
+    for ax in axes[:, 0]:
+        ax.set_ylabel(ylabel)
+    fig.legend(handles=[Line2D([], [], color=c, marker=m, ms=3.4, lw=1.2, label=t)
+                        for t, c, m in ARM_STYLE.values()],
+               loc='upper center', ncol=3, bbox_to_anchor=(0.5, 1.02))
+    fig.tight_layout(rect=(0, 0, 1, 0.94), h_pad=0.8, w_pad=0.4)
+    save_figure(fig, out, name)
+    plt.close(fig)
+
+
+def figure_curves(runs: dict, out: Path, name: str):
+    """Validation NRMSE over training, one panel per spatial condition, one line per arm."""
+    import pandas as pd
+    from matplotlib.lines import Line2D
+    plt = figure_style()
+    conds = list(CONDITION_NAMES)
+    fig, axes = plt.subplots(2, 5, figsize=(COL2, 3.2), sharex=True, sharey=True)
+    for ax, cond in zip(axes.ravel(), conds):
+        for arm, (_, color, _) in ARM_STYLE.items():
+            if (arm, *cond) in runs:
+                d = pd.read_csv(runs[(arm, *cond)] / 'log.csv')
+                ax.plot(d.step / 1e3, d.val_nrmse, color=color, lw=1.1)
+        ax.set_title(CONDITION_NAMES[cond], fontsize=7, pad=3)
+        ax.grid(True, axis='y', alpha=0.25, lw=0.6)
+    for ax in axes[1]:
+        ax.set_xlabel('Steps [thousands]')
+    for ax in axes[:, 0]:
+        ax.set_ylabel('Validation NRMSE')
+    fig.legend(handles=[Line2D([], [], color=c, lw=1.4, label=t) for t, c, _ in ARM_STYLE.values()],
+               loc='upper center', ncol=3, bbox_to_anchor=(0.5, 1.02))
+    fig.tight_layout(rect=(0, 0, 1, 0.94), h_pad=0.8, w_pad=0.4)
+    save_figure(fig, out, name)
+    plt.close(fig)
+
+
+def figure_subjects(runs: dict, acc: float, out: Path, name: str):
+    """
+    Per test subject at one acceleration (rows: both tracks), NRMSE and SSIM side by side: each
+    arm without spatial augmentation (open) and with its validation-selected spatial condition
+    (filled).
+    """
+    from matplotlib.lines import Line2D
+    plt = figure_style()
+    pick = selected(runs)
+    names = list(MRSIChallengeDataModule.TRACK1_SUBJECTS + MRSIChallengeDataModule.TRACK2_SUBJECTS)
+    fig, axes = plt.subplots(1, 2, figsize=(COL2, 0.27 * len(names) + 0.9), sharey=True)
+    for ax, metric, xlabel in zip(axes, ('nrmse', 'ssim'), ('Test NRMSE', 'Test SSIM')):
+        per = {}
+        for key, run in runs.items():
+            results = json.loads((run / 'test.json').read_text())['best']
+            per[key] = {s: v[metric] for k, r in results.items()
+                        if k.split('/')[0] == f'acc{acc:g}' for s, v in r['subjects'].items()}
+        for i in range(0, len(names), 2):
+            ax.axhspan(i - 0.5, i + 0.5, color='#F2F2F2', lw=0, zorder=0)
+        for (arm, (_, color, marker)), dy in zip(ARM_STYLE.items(), (-0.22, 0.0, 0.22)):
+            for cond, face in ((('none', False), 'white'), (pick.get(arm), color)):
+                key = (arm, *(cond or ()))
+                pts = [(per[key][s], i + dy) for i, s in enumerate(names)
+                       if key in per and s in per[key]]
+                if pts:
+                    ax.plot(*zip(*pts), ls='none', marker=marker, color=color, mfc=face,
+                            mew=0.9, ms=4.5, zorder=3)
+        ax.axhline(len(MRSIChallengeDataModule.TRACK1_SUBJECTS) - 0.5, color='#A6A6A6', lw=0.6)
+        ax.set_xlabel(f'{xlabel}, acceleration {acc:g}')
+        ax.grid(True, axis='x', alpha=0.25, lw=0.6)
+        ax.set_axisbelow(True)
+        ax.tick_params(axis='y', length=0)
+        ax.spines['left'].set_visible(False)
+    axes[0].set_yticks(range(len(names)))
+    axes[0].set_yticklabels(names)
+    axes[0].set_ylim(len(names) - 0.5, -0.5)
+    handles = ([Line2D([], [], ls='none', marker=m, color=c, ms=4.5, label=t)
+                for t, c, m in ARM_STYLE.values()]
+               + [Line2D([], [], ls='none', marker='o', color=INK, mfc='white', ms=4.5,
+                         label='No spatial'),
+                  Line2D([], [], ls='none', marker='o', color=INK, ms=4.5,
+                         label='Best spatial (validation)')])
+    fig.legend(handles=handles, loc='upper center', ncol=5, bbox_to_anchor=(0.55, 1.02),
+               handletextpad=0.1, columnspacing=1.0)
+    fig.tight_layout(rect=(0, 0, 1, 0.92), w_pad=1.5)
+    save_figure(fig, out, name)
+    plt.close(fig)
+
+
+@torch.no_grad()
+def reconstruct(runs: dict, subject: str, track: str, acc: float, device, chunk: int = 8,
+                pull: int = 48):
+    """
+    One test subject's whole FID at one acceleration, coil-combined (X, Y, Z, T): the truth, the
+    undersampled input and each run's reconstruction (best weights), in the input's units. The
+    FID goes through the fixed test chain *pull* timepoints at a time (a whole-FID pull needs
+    ~40 GB of RAM); the fixed seed gives every slice the same coils and trajectory.
+    Returns ({key: FIDs}, spectral width, spectrometer frequency).
+    """
+    args = argparse.Namespace(**json.loads((next(iter(runs.values())) / 'config.json')
+                                           .read_text())['args'])
+    models = {}
+    for key, run in runs.items():
+        models[key] = DeepER(n_coils=args.n_coils, n_layers=args.n_layers).to(device).eval()
+        models[key].load_state_dict(torch.load(run / 'best.pt', map_location=device))
+    as_complex = lambda v: torch.complex(v[:, 0].float(), v[:, 1].float())
+    out = {k: [] for k in ('truth', 'input', *models)}
+    lo, n_total = 0, None
+    while n_total is None or lo < n_total:
+        timepoints = range(lo, lo + pull if n_total is None else min(lo + pull, n_total))
+        aug, split = fixed_set(args, torch.device('cpu'), f'test_{track}', [subject], acc,
+                               timepoints)
+        nii = aug.splits[split][0].nifti_list[0]
+        n_total, sw, sf = nii.shape[3], 1.0 / nii.dwelltime, nii.spectrometer_frequency[0]
+        coil = next(s for s in aug.pipelines[split].steps if isinstance(s, CoilSampler))
+        x, y = next(iter(aug.dataloader(split=split, framework='pytorch')))
+        sense = torch.as_tensor(coil.last_maps_, dtype=torch.cfloat, device=device)
+        x, y = x[0], y[0]
+        for c in range(0, x.shape[3], chunk):
+            b = make_batch(x[:, :, :, c:c + chunk].to(device, torch.cfloat),
+                           y[:, :, :, c:c + chunk].to(device, torch.cfloat), sense)
+            scale = b['scale'][:, 0]
+            out['truth'].append((as_complex(b['img_gt']) * scale).cpu())
+            out['input'].append((as_complex(b['inputs_img']) * scale).cpu())
+            for key, model in models.items():
+                with torch.autocast('cuda', dtype=torch.bfloat16,
+                                    enabled=args.amp and device.type == 'cuda'):
+                    reco, _ = model(b['inputs_img'], b['inputs_kspace'], b['sense'])
+                out[key].append((as_complex(reco) * scale).cpu())
+        del aug, x, y
+        lo += len(timepoints)
+    return {k: torch.cat(v).permute(1, 2, 3, 0) for k, v in out.items()}, sw, sf
+
+
+def brain_mask(truth, sw, sf):
+    """Where the true NAA map exceeds 5 % of its 99th percentile (the test truth carries
+    macromolecules outside the head too)."""
+    naa = band_map(truth, sw, sf, MAP_BANDS['NAA'])
+    return naa > 0.05 * torch.quantile(naa.flatten(), 0.99)
+
+
+def arm_order(runs):
+    return sorted(runs, key=lambda k: list(ARM_STYLE).index(k[0]))
+
+
+def figure_maps(runs: dict, fids: dict, sw, sf, metabolite: str, acc: float, out: Path,
+                name: str):
+    """
+    A metabolite map, middle slice: truth, input and each arm's reconstruction (top), their
+    signed error over the truth's 99th percentile (bottom), NRMSE in the brain under each. The
+    brain: where the true NAA map exceeds 5 % of its 99th percentile (the test truth carries
+    macromolecules outside the head too).
+    """
+    from matplotlib.colors import LinearSegmentedColormap
+    plt = figure_style()
+    maps = {k: band_map(v, sw, sf, MAP_BANDS[metabolite]) for k, v in fids.items()}
+    mask = brain_mask(fids['truth'], sw, sf)
+    z = mask.shape[2] // 2
+    top = float(torch.quantile(maps['truth'][mask], 0.99))
+    keys = ['input'] + sorted((k for k in fids if k not in ('truth', 'input')),
+                              key=lambda k: list(ARM_STYLE).index(k[0]))
+    err = {k: (maps[k] - maps['truth']) / top for k in keys}
+    nrmse = {k: float(((maps[k] - maps['truth'])[mask] ** 2).sum().sqrt()
+                      / (maps['truth'][mask] ** 2).sum().sqrt()) for k in keys}
+    lim = float(max(torch.quantile(e[mask].abs(), 0.99) for e in err.values()))
+    seq = LinearSegmentedColormap.from_list('iridescent', IRIDESCENT)
+    div = LinearSegmentedColormap.from_list('BuRd', BURD)
+    show = lambda m: np.where(mask[:, :, z].numpy(), m[:, :, z].numpy(), np.nan).T
+    fig, axes = plt.subplots(2, len(keys) + 1, figsize=(COL2, 3.25))
+    titles = {'truth': ('Truth\n', INK), 'input': (f'Input\nacceleration {acc:g}', INK)}
+    for key in runs:
+        titles[key] = (f'{ARM_SHORT[key[0]]}\n{CONDITION_NAMES[key[1:]].lower()}',
+                       ARM_STYLE[key[0]][1])
+    for ax, key in zip(axes[0], ['truth'] + keys):
+        im = ax.imshow(show(maps[key]), cmap=seq, vmin=0, vmax=top, origin='lower')
+        ax.set_title(titles[key][0], color=titles[key][1], fontsize=7, pad=3,
+                     fontweight='bold' if key in runs else None)
+    fig.colorbar(im, ax=axes[0].tolist(), fraction=0.015, pad=0.01,
+                 label=f'{metabolite} [a.u.]')
+    for ax, key in zip(axes[1, 1:], keys):
+        em = ax.imshow(show(err[key]), cmap=div, vmin=-lim, vmax=lim, origin='lower')
+        ax.set_xlabel(f'NRMSE {nrmse[key]:.3f}')
+    fig.colorbar(em, ax=axes[1].tolist(), fraction=0.015, pad=0.01,
+                 label='Error / true 99th percentile')
+    axes[1, 0].axis('off')
+    for ax in axes.ravel():
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for sp in ax.spines.values():
+            sp.set_visible(False)
+    save_figure(fig, out, name)
+    plt.close(fig)
+
+
+def figure_maps_acceleration(runs: dict, by_acc: dict, sw, sf, metabolite: str, out: Path,
+                             name: str):
+    """A metabolite map, middle slice, at every test acceleration (columns): the undersampled
+    input and each arm's reconstruction (rows), the truth top left; NRMSE in the brain under
+    each."""
+    from matplotlib.colors import LinearSegmentedColormap
+    plt = figure_style()
+    accs = sorted(by_acc)
+    truth = band_map(by_acc[accs[0]]['truth'], sw, sf, MAP_BANDS[metabolite])
+    mask = brain_mask(by_acc[accs[0]]['truth'], sw, sf)
+    z = mask.shape[2] // 2
+    top = float(torch.quantile(truth[mask], 0.99))
+    seq = LinearSegmentedColormap.from_list('iridescent', IRIDESCENT)
+    show = lambda m: np.where(mask[:, :, z].numpy(), m[:, :, z].numpy(), np.nan).T
+    rows = ['input'] + arm_order(runs)
+    fig, axes = plt.subplots(len(rows), len(accs) + 1, figsize=(COL2, 1.6 * len(rows)))
+    for ax in axes.ravel():
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for sp in ax.spines.values():
+            sp.set_visible(False)
+    im = axes[0, 0].imshow(show(truth), cmap=seq, vmin=0, vmax=top, origin='lower')
+    axes[0, 0].set_title('Truth', fontsize=7, pad=3)
+    for ax in axes[1:, 0]:
+        ax.axis('off')
+    for c, acc in enumerate(accs, start=1):
+        axes[0, c].set_title(f'Acceleration {acc:g}', fontsize=7, pad=3)
+        for r, key in enumerate(rows):
+            m = band_map(by_acc[acc][key], sw, sf, MAP_BANDS[metabolite])
+            axes[r, c].imshow(show(m), cmap=seq, vmin=0, vmax=top, origin='lower')
+            err = float(((m - truth)[mask] ** 2).sum().sqrt() / (truth[mask] ** 2).sum().sqrt())
+            axes[r, c].set_xlabel(f'NRMSE {err:.3f}', fontsize=6.5, labelpad=1)
+    for r, key in enumerate(rows):
+        text, color = (('Input', INK) if key == 'input' else
+                       (f'{ARM_SHORT[key[0]]}\n{CONDITION_NAMES[key[1:]].lower()}',
+                        ARM_STYLE[key[0]][1]))
+        axes[r, 1].text(-0.08, 0.5, text, transform=axes[r, 1].transAxes, rotation=90,
+                        ha='right', va='center', color=color, fontsize=7,
+                        fontweight='bold' if key != 'input' else None)
+    fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02,
+                 label=f'{metabolite} [a.u.]')
+    save_figure(fig, out, name)
+    plt.close(fig)
+
+
+def figure_spectra(runs: dict, fids: dict, sw, sf, acc: float, out: Path, name: str,
+                   percentiles=(90, 30)):
+    """Spectra of two voxels of the middle slice (the true NAA map's 90th and 30th percentile in
+    the brain): the truth, the input and each arm's reconstruction, |spectrum| over the truth's
+    maximum; where the voxels are, on the true NAA map (left)."""
+    from matplotlib.colors import LinearSegmentedColormap
+    plt = figure_style()
+    mask = brain_mask(fids['truth'], sw, sf)
+    z = mask.shape[2] // 2
+    naa = band_map(fids['truth'], sw, sf, MAP_BANDS['NAA'])[:, :, z]
+    inside = torch.nonzero(mask[:, :, z])
+    vals = naa[mask[:, :, z]]
+    voxels = [tuple(inside[int(torch.argmin((vals - torch.quantile(vals, p / 100)).abs()))]
+                    .tolist()) for p in percentiles]
+    ppm = 4.7 - np.fft.fftshift(np.fft.fftfreq(fids['truth'].shape[-1], d=1.0 / sw)) / sf
+    band = (ppm > 1.0) & (ppm < 4.2)
+    spectrum = lambda v: torch.fft.fftshift(torch.fft.ifft(v), dim=-1).abs().numpy()[band]
+    fig, axes = plt.subplots(1, 3, figsize=(COL2, 2.3), gridspec_kw=dict(width_ratios=(0.7, 2, 2)))
+    seq = LinearSegmentedColormap.from_list('iridescent', IRIDESCENT)
+    axes[0].imshow(np.where(mask[:, :, z].numpy(), naa.numpy(), np.nan).T, cmap=seq,
+                   origin='lower')
+    markers = (('o', '○'), ('s', '□'))
+    for (x, y), (marker, _) in zip(voxels, markers):
+        axes[0].plot(x, y, marker, ms=5, mfc='none', mec='black', mew=1.2)
+    axes[0].set_title('True NAA', fontsize=7, pad=3)
+    axes[0].axis('off')
+    lines = [('truth', 'Truth', 'black', 1.1), ('input', f'Input, acceleration {acc:g}', REF_GREY,
+                                                 0.8)]
+    lines += [(k, ARM_STYLE[k[0]][0], ARM_STYLE[k[0]][1], 1.1) for k in arm_order(runs)]
+    for ax, (x, y), (_, symbol), p in zip(axes[1:], voxels, markers, percentiles):
+        scale = spectrum(fids['truth'][x, y, z]).max()
+        for key, text, color, lw in lines:
+            ax.plot(ppm[band], spectrum(fids[key][x, y, z]) / scale, color=color, lw=lw,
+                    label=text)
+        ax.set_xlim(4.2, 1.0)
+        ax.set_yticks([])
+        ax.spines['left'].set_visible(False)
+        ax.set_xlabel('Chemical shift [ppm]')
+        ax.set_title(f'Voxel {symbol}: {p}th percentile of true NAA', fontsize=7,
+                     loc='left', pad=3)
+    fig.legend(*axes[1].get_legend_handles_labels(), loc='upper center', ncol=len(lines),
+               bbox_to_anchor=(0.55, 1.0), handlelength=1.4, columnspacing=1.0)
+    fig.tight_layout(rect=(0, 0, 1, 0.88), w_pad=0.8)
+    save_figure(fig, out, name)
+    plt.close(fig)
+
+
+def figures(args):
+    """Every Deep-ER figure of the paper, from the finished runs in --out-dir."""
+    runs = ablation_runs(args.out_dir)
+    if not runs:
+        print(f"no tested runs in {args.out_dir}")
+        return
+    main_dir = Path(args.out_dir) / 'figures' / 'main'
+    appendix = Path(args.out_dir) / 'figures' / 'appendix'
+    figure_conditions(runs, main_dir, 'fig_deep_er_conditions')
+    figure_acceleration(runs, 'nrmse', 'Test NRMSE', main_dir, 'fig_deep_er_acceleration')
+    figure_acceleration(runs, 'ssim', 'Test SSIM', appendix, 'fig_deep_er_acceleration_ssim')
+    figure_curves(runs, appendix, 'fig_deep_er_curves')
+    figure_subjects(runs, 4.0, appendix, 'fig_deep_er_subjects')
+    device = torch.device(args.device if args.device else
+                          ('cuda' if torch.cuda.is_available() else 'cpu'))
+    pick = {(arm, *cond): runs[(arm, *cond)] for arm, cond in selected(runs).items()}
+    subject = MRSIChallengeDataModule.TRACK1_SUBJECTS[0]
+    by_acc = {}
+    for acc in EVALUATION['test_acc']:
+        by_acc[acc], sw, sf = reconstruct(pick, subject, 'track1', acc, device)
+    for metabolite, where in (('NAA', main_dir), ('tCr', appendix), ('tCho', appendix)):
+        figure_maps(pick, by_acc[4.0], sw, sf, metabolite, 4.0, where,
+                    f'fig_deep_er_maps_{metabolite}')
+    figure_maps_acceleration(pick, by_acc, sw, sf, 'NAA', main_dir,
+                             'fig_deep_er_maps_acceleration')
+    figure_spectra(pick, by_acc[4.0], sw, sf, 4.0, main_dir, 'fig_deep_er_spectra')
+
+
 #**********#
 #   main   #
 #**********#
@@ -1390,6 +1841,9 @@ def main():
                         help="Render the configured pipeline on subject 0 (images, "
                              "trajectory, mask, spectra, NAA maps) and exit — for "
                              "hand-tuning modules and RANGES.")
+    parser.add_argument('--figures', action='store_true',
+                        help="Render the paper's figures from the finished runs in --out-dir "
+                             "(<out-dir>/figures), then exit.")
     parser.add_argument('--fetch', action='store_true',
                         help="Download every subject of the ablation once, then exit.")
     parser.add_argument('--tune', action='store_true',
@@ -1403,7 +1857,9 @@ def main():
 
     args = parser.parse_args()
     one_run = args.arm is not None or args.dry_run or args.bench or args.preview
-    if args.fetch:
+    if args.figures:
+        figures(args)
+    elif args.fetch:
         fetch_all(args)
     elif args.tune:
         tune(parser, args)
