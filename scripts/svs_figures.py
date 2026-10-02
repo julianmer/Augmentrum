@@ -1,38 +1,21 @@
 ####################################################################################################
-#                                         cows_figures.py                                          #
+#                                          svs_figures.py                                          #
 ####################################################################################################
 #                                                                                                  #
 # Authors: J. P. Merkofer (j.p.merkofer@tue.nl)                                                    #
 #                                                                                                  #
 # Created: 2026-09-23                                                                              #
 #                                                                                                  #
-# Purpose: The figures of the COWS study, from cows_study.py's runs and cows_benchmark.py's fits. #
+# Purpose: The figures of the single-voxel augmentation ablation (svs_ablation.py): the paper's,   #
+#          from the augmentation screen, the fitting tools and the in-vivo fits, and the earlier   #
+#          ones.                                                                                   #
 #                                                                                                  #
 ####################################################################################################
 
-"""
-Figures of the COWS study.
 
-Style: Augmentrum's result figures (phantom_ablation.py): a grey ramp with one
-accent colour, teal, for Augmentrum; reference levels in grey, labelled at the
-line end; no titles in the panels; sentence case; PNG (200 dpi) and PDF (600 dpi).
-The error is MOSAE: the mean absolute concentration error after each spectrum's
-optimal scale, macromolecules left out.
-
-    python scripts/cows_figures.py scaling  --exp results/cows/grid --testset T --bench B
-    python scripts/cows_figures.py modules  --exp results/cows/grid --testset T
-    python scripts/cows_figures.py bias     --exp results/cows/grid --testset T --bench B --n 1
-    python scripts/cows_figures.py metabolites / snr / linewidth  (as bias)
-    python scripts/cows_figures.py curves   --exp results/cows/phase2
-    python scripts/cows_figures.py convergence --exp results/cows/open_budget --testset T --bench B
-                                     (runs re-scored first: cows_study.py rescore)
-    python scripts/cows_figures.py invivo   --invivo results/cows/invivo --processed P
-
-Networks are read from --exp/runs/<condition>__n<k>__f<fold>__<variant>__s<seed>, their
-test-set concentrations computed from the checkpoint (--weights selected or final);
-the tools' from --bench/<test set>_<method>.npz (cows_benchmark.py testset).
-"""
-
+#*************#
+#   imports   #
+#*************#
 import argparse
 import glob
 import json
@@ -43,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
 
-import cows_study as S
+import svs_ablation as S
 
 
 #***********#
@@ -123,9 +106,13 @@ def mean_se(values):
     return v.mean(), (v.std(ddof=1) / np.sqrt(len(v)) if len(v) > 1 else 0.0)
 
 
-#**********#
-#   data   #
-#**********#
+#**************************************************************************************************#
+#                                           Class Results                                          #
+#**************************************************************************************************#
+#                                                                                                  #
+# An experiment's runs, a test set, and the tools' fits of it.                                     #
+#                                                                                                  #
+#**************************************************************************************************#
 class Results:
     """An experiment's runs, a test set, and the tools' fits of it."""
 
@@ -465,8 +452,8 @@ def fig_curves(R):
 #***********#
 #   paper   #
 #***********#
-# The paper's figures, from the augmentation screen (cows_screen.py): stage B for the results,
-# stage A for the strength ladders. Each figure stands on its own at the full A4 text width (MRM
+# The paper's figures, from the augmentation screen (svs_ablation.py screen): stage B for the
+# results, stage A for the strength ladders. Each figure stands on its own at the full A4 text width (MRM
 # 6.92 in), text >= 7 pt, data lines > 1 pt. One colour per method, the same in every figure,
 # COWS and Deep-ER (train_deep_er.py --figures) alike: Paul Tol's colour-blind-safe colours
 # (https://sronpersonalpages.nl/~pault/), Augmentrum cool, the fitting tools warm, no
@@ -510,7 +497,6 @@ PAPER_TOOLS = (('fsl_default', 'FSL-MRS', '#EE7733', 's'),
                ('osprey', 'Osprey', '#AA3377', '^'))
 COL1, COL2 = 3.42, 6.92                      # MRM single and double column (inches)
 DASH = (0, (3.5, 2))
-SCREEN = 'results/cows/screen'
 PAPER_TOTALS = ('tNAA', 'tCho', 'Glx', 'mI')
 #: the stage B conditions, grouped by module family, in words (n×: n times the in-vivo range)
 FAMILIES = {'coil_sampling': 'Sampling', 'average_sampling': 'Sampling', 'noise': 'Noise',
@@ -596,13 +582,13 @@ def paper_style():
 
 
 def stored(R, cond, n):
-    """A run's test-set scores as cows_study.py stored them (at --weights)."""
+    """A run's test-set scores as svs_ablation.py train stored them (at --weights)."""
     with open(os.path.join(R.run_dir(cond, n), 'result.json')) as f:
         return json.load(f)['test'][R.args.weights]
 
 
 def tool_score(R, method, metric):
-    """A tool's score on the test set; *metric* a key of cows_study.concentration_metrics."""
+    """A tool's score on the test set; *metric* a key of svs_ablation.concentration_metrics."""
     return S.concentration_metrics(R.tool(method), R.ts.concentrations, R.ts.names)[metric]
 
 
@@ -661,7 +647,7 @@ def paper_accuracy(R, metric, ylabel, name):
 
 def screen_groups():
     """[(family, [conditions])] of stage B at the picked strengths: combinations, then families."""
-    with open(os.path.join(SCREEN, 'picks.json')) as f:
+    with open(os.path.join(S.SCREEN, 'picks.json')) as f:
         picks = json.load(f)
     groups = {'Combinations': ['all-best', 'sampling-best']}
     for p in picks.values():
@@ -1032,9 +1018,9 @@ def paper_ladders(R, name):
     import re
     from matplotlib.lines import Line2D
     plt = paper_style()
-    with open(os.path.join(SCREEN, 'plan.json')) as f:
+    with open(os.path.join(S.SCREEN, 'plan.json')) as f:
         plan = json.load(f)
-    with open(os.path.join(SCREEN, 'picks.json')) as f:
+    with open(os.path.join(S.SCREEN, 'picks.json')) as f:
         picks = json.load(f)
     ladders = {}
     for j in plan:
@@ -1049,7 +1035,7 @@ def paper_ladders(R, name):
         for n, face in ((1, 'white'), (8, INK)):
             y = []
             for j in jobs:
-                p = result_path(os.path.join(SCREEN, 'A'), j['name'], n)
+                p = S.result_path(os.path.join(S.SCREEN, 'A'), j['name'], n)
                 if os.path.isfile(p):
                     with open(p) as f:
                         y.append(json.load(f)['selected_mosae'])
@@ -1076,10 +1062,6 @@ def paper_ladders(R, name):
     fig.tight_layout(rect=(0, 0, 1, 0.97), h_pad=0.9, w_pad=0.5)
     save(fig, R.args.out, name)
     plt.close(fig)
-
-
-def result_path(out, name, n):
-    return os.path.join(out, 'runs', f'{name}__n{n}__f0__A__s0', 'result.json')
 
 
 def paper_convergence(R, n, name, bins=60):
@@ -1139,7 +1121,7 @@ def paper_binned(R, x, xlabel, name, ns=(1, 8), bins=6):
 def naa_linewidth(ts, points=2 ** 16, chunk=50):
     """
     The FWHM (Hz) of each test spectrum's NAA singlet as simulated: its Lorentzian, the shared
-    Gaussian and Osprey's lineshape kernel (cows_study.simulate_rows), the FID continued to
+    Gaussian and Osprey's lineshape kernel (svs_ablation.simulate_rows), the FID continued to
     *points* for a fine frequency grid.
     """
     basis = S.load_basis(S.BASIS_DIR)
@@ -1167,7 +1149,7 @@ def paper_invivo(R, n, name, invivo='results/cows/invivo',
     """
     One held-out in-vivo scan (fold 0's validation subjects, the median of FSL-MRS's residual /
     noise) fitted by each tool and by the headline networks at *n* subjects: data black, fit in
-    the method's colour, residual above; residual / noise as cows_benchmark.py computes it.
+    the method's colour, residual above; residual / noise as svs_ablation.py invivo computes it.
     """
     import pandas as pd
     import torch
@@ -1249,7 +1231,7 @@ def paper_augmentations(R, name, stem='sub-01_acq-01_vapor7_metab_PFL', draws=6)
     rows = -(-len(panels) // cols)
     fig, axes = plt.subplots(rows, cols, figsize=(COL2, 1.55 * rows + 0.35), sharex=True)
     for ax, (cond, text, color, _) in zip(axes.ravel(), panels):
-        S.register_augment(os.path.join(SCREEN, 'B', 'specs', f'{cond}.json'))
+        S.register_augment(os.path.join(S.SCREEN, 'B', 'specs', f'{cond}.json'))
         ax.plot(ppm, ref, color=REF, lw=2.2, zorder=1)
         for k in range(draws):
             ax.plot(ppm, spectrum(cond, 100 + k), color=color, lw=0.6, alpha=0.8, zorder=2)
@@ -1435,9 +1417,9 @@ def fig_paper(R):
     R.args.out = out
 
 
-#****************#
-#   in-vivo fits  #
-#****************#
+#******************#
+#   in-vivo fits   #
+#******************#
 PANELS = (('fsl_default', 'fsl_pb', 'lcmodel'), ('osprey',))
 PANEL_NAMES = {'fsl_default': 'FSL-MRS: Voigt, shared widths',
                'fsl_pb': 'FSL-MRS PB: Voigt + a bounded Lorentzian per metabolite',
@@ -1446,7 +1428,7 @@ PANEL_NAMES = {'fsl_default': 'FSL-MRS: Voigt, shared widths',
 
 def fig_invivo(args):
     """
-    The processed scans fitted by every method, side by side (cows_benchmark.py invivo): one
+    The processed scans fitted by every method, side by side (svs_ablation.py invivo): one
     figure per percentile of FSL-MRS default's residual / noise, data black, fit red, residual
     grey above; FSL-MRS on the scan's points, LCModel and Osprey on their own.
     """
@@ -1501,11 +1483,11 @@ def fig_invivo(args):
         plt.close(fig)
 
 
-#*******************#
-#   module check    #
-#*******************#
+#******************#
+#   module check   #
+#******************#
 def proposed_modules(ranges):
-    """"MODULES" with the ranges of "cows_study.py ranges" (the 'proposed' column) put in."""
+    """"MODULES" with the ranges of "svs_ablation.py ranges" (the 'proposed' column) put in."""
     import copy
     mods = copy.deepcopy(S.MODULES)
     for mod, params in ranges.items():
@@ -1545,7 +1527,7 @@ def module_draws(fid, cf, bw, spec, draws, seed):
 def fig_module_check(args):
     """
     Every module on one processed scan (the median SNR), current ranges (left) against the ranges
-    "cows_study.py ranges" proposes (right): the scan in grey, six draws in black, real part
+    "svs_ablation.py ranges" proposes (right): the scan in grey, six draws in black, real part
     over the network's window, divided by the scan's maximum.
     """
     plt = style()
@@ -1706,21 +1688,21 @@ def fig_convergence(args):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__.split('\n')[1],
+    ap = argparse.ArgumentParser(description='The figures of the single-voxel ablation.',
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('figure', choices=list(FIGURES) + ['invivo', 'module-check',
                                                          'convergence'])
-    ap.add_argument('--exp', help="an experiment folder of cows_study.py train (runs/)")
+    ap.add_argument('--exp', help="an experiment folder of svs_ablation.py train (runs/)")
     ap.add_argument('--testset', help='the test set the networks and tools are scored on')
-    ap.add_argument('--bench', help="cows_benchmark.py testset's output folder")
+    ap.add_argument('--bench', help="svs_ablation.py bench's output folder")
     ap.add_argument('--weights', default='selected', choices=('selected', 'final'))
     ap.add_argument('--variant', default='A', choices=('A', 'PB'))
     ap.add_argument('--n', type=int, default=1, help='training subjects of the networks shown')
-    ap.add_argument('--invivo', help="cows_benchmark.py invivo's output folder")
+    ap.add_argument('--invivo', help="svs_ablation.py invivo's output folder")
     ap.add_argument('--percentiles', type=int, nargs='+', default=[10, 50, 90])
     ap.add_argument('--basis-dir', default=S.BASIS_DIR)
-    ap.add_argument('--ranges', help="cows_study.py ranges' JSON (module-check)")
-    ap.add_argument('--processed', help="cows_study.py process' output (module-check)")
+    ap.add_argument('--ranges', help="svs_ablation.py ranges' JSON (module-check)")
+    ap.add_argument('--processed', help="svs_ablation.py process' output (module-check)")
     ap.add_argument('--out', default='results/cows/figures')
     args = ap.parse_args(argv)
     if args.figure == 'invivo':

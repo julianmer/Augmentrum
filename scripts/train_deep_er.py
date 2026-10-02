@@ -1329,7 +1329,7 @@ def summarize(out_dir):
 #   figures   #
 #*************#
 # The paper's Deep-ER figures from a finished ablation (<out-dir>/figures/{main,appendix}), in the
-# style of the COWS figures (scripts/cows_figures.py, section 'paper'): each figure on its own at
+# style of the COWS figures (scripts/svs_figures.py, section 'paper'): each figure on its own at
 # the full A4 text width (MRM 6.92 in), text >= 7 pt,
 # Paul Tol's colour-blind-safe colours (https://sronpersonalpages.nl/~pault/) with no augmentation
 # grey and Augmentrum teal; the published method's own augmentation (phase only) warm, like the
