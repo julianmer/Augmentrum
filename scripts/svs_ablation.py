@@ -2561,8 +2561,8 @@ GRID_FAMILIES = {
                         'broadening-narrowing'),
     'Corruptions': ('spurious_echoes-echo-amp0p1', 'spurious_echoes-replica-amp0p2',
                     'spurious_echoes-hybrid', 'eddy_current-x2', 'eddy_current-water'),
-    'Artifacts': ('artificial_peaks-x4', 'artificial_peaks-voigt-phase-x4',
-                  'residual_water-turco-x2', 'residual_water-lobes-x2')}
+    'Other artifacts': ('artificial_peaks-x4', 'artificial_peaks-voigt-phase-x4',
+                        'residual_water-turco-x2', 'residual_water-lobes-x2')}
 GRID = ('none',) + tuple(c for members in GRID_FAMILIES.values() for c in members)
 GRID_FOLDS, GRID_SEEDS, GRID_STEPS = (0, 1, 2, 3, 4), (0,), 2_000_000
 OUT_GRID = 'results/cows/grid'
