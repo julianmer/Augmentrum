@@ -95,6 +95,8 @@ TESTSET_SUBJECTS = {0: SUBJECTS[0::2], 1: SUBJECTS[1::2]}
 TRAIN = dict(variant='A', activation='elu', dropout=0.0, width=512, depth=3, batch=16, lr=1e-4,
              weight_decay=0.0, max_steps=2_000_000, eval_every=5000)
 PROCESSING = dict(conj=False, registration_method='torch')
+#: a spec's 'source' that the run fills with its training scans' uncorrected waters (COWSStream)
+TRAINING_WATERS = 'training waters'
 
 #: Osprey's upper bounds on a basis spectrum's Lorentzian (fit_OspreyPrelimStep2.m), applied as
 #: exp(-lorentzLB t), the convention of gamma here: model PB's extra Lorentzian per basis spectrum
@@ -609,16 +611,38 @@ class COWSStream:
         data, water = pick(data, 'train'), pick(water, 'train')
         self._train_raw = (data, water)
         self._train_fids = None
+        spec = self._with_waters(self.spec, water)
         if self.cached:
             self._train_fids = process_scans(data, water, device=self.device, precision=precision)
             data, water = processed_niftis(data, self._train_fids), None
         self.aug = Augmentrum(
             data=data, water=water, split_indices={'train': list(range(len(data)))},
-            groups=pick(groups, 'train'), pipelines={'train': self.spec},
+            groups=pick(groups, 'train'), pipelines={'train': spec},
             modes={'train': 'on-the-fly'}, outputs={'train': ('data', 'clean')},
             batch_size=batch_size, device=str(self.device), seed=seed, volatile=True,
             **({'precision': precision} if precision else {}))
         self._train, self._val, self._train_full = None, None, None
+
+    def _with_waters(self, spec, waters):
+        """
+        *spec* with every 'source': 'training waters' given the training scans' waters,
+        coil-combined and averaged but neither eddy-current corrected nor referenced: the phase
+        trajectories the 'water' eddy currents draw from, the run's own subjects only.
+        """
+        wanted = [kwargs for entry in spec if isinstance(entry, dict) for kwargs in entry.values()
+                  if isinstance(kwargs, dict) and kwargs.get('source') == TRAINING_WATERS]
+        if not wanted:
+            return spec
+        spec = copy.deepcopy(spec)
+        steps = [{'processing': dict(PROCESSING, ecc=False, shift_ref=False, phase_correct=False)}]
+        # one array, (scans, T): a constructor value (a list would be injected batch by batch)
+        fids = process_scans(waters, None, steps, device=self.device,
+                             precision=self.precision).cpu().numpy()
+        for entry in spec:
+            for kwargs in (entry.values() if isinstance(entry, dict) else ()):
+                if isinstance(kwargs, dict) and kwargs.get('source') == TRAINING_WATERS:
+                    kwargs['source'] = fids
+        return spec
 
     def next_batch(self):
         """(x, y): network input and loss target, (B, 2, T) on the device."""
@@ -2520,18 +2544,60 @@ MIN_FREE_MB = 6000                  # launch only while this much GPU memory is 
 MIN_FREE_RAM_GB = 8                 # ... and this much RAM (sampling runs hold raw scans)
 PY = sys.executable
 
-#: the grid: the main paper's conditions at their stage-B strengths, longest first (stage-B hours)
-GRID = ('all-best', 'average_sampling-min1', 'coil_sampling-min1', 'eddy_current-x2',
-        'spurious_echoes-echo-amp0p1', 'phase_shift-x4', 'baseline-bspline-x2',
-        'broadening-voigt-x4', 'noise-snr15', 'none', 'frequency_shift-x4')
+#: the grid (user, 2026-10-02): the families and their conditions, each at the strength the screen
+#: picked (stage A's names) or as GRID_SPECS defines it; no augmentation besides
+GRID_FAMILIES = {
+    'Sampling': ('average_sampling-min1', 'average_sampling-consecutive-min4',
+                 'coil_sampling-min1'),
+    'Combinations': ('sampling-best', 'all-full', 'all-two-thirds', 'all-one-third'),
+    'Noise': ('noise-snr60', 'noise-snr30', 'noise-snr15', 'noise-coils'),
+    'Baseline': ('baseline-bspline-x2', 'baseline-randomwalk-x2', 'baseline-polynomial-x2'),
+    'Macromolecules': ('macromolecules-measured-x2', 'macromolecules-semiparametrized-x1',
+                       'macromolecules-parametrized-x1'),
+    'Frequency and phase': ('frequency_shift-x4', 'phase-zero-x4', 'phase-first-x4',
+                            'phase-both-x4'),
+    'Line broadening': ('broadening-voigt-x4', 'broadening-lorentzian-x4',
+                        'broadening-gaussian-x4', 'broadening-kernel-spread4',
+                        'broadening-narrowing'),
+    'Corruptions': ('spurious_echoes-echo-amp0p1', 'spurious_echoes-replica-amp0p2',
+                    'spurious_echoes-hybrid', 'eddy_current-x2', 'eddy_current-water'),
+    'Artifacts': ('artificial_peaks-x4', 'artificial_peaks-voigt-phase-x4',
+                  'residual_water-turco-x2', 'residual_water-lobes-x2')}
+GRID = ('none',) + tuple(c for members in GRID_FAMILIES.values() for c in members)
 GRID_FOLDS, GRID_SEEDS, GRID_STEPS = (0, 1, 2, 3, 4), (0,), 2_000_000
 OUT_GRID = 'results/cows/grid'
-#: all-best = the samplers and per family the best module of the screen (stage_b's picks)
-ALL_BEST = ('coil_sampling-min1', 'average_sampling-min1', 'apodization-truncate-keep0p25',
-            'artificial_peaks-voigt-phase-x4', 'baseline-bspline-x2', 'eddy_current-x2',
-            'frequency_shift-x4', 'broadening-voigt-x4', 'macromolecules-measured-x2',
-            'noise-snr15', 'phase_shift-x4', 'residual_water-turco-x2',
-            'spurious_echoes-echo-amp0p1')
+#: All: the samplers and every family's best module (the screen's picks; the phase now pivots on
+#: the centre), at full strength and at two thirds and one third of it ("weaker")
+ALL_BEST = ('coil_sampling-min1', 'average_sampling-min1', 'artificial_peaks-voigt-phase-x4',
+            'baseline-bspline-x2', 'eddy_current-x2', 'frequency_shift-x4', 'broadening-voigt-x4',
+            'macromolecules-measured-x2', 'noise-snr15', 'phase-both-x4',
+            'residual_water-turco-x2', 'spurious_echoes-echo-amp0p1')
+ALL_LEVELS = {'all-full': 1.0, 'all-two-thirds': 2 / 3, 'all-one-third': 1 / 3}
+#: the grid's conditions the screen did not run; 'training waters' is filled in by COWSStream
+GRID_SPECS = {
+    # the noise on every raw coil and transient, coupled as each scan's own channels are; SNR
+    # 3.4-75 there gives the processed spectrum the noise of SNR 15-330 (gain 4.4, median of 27
+    # scans, 2026-10-02)
+    'noise-coils': dict(samplers=[{'noise': {'covariance': 'data', 'snr': [3.4, 75.0]}}]),
+    'phase-zero-x4': dict(modules=[{'phase_shift': {'zero_order_deg': [-56.0, 56.0]}}]),
+    'phase-first-x4': dict(modules=[{'phase_shift': {'first_order_deg': [-360.0, 360.0]}}]),
+    'phase-both-x4': dict(modules=[{'phase_shift': {'zero_order_deg': [-56.0, 56.0],
+                                                    'first_order_deg': [-360.0, 360.0]}}]),
+    # narrowing that narrows: a Lorentzian of -0.78 to 0.78 Hz (the narrowest in-vivo NAA line)
+    'broadening-narrowing': dict(modules=[{'line_broadening': {
+        'mode': 'lorentzian', 'lb_hz': [-0.78, 0.78], 'narrow_cap_s': 0.2}}]),
+    'spurious_echoes-hybrid': dict(modules=[{'spurious_echoes': {'mode': 'hybrid', 'echoes': [
+        {'delay_s': [0.02, 0.3], 'amp': [0.0, 0.1], 't_echo_frac': [0.1, 0.9],
+         'T2': [0.01, 0.05], 'phase_deg': [0.0, 360.0]}]}}]),
+    # the eddy-current phase of the training subjects' own uncorrected waters
+    'eddy_current-water': dict(modules=[{'eddy_current': {
+        'mode': 'water', 'source': TRAINING_WATERS, 'strength': [0.0, 2.0]}}])}
+#: what makes a module stronger, scaled by "weaker"; an entry of a peak or echo list included
+STRENGTHS = {'line_broadening': ('lb_hz', 'gb_hz'), 'frequency_shift': ('shift_hz',),
+             'phase_shift': ('zero_order_deg', 'first_order_deg'), 'macromolecules': ('mm_scale',),
+             'residual_water': ('amplitude_scale',), 'baseline': ('baseline_frac',),
+             'eddy_current': ('strength',), 'artificial_peaks': ('amp',),
+             'spurious_echoes': ('amp',)}
 OPENNEURO = 'https://s3.amazonaws.com/openneuro.org'
 #: OpenNeuro's copy has a broken multi-RAID header (the second measurement 516 bytes off); ours is
 #: header-repaired (45 bytes, data untouched; 2026-09-17) and comes with the bundle: md5
@@ -2905,12 +2971,42 @@ def extend(args):
 #   grid   #
 #**********#
 def grid_specs():
-    """GRID's specs: stage A's by name, none, and all-best as the union of ALL_BEST."""
-    a = {j['name']: j for j in stage_a()}
-    special = {'none': dict(name='none', builtin=True),
-               'all-best': spec('all-best', [e for c in ALL_BEST for e in a[c]['samplers']],
-                                [e for c in ALL_BEST for e in a[c]['modules']])}
-    return [special[c] if c in special else a[c] for c in GRID]
+    """
+    GRID's specs, the runs with samplers first (they take several times longer): stage A's by
+    name, GRID_SPECS, none, coils + transients, and All at every level of ALL_LEVELS.
+    """
+    known = {j['name']: j for j in stage_a()}
+    known.update({name: spec(name, **entries) for name, entries in GRID_SPECS.items()})
+    best = [known[c] for c in ALL_BEST]
+    special = {'none': dict(name='none', builtin=True, samplers=[], modules=[]),
+               'sampling-best': spec('sampling-best', [e for j in best for e in j['samplers']])}
+    for name, f in ALL_LEVELS.items():
+        special[name] = spec(name, [weaker(e, f) for j in best for e in j['samplers']],
+                             [weaker(e, f) for j in best for e in j['modules']])
+    specs = [special[c] if c in special else known[c] for c in GRID]
+    return sorted(specs, key=lambda sp: not sp['samplers'])
+
+
+def weaker(entry, f):
+    """
+    A pipeline entry at *f* of its strength: every STRENGTHS range scaled by *f* (they run from
+    zero or symmetrically about it), the noise's lowest SNR divided by it, a sampler's fewest
+    coils or transients moved towards all of them (1 of 32 at f = 1, all at f = 0).
+    """
+    (module, kwargs), = copy.deepcopy(entry).items()
+    if module == 'noise':
+        kwargs['snr'] = [kwargs['snr'][0] / f, kwargs['snr'][1]]
+    elif module in SAMPLERS:
+        key = 'n_coils' if module == 'coil_sampling' else 'n_averages'
+        low, high = kwargs[key]
+        kwargs[key] = [int(round(high - (high - low) * f)), high]
+    else:
+        for part in [kwargs] + kwargs.get('peaks', []) + kwargs.get('echoes', []):
+            for key in STRENGTHS[module]:
+                if key in part:
+                    part[key] = ([v * f for v in part[key]] if isinstance(part[key], list)
+                                 else part[key] * f)
+    return {module: kwargs}
 
 
 def md5(path):
