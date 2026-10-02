@@ -519,7 +519,7 @@ def wsvd_weights_from_moments(second, first, index, dyn_mask, samples_per_transi
                               gram_index, coil_mask, conj_noise=False, conj_gram=False):
     """
     "noise_covariance", then "wsvd_weights" from a reference: in one Triton launch for complex64
-    on CUDA ("raw_processing_kernels"), reading rows *index* and *gram_index* where they lie.
+    on CUDA ("augmentrum.core.kernels"), reading rows *index* and *gram_index* where they lie.
 
     Args:
         second, first: Noise moments (S, D, C, C) and (S, D, C) ("noise_moments").
@@ -595,18 +595,18 @@ def phasor(angle):
 # A cost evaluation of the alignment needs, per transient, the dot products of its weighted rows
 # with cos and sin of theta_t = 2 pi t nu. As torch operations that is theta, its cosine and its
 # sine written out for every point, and two matrix-vector products that read the rows twice. One
-# Triton kernel ("raw_processing_kernels.shift_sums") forms the same angles in registers (in
+# Triton kernel ("augmentrum.core.kernels.shift_sums") forms the same angles in registers (in
 # float32, in the same order) and reads every row once; libdevice's cos and sin keep full
 # precision at the angles of a whole FID.
 _KERNELS = []
 
 
 def triton_kernels():
-    """The Triton kernels ("raw_processing_kernels"), imported once; None without Triton."""
+    """The Triton kernels ("augmentrum.core.kernels"), imported once; None without Triton."""
     if not _KERNELS:
         try:
-            from augmentrum.processing import raw_processing_kernels
-            _KERNELS.append(raw_processing_kernels)
+            from augmentrum.core import kernels
+            _KERNELS.append(kernels)
         except ImportError:
             _KERNELS.append(None)
     return _KERNELS[0]
@@ -1056,7 +1056,7 @@ def _align(fids, mask, sw_hz, sf_mhz, ppmlim, passes=2, bracket_iterations=1,
             and bracket_iterations == 1 and brent_iterations == 2 and locked_steps == 0
             and tuple(free_steps) == (2, 3) and max_shift_hz is None):
         # the whole search below, one transient per program
-        # ("raw_processing_kernels.align_search"), of the transients that move only
+        # ("augmentrum.core.kernels.align_search"), of the transients that move only
         per = lambda v: v[:, None].expand(b, d).reshape(-1).contiguous()
         moving = mask & (mask.sum(dim=-1, keepdim=True) > 1)
         phi, nu = triton_kernels().align_search(profile.plain.reshape(-1, 4, n),

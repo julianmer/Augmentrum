@@ -689,10 +689,16 @@ class Noise(BaseModule):
                 x = ops.transpose(x, [d for d in range(ndim) if d != axis] + [axis])
             if not ops.is_complex(x):
                 x = ops.complex_from(x, x * 0.0)     # tf.signal.fft takes complex only
-            peak = ops.amax(ops.abs(ops.fft(x)), axis=-1, keepdims=True)
-            if moved:
-                peak = ops.transpose(peak, list(range(axis)) + [ndim - 1]
-                                     + list(range(axis, ndim - 1)))
+            spectrum = ops.fft(x)
+            kernels = self._kernels(spectrum) if global_scale and ndim > 1 else None
+            if kernels is not None:
+                # |.| and every batch element's max in one pass, the spectrum read once
+                peak = kernels.peak(spectrum).reshape((-1,) + (1,) * (ndim - 1))
+            else:
+                peak = ops.amax(ops.abs(spectrum), axis=-1, keepdims=True)
+                if moved:
+                    peak = ops.transpose(peak, list(range(axis)) + [ndim - 1]
+                                         + list(range(axis, ndim - 1)))
             peak = peak / float(np.sqrt(shape[axis]))
 
         if global_scale and ndim > 1:
@@ -788,9 +794,22 @@ class Noise(BaseModule):
             return ops.sqrt((data_array + ops.cast_like(real * widened, data_array)) ** 2
                             + ops.cast_like(imag * widened, data_array) ** 2)
 
+        coupling = self._coupling(shape, dim_tags, data_array)
+        kernels = self._kernels(data_array) if coupling is not None else None
+        if kernels is not None and widened.numel() in (1, shape[0]):
+            # the draws scaled, coupled and added in one pass over the data
+            return kernels.mixed_noise(data_array, real, imag, widened, *coupling)
         noise = ops.complex_from(real * widened, imag * widened)
-        noise = self._correlate(noise, dim_tags, data_array)
+        noise = self._correlate(noise, coupling)
         return data_array + ops.cast_like(noise, data_array)
+
+    @staticmethod
+    def _kernels(data):
+        """The Triton kernels where they take *data* - complex64 on CUDA - else None."""
+        if not ops.is_torch(data) or not data.is_cuda or str(data.dtype) != 'torch.complex64':
+            return None
+        from augmentrum.processing.torch_engine import triton_kernels
+        return triton_kernels()
 
     def _via_kspace(self, data_array, sigma, snr, state, dim_tags):
         """
@@ -832,33 +851,32 @@ class Noise(BaseModule):
     #*******************#
     #   coil coupling   #
     #*******************#
-    def _correlate(self, noise, dim_tags, data=None):
+    def _coupling(self, shape, dim_tags, data):
         """
-        Give the channels the covariance the array actually has.
+        How the channels are given the covariance the array actually has.
 
         Independent draws are mixed by a square root of psi - its Cholesky factor
         where psi is one matrix, the standard way to turn white noise into noise
         with a given covariance; any root of each sample's own where the
-        covariance is measured per sample ("FromData") - in one matrix product
-        along the coil axis. Data without a coil axis has nothing to correlate and
-        is left alone.
+        covariance is measured per sample ("FromData"). Data without a coil axis
+        has nothing to correlate.
 
         Args:
-            noise: White complex noise, the shape of the data.
+            shape: The data's shape.
             dim_tags: Higher-dimension tags, to find the coil axis.
-            data: The data the noise goes onto, which a measured covariance is read from.
+            data: The complex data the noise goes onto, which a measured covariance is read
+                from.
 
         Returns:
-            The noise, correlated across channels.
+            "(root, coil axis)", the root (C, C) or (B, C, C) in the data's dtype, or None.
         """
         tags = list(dim_tags or ())
         if isinstance(self.covariance, Independent) or 'DIM_COIL' not in tags:
-            return noise
+            return None
 
         axis = 5 + tags.index('DIM_COIL')
-        shape = ops.shape(noise)
         if axis >= len(shape):
-            return noise
+            return None
 
         n_coils = int(shape[axis])
         if isinstance(self.covariance, FromData):
@@ -869,8 +887,25 @@ class Noise(BaseModule):
         else:
             root = ops.match_backend(np.linalg.cholesky(
                 self.covariance.matrix(n_coils) + 1e-8 * np.eye(n_coils, dtype=np.complex128)),
-                noise)
-        root = ops.cast_like(root, noise)
+                data)
+        return ops.cast_like(root, data), axis
+
+    def _correlate(self, noise, coupling):
+        """
+        The noise mixed by the root of "_coupling", in one matrix product along the coil axis.
+
+        Args:
+            noise: White complex noise, the shape of the data.
+            coupling: "(root, coil axis)", or None for nothing to correlate.
+
+        Returns:
+            The noise, correlated across channels.
+        """
+        if coupling is None:
+            return noise
+        root, axis = coupling
+        shape = ops.shape(noise)
+        n_coils = int(shape[axis])
 
         # channel i of the mixed noise is sum_j root[i, j] white_j: a product along the coil axis
         order = [a for a in range(len(shape)) if a != axis] + [axis]

@@ -139,9 +139,25 @@ def test_one_covariance_mixes_by_its_cholesky_factor():
     """One psi for every sample mixes white noise by its Cholesky factor along the coil axis."""
     psi = np.array([[1.0, 0.5, 0.2], [0.5, 1.0, 0.3], [0.2, 0.3, 1.0]], np.complex128)
     white = _coupled(0.0, points=64).astype(np.complex64)
-    mixed = Noise(covariance=SuppliedCovariance(psi), sigma=0.2)._correlate(white, COILS)
+    noise = Noise(covariance=SuppliedCovariance(psi), sigma=0.2)
+    mixed = noise._correlate(white, noise._coupling(white.shape, COILS, white))
     factor = np.linalg.cholesky(psi + 1e-8 * np.eye(3))
     assert np.allclose(np.asarray(mixed), white @ factor.T.astype(np.complex64), atol=1e-5)
+
+
+def test_coupled_noise_in_one_pass_is_the_steps(monkeypatch):
+    """On CUDA the draws are scaled, coupled and added by one kernel: the noise of the steps."""
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    data = np.concatenate([_coupled(0.8), _coupled(0.3, seed=1)]).astype(np.complex64)
+    data = torch.as_tensor(data, device='cuda')
+    fused, _ = Noise(covariance='data', snr=[5.0, 20.0], seed=0).process_tensor(
+        data, dim_tags=COILS)
+    monkeypatch.setattr(Noise, '_kernels', staticmethod(lambda *args: None))
+    steps, _ = Noise(covariance='data', snr=[5.0, 20.0], seed=0).process_tensor(
+        data, dim_tags=COILS)
+    assert ((fused - steps).abs().max() / (steps - data).abs().max()).item() < 1e-5
 
 
 def test_a_covariance_must_match_the_array():

@@ -1,15 +1,17 @@
 ####################################################################################################
-#                                     raw_processing_kernels.py                                    #
+#                                            kernels.py                                            #
 ####################################################################################################
 #                                                                                                  #
 # Authors: J. P. Merkofer (j.p.merkofer@tue.nl)                                                    #
 #                                                                                                  #
 # Created: 2026-09-21                                                                              #
 #                                                                                                  #
-# Purpose: The Triton kernels of RawProcessor's torch engine ("torch_engine"), each in place of    #
-#          the many small kernels its torch operations launch: the wSVD coil weights, the coil     #
-#          combination of a pooled batch, the alignment target's distances, the alignment cost's   #
-#          sums and the whole alignment search, and the outlier medians. A module of its own,      #
+# Purpose: The Triton kernels of Augmentrum's torch paths, each in place of the many small         #
+#          kernels its torch operations launch. RawProcessor's torch engine ("torch_engine"): the  #
+#          wSVD coil weights, the coil combination of a pooled batch, the alignment target's       #
+#          distances, the alignment cost's sums and the whole alignment search, and the outlier    #
+#          medians and statistics. Noise: the spectrum peak of every sample, and white draws       #
+#          scaled, coupled across the coils and added, in one pass each. A module of its own,      #
 #          imported on first use, so that Triton stays optional.                                   #
 #                                                                                                  #
 ####################################################################################################
@@ -17,6 +19,8 @@
 #*************#
 #   imports   #
 #*************#
+import math
+
 import numpy as np
 import torch
 import triton
@@ -799,3 +803,88 @@ def unlike_step(fids, target, mask, sdlimit):
     unlike_keep_kernel[(b,)](energy, cross, square, mask.contiguous(), keep, d, chunks,
                              float(sdlimit), D_PAD=d_pad, CHUNKS_PAD=triton.next_power_of_2(chunks))
     return keep
+
+
+#***********#
+#   noise   #
+#***********#
+#: Points each program takes the peak of.
+PEAK_POINTS = 4096
+
+
+@triton.jit
+def peak_kernel(x_ptr, out_ptr, N, BLOCK: tl.constexpr):
+    """
+    One program per (sample, block of points): the block's largest |x|, folded into the
+    sample's maximum (exact in any order).
+    """
+    b = tl.program_id(0)
+    p = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    q = tl.arange(0, 2)
+    z = tl.load(x_ptr + (b.to(tl.int64) * N + p[:, None]) * 2 + q[None, :],
+                mask=(p < N)[:, None], other=0.0)
+    re, im = tl.split(z)
+    tl.atomic_max(out_ptr + b, tl.max(libdevice.hypot(re, im), axis=0))
+
+
+def peak(x):
+    """The largest |x| of every sample of complex64 *x* (B, ...), (B,) float32."""
+    b, n = x.shape[0], x[0].numel()
+    out = torch.zeros(b, dtype=torch.float32, device=x.device)
+    peak_kernel[(b, triton.cdiv(n, PEAK_POINTS))](torch.view_as_real(x.contiguous()), out, n,
+                                                  BLOCK=PEAK_POINTS)
+    return out
+
+
+@triton.jit
+def mixed_noise_kernel(data_ptr, real_ptr, imag_ptr, scale_ptr, root_ptr, out_ptr, M, C, K,
+                       C_PAD: tl.constexpr, K_PAD: tl.constexpr):
+    """
+    One program per (point m, sample b): out[b, m] = data[b, m] + root[b] s_b (real + i
+    imag)[b, m], each (C, K) with the coils as rows - the white draws at the sample's level,
+    coupled by a root of its channels' covariance, on the data.
+    """
+    m = tl.program_id(0)
+    b = tl.program_id(1)
+    i = tl.arange(0, C_PAD)
+    k = tl.arange(0, K_PAD)
+    q = tl.arange(0, 2)
+    root = tl.load(root_ptr + ((b * C + i[:, None]) * C + i[None, :])[:, :, None] * 2
+                   + q[None, None, :], mask=((i[:, None] < C) & (i[None, :] < C))[:, :, None],
+                   other=0.0)
+    r_re, r_im = tl.split(root)
+    s = tl.load(scale_ptr + b)
+    offset = ((b.to(tl.int64) * M + m) * C + i[:, None]) * K + k[None, :]
+    inside = (i[:, None] < C) & (k[None, :] < K)
+    n_re = tl.load(real_ptr + offset, mask=inside, other=0.0) * s
+    n_im = tl.load(imag_ptr + offset, mask=inside, other=0.0) * s
+    re = (tl.dot(r_re, n_re, input_precision='ieee')
+          - tl.dot(r_im, n_im, input_precision='ieee'))
+    im = (tl.dot(r_re, n_im, input_precision='ieee')
+          + tl.dot(r_im, n_re, input_precision='ieee'))
+    d = tl.load(data_ptr + offset[:, :, None] * 2 + q[None, None, :], mask=inside[:, :, None],
+                other=0.0)
+    d_re, d_im = tl.split(d)
+    tl.store(out_ptr + offset[:, :, None] * 2 + q[None, None, :], tl.join(d_re + re, d_im + im),
+             mask=inside[:, :, None])
+
+
+def mixed_noise(data, real, imag, scale, root, axis):
+    """
+    "Noise._add" with its channels coupled, in one pass: complex64 *data* (B, ...) with its coils
+    at *axis*, the white draws *real* and *imag* (float32, its shape), the level *scale* (one per
+    sample, or one for all) and the root *root* (B, C, C) or (C, C). Returns data + root
+    (scale (real + i imag)) along the coil axis.
+    """
+    shape = data.shape
+    b, c = shape[0], shape[axis]
+    m, k = math.prod(shape[1:axis]), math.prod(shape[axis + 1:])
+    root = root.to(data.dtype).expand(b, c, c).contiguous()
+    scale = scale.to(torch.float32).reshape(-1).expand(b).contiguous()
+    out = torch.empty_like(data)
+    mixed_noise_kernel[(m, b)](
+        torch.view_as_real(data.contiguous()), real.contiguous(), imag.contiguous(), scale,
+        torch.view_as_real(root), torch.view_as_real(out), m, c, k,
+        C_PAD=max(16, triton.next_power_of_2(c)), K_PAD=max(16, triton.next_power_of_2(k)),
+        num_warps=8)
+    return out
