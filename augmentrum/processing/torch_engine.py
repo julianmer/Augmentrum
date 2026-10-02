@@ -1137,6 +1137,16 @@ def unlike_mask(fids, mask, sdlimit=1.96, niter=2):
     """
     b, d, n = fids.shape
     parts = torch.view_as_real(fids).permute(0, 2, 3, 1).contiguous()    # (B, T, 2, D)
+    kernels = triton_kernels() if fids.is_cuda and fids.dtype == torch.complex64 else None
+    if kernels is not None:
+        # each step's distances and statistics in two launches
+        target, keep = kernels.median(parts, mask), mask
+        for step in range(niter):
+            keep = kernels.unlike_step(fids, target, mask, sdlimit)
+            if step < niter - 1:
+                target = kernels.median(parts, keep)
+        return keep
+
     halved = torch.view_as_real(halve_first(fids.to(complex_of(fids)))).reshape(b, d, 2 * n)
     energy = (halved ** 2).sum(dim=-1)
     weights = mask.to(real_of(fids))
@@ -1165,9 +1175,6 @@ def _real_median(parts, mask):
     The mean of the two middle values for an even count - torch.median would
     return the lower one - with the invalid entries sorted behind the valid.
     """
-    kernels = triton_kernels() if parts.is_cuda and parts.dtype == torch.float32 else None
-    if kernels is not None:
-        return kernels.median(parts, mask)
     count = mask.sum(dim=-1)
     ordered = torch.where(mask[:, None, None, :], parts, torch.inf).sort(dim=-1).values
     shape = ordered.shape[:-1] + (1,)

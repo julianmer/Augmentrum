@@ -692,7 +692,7 @@ BEYOND: tl.constexpr = 3.0e38
 
 
 @triton.jit
-def median_kernel(parts_ptr, mask_ptr, count_ptr, out_ptr, R, ROWS_PER_SAMPLE, D,
+def median_kernel(parts_ptr, mask_ptr, out_ptr, R, ROWS_PER_SAMPLE, D,
                   D_PAD: tl.constexpr, BLOCK_R: tl.constexpr):
     """
     One program per block of rows: each row's median over the entries its sample keeps, the mean
@@ -708,7 +708,7 @@ def median_kernel(parts_ptr, mask_ptr, count_ptr, out_ptr, R, ROWS_PER_SAMPLE, D
     values = tl.load(parts_ptr + r[:, None].to(tl.int64) * D + d[None, :],
                      mask=rows[:, None] & keep, other=BEYOND)
     ordered = tl.sort(tl.where(keep, values, BEYOND), dim=1)
-    count = tl.load(count_ptr + sample, mask=rows, other=1)
+    count = tl.sum(keep.to(tl.int32), axis=1)
     low = tl.sum(tl.where(d[None, :] == ((count - 1) // 2)[:, None], ordered, 0.0), axis=1)
     high = tl.sum(tl.where(d[None, :] == (count // 2)[:, None], ordered, 0.0), axis=1)
     tl.store(out_ptr + r, 0.5 * (low + high), mask=rows)
@@ -723,7 +723,79 @@ def median(parts, mask):
     flat = parts.contiguous().reshape(-1, d)
     out = torch.empty(flat.shape[0], dtype=parts.dtype, device=parts.device)
     median_kernel[(triton.cdiv(flat.shape[0], MEDIAN_ROWS),)](
-        flat, mask.to(torch.int8).contiguous(), mask.sum(dim=-1).to(torch.int32).contiguous(),
-        out, flat.shape[0], flat.shape[0] // b, d, D_PAD=triton.next_power_of_2(d),
-        BLOCK_R=MEDIAN_ROWS)
+        flat, mask.contiguous(), out, flat.shape[0], flat.shape[0] // b, d,
+        D_PAD=triton.next_power_of_2(d), BLOCK_R=MEDIAN_ROWS)
     return out.reshape(parts.shape[:-1])
+
+
+#*************#
+#   unalike   #
+#*************#
+#: Points (real and imaginary parts) each program sums over.
+UNLIKE_POINTS = 256
+
+
+@triton.jit
+def unlike_sums_kernel(x_ptr, target_ptr, energy_ptr, cross_ptr, square_ptr, D, N, CHUNKS,
+                       D_PAD: tl.constexpr, BLOCK: tl.constexpr):
+    """
+    One program per (sample, block of points): the block's sums of x^2 and x y for every
+    transient x and of y^2 for the target y, first points halved (as their spectra take them).
+    """
+    b = tl.program_id(0)
+    chunk = tl.program_id(1)
+    d = tl.arange(0, D_PAD)
+    p = chunk * BLOCK + tl.arange(0, BLOCK)
+    x = tl.load(x_ptr + (b.to(tl.int64) * D + d[:, None]) * N + p[None, :],
+                mask=(d[:, None] < D) & (p[None, :] < N), other=0.0)
+    x = tl.where(p[None, :] < 2, 0.5 * x, x)
+    y = tl.load(target_ptr + b * N + p, mask=p < N, other=0.0)
+    y = tl.where(p < 2, 0.5 * y, y)
+    out = (b * D + d) * CHUNKS + chunk
+    tl.store(energy_ptr + out, tl.sum(x * x, axis=1), mask=d < D)
+    tl.store(cross_ptr + out, tl.sum(x * y[None, :], axis=1), mask=d < D)
+    tl.store(square_ptr + b * CHUNKS + chunk, tl.sum(y * y, axis=0))
+
+
+@triton.jit
+def unlike_keep_kernel(energy_ptr, cross_ptr, square_ptr, mask_ptr, keep_ptr, D, CHUNKS, sdlimit,
+                       D_PAD: tl.constexpr, CHUNKS_PAD: tl.constexpr):
+    """
+    One program per sample: every transient's distance to the target from the block sums, the
+    mean and standard deviation over the valid ones, and those within *sdlimit* of the mean kept.
+    """
+    b = tl.program_id(0)
+    d = tl.arange(0, D_PAD)
+    c = tl.arange(0, CHUNKS_PAD)
+    valid = tl.load(mask_ptr + b * D + d, mask=d < D, other=0) != 0
+    parts = (b * D + d[:, None]) * CHUNKS + c[None, :]
+    inside = (d[:, None] < D) & (c[None, :] < CHUNKS)
+    energy = tl.sum(tl.load(energy_ptr + parts, mask=inside, other=0.0), axis=1)
+    cross = tl.sum(tl.load(cross_ptr + parts, mask=inside, other=0.0), axis=1)
+    square = tl.sum(tl.load(square_ptr + b * CHUNKS + c, mask=c < CHUNKS, other=0.0), axis=0)
+    metric = tl.sqrt(tl.maximum(energy - 2.0 * cross + square, 0.0))
+    weight = valid.to(tl.float32)
+    count = tl.sum(weight, axis=0)
+    avg = tl.sum(metric * weight, axis=0) / count
+    std = tl.sqrt(tl.sum((metric - avg) * (metric - avg) * weight, axis=0) / count)
+    tl.store(keep_ptr + b * D + d, valid & (tl.abs(metric - avg) <= sdlimit * std), mask=d < D)
+
+
+def unlike_step(fids, target, mask, sdlimit):
+    """
+    The transients of complex64 *fids* (B, D, T) that *mask* (B, D) marks and that lie within
+    *sdlimit* standard deviations of their sample's mean distance to *target* (B, T, 2).
+    """
+    b, d, t = fids.shape
+    chunks = triton.cdiv(2 * t, UNLIKE_POINTS)
+    energy = torch.empty((b, d, chunks), dtype=torch.float32, device=fids.device)
+    cross = torch.empty_like(energy)
+    square = torch.empty((b, chunks), dtype=torch.float32, device=fids.device)
+    keep = torch.empty((b, d), dtype=torch.bool, device=fids.device)
+    d_pad = triton.next_power_of_2(d)
+    unlike_sums_kernel[(b, chunks)](torch.view_as_real(fids.contiguous()), target.contiguous(),
+                                    energy, cross, square, d, 2 * t, chunks, D_PAD=d_pad,
+                                    BLOCK=UNLIKE_POINTS)
+    unlike_keep_kernel[(b,)](energy, cross, square, mask.contiguous(), keep, d, chunks,
+                             float(sdlimit), D_PAD=d_pad, CHUNKS_PAD=triton.next_power_of_2(chunks))
+    return keep
