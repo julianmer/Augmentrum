@@ -560,6 +560,18 @@ def phasor(angle):
 # order) and reads every row once; libdevice's cos and sin keep full precision at the angles of
 # a whole FID.
 _SHIFT_KERNEL = []
+_KERNELS = {}
+
+
+def triton_kernels(name):
+    """The Triton module "augmentrum.processing._<name>_kernel", imported once; None without it."""
+    if name not in _KERNELS:
+        try:
+            _KERNELS[name] = __import__(f'augmentrum.processing._{name}_kernel',
+                                        fromlist=['_'])
+        except ImportError:
+            _KERNELS[name] = None
+    return _KERNELS[name]
 
 
 def _load_shift_kernel():

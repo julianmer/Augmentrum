@@ -66,6 +66,14 @@ class _PooledRaw:
         import torch
         from augmentrum.processing import torch_engine as engine
 
+        pool = self.rows.tensor
+        kernels = engine.triton_kernels('combine') if pool.is_cuda else None
+        if (kernels is not None and pool.dtype == self.dtype == torch.complex64
+                and pool.dim() == 7 and pool.is_contiguous() and weights.dim() == 3
+                and self.tags[:2] == ['DIM_COIL', 'DIM_DYN']):
+            # one pass over the rows where they lie, the undrawn coils unread
+            return kernels.combine(pool, self.rows.indices, weights.to(self.dtype)).permute(
+                0, 1, 3, 2)
         out = []
         for b, row in enumerate(self.rows.rows()):
             x = RawProcessor._to_torch_layout(move_axis(row[None], RawProcessor.SPECTRAL_AXIS, -1),
