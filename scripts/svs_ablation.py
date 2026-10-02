@@ -377,10 +377,37 @@ class SignalModel(nn.Module):
         return (spec, ba) if baseline_out else spec
 
     def loss(self, theta, target):
-        """Mean squared real and imaginary error over the window, per spectrum (B,)."""
-        w = slice(self.first, self.last)
-        spec = self.forward(theta)[:, w]
-        return ((spec.real - target[:, 0, w]) ** 2 + (spec.imag - target[:, 1, w]) ** 2).mean(-1)
+        """
+        Mean squared real and imaginary error over the window, per spectrum (B,): "forward" with
+        every complex product written out on (real, imaginary) pairs, so that the compiler can
+        fuse it, and the spectrum formed on the window only.
+        """
+        p = self.split(theta)
+        t, w = self.t, slice(self.first, self.last)
+        b_re, b_im = self.basis_ri[..., 0], self.basis_ri[..., 1]
+        if self.variant == 'PB':
+            decay = torch.exp(-(p['sigma'] ** 2 * t) * t)
+            wk = torch.exp(-p['gamma'][:, None, :] * t[None, :, None]) * p['con'][:, None, :]
+            m_re, m_im = torch.einsum('btn,tn->bt', wk, b_re), torch.einsum('btn,tn->bt', wk, b_im)
+        else:
+            decay = torch.exp(-(p['gamma'] + p['sigma'] ** 2 * t) * t)
+            m_re, m_im = p['con'] @ b_re.T, p['con'] @ b_im.T
+        l_re, l_im = decay * torch.cos(p['eps'] * t), -decay * torch.sin(p['eps'] * t)
+        s_re, s_im = fft_pair(l_re * m_re - l_im * m_im, l_re * m_im + l_im * m_re)
+        angle = -(p['phi0'] + p['phi1'] * self.f[w])
+        e_re, e_im = torch.cos(angle), torch.sin(angle)
+        r_re = (e_re * s_re[:, w] - e_im * s_im[:, w] + p['baseline'] @ self.baseline_ri[w, :, 0].T
+                - target[:, 0, w])
+        r_im = (e_re * s_im[:, w] + e_im * s_re[:, w] + p['baseline'] @ self.baseline_ri[w, :, 1].T
+                - target[:, 1, w])
+        return (r_re ** 2 + r_im ** 2).mean(-1)
+
+
+@torch.compiler.disable
+def fft_pair(re, im):
+    """The FFT of re + i im as a (real, imaginary) pair, left to cuFFT outside a compiled graph."""
+    out = torch.view_as_real(torch.fft.fft(torch.complex(re, im), dim=-1))
+    return out[..., 0], out[..., 1]
 
 
 #**************************************************************************************************#
@@ -1173,19 +1200,27 @@ class GraphedStep:
     """
     The training step (network, signal model, loss, backward, Adam) captured once as a CUDA graph
     and replayed: one launch instead of a few hundred small kernels, each of which waits for its
-    turn while other jobs share the GPU. The first *warmup* steps run eagerly on a side stream
-    (real training steps); the training loss is summed on the device and read at evaluations.
+    turn while other jobs share the GPU. The forward pass and the loss are compiled first, which
+    fuses their kernels (and those of the backward pass) into far fewer; random ops stay the eager
+    ones. The first *warmup* steps run eagerly on a side stream (real training steps, the first
+    one compiles); the training loss is summed on the device and read at evaluations.
     """
 
     def __init__(self, net, model, opt, warmup=3):
+        import torch._inductor.config
+        torch._inductor.config.fallback_random = True
         self.net, self.model, self.opt, self.warmup = net, model, opt, warmup
         self.graph, self.eager, self.count = None, 0, 0
         self.stream = torch.cuda.Stream()
         self.loss_sum = None
+        self.loss = torch.compile(self._loss)
+
+    def _loss(self, x, y):
+        theta_n, norm = self.net(x)
+        return spectral_loss(self.model, theta_n, y, norm).mean()
 
     def _step(self, x, y):
-        theta_n, norm = self.net(x)
-        loss = spectral_loss(self.model, theta_n, y, norm).mean()
+        loss = self.loss(x, y)
         loss.backward()
         self.opt.step()
         self.loss_sum += loss.detach()
