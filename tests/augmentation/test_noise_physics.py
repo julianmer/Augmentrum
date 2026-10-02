@@ -31,7 +31,7 @@ import pytest
 from nifti_mrs_plus.core import DataState
 
 from augmentrum.augmentation.noise import (
-    FromSensitivity, Independent, Noise, SuppliedCovariance,
+    FromData, FromSensitivity, Independent, Noise, SuppliedCovariance,
 )
 from augmentrum.sampling import Birdcage
 
@@ -111,6 +111,37 @@ def test_a_supplied_covariance_is_used_as_given():
     drawn = np.corrcoef((np.asarray(noisy) - 1.0).reshape(-1, 2).T.real)
 
     assert abs(drawn[0, 1] - 0.8) < 0.1
+
+
+def _coupled(rho, points=4000, seed=0):
+    """(1, 1, 1, 1, points, 3) noise whose first two channels correlate by *rho*."""
+    rng = np.random.default_rng(seed)
+    white = rng.standard_normal((points, 3)) + 1j * rng.standard_normal((points, 3))
+    psi = np.array([[1.0, rho, 0.0], [rho, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    return (white @ np.linalg.cholesky(psi).T).reshape(1, 1, 1, 1, points, 3)
+
+
+def test_a_measured_covariance_is_each_samples_own():
+    """FromData reads every sample's coupling off its own noise, and the added noise has it."""
+    data = np.concatenate([_coupled(0.8), _coupled(0.0, seed=1)]).astype(np.complex64)
+    psi = np.asarray(FromData().matrices(data, coil_axis=5))
+    assert abs(abs(psi[0, 0, 1]) - 0.8) < 0.1 and abs(psi[1, 0, 1]) < 0.1
+    assert np.allclose(np.diagonal(psi, axis1=1, axis2=2), 1.0)
+
+    noisy, _ = Noise(covariance='data', sigma=0.2, seed=0).process_tensor(
+        data, dim_tags=COILS)
+    added = (np.asarray(noisy) - data).reshape(2, -1, 3)
+    assert abs(np.corrcoef(added[0].T.real)[0, 1] - 0.8) < 0.1
+    assert abs(np.corrcoef(added[1].T.real)[0, 1]) < 0.1
+
+
+def test_one_covariance_mixes_by_its_cholesky_factor():
+    """One psi for every sample mixes white noise by its Cholesky factor along the coil axis."""
+    psi = np.array([[1.0, 0.5, 0.2], [0.5, 1.0, 0.3], [0.2, 0.3, 1.0]], np.complex128)
+    white = _coupled(0.0, points=64).astype(np.complex64)
+    mixed = Noise(covariance=SuppliedCovariance(psi), sigma=0.2)._correlate(white, COILS)
+    factor = np.linalg.cholesky(psi + 1e-8 * np.eye(3))
+    assert np.allclose(np.asarray(mixed), white @ factor.T.astype(np.complex64), atol=1e-5)
 
 
 def test_a_covariance_must_match_the_array():

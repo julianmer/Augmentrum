@@ -27,7 +27,7 @@ from nifti_mrs_plus import Backend, ops
 
 
 __all__ = ['Noise',
-           'NoiseCovariance', 'Independent', 'FromSensitivity', 'SuppliedCovariance',
+           'NoiseCovariance', 'Independent', 'FromSensitivity', 'SuppliedCovariance', 'FromData',
            'NoiseProfile', 'Flat', 'SuppliedProfile', 'FromNoiseScan']
 
 
@@ -149,6 +149,56 @@ class SuppliedCovariance(NoiseCovariance):
             raise ValueError(
                 f"psi is {self.psi.shape} but the data has {n_coils} channels.")
         return self._normalized(self.psi)
+
+
+#**************************************************************************************************#
+#                                         Class FromData                                           #
+#**************************************************************************************************#
+#                                                                                                  #
+# The coupling each sample's own channels show, measured where its FIDs hold only noise.           #
+#                                                                                                  #
+#**************************************************************************************************#
+class FromData(NoiseCovariance):
+    """
+    The coupling each sample's own channels show, measured where its FIDs hold only noise.
+
+    Raw multi-coil data carries its array's noise covariance in the tails of its
+    FIDs, which is where coil combination estimates it (FSL-MRS's wSVD, the last
+    tenth of every FID). Measured there per sample, as np.cov does over every
+    voxel, transient and point of the tail, and given a unit diagonal like any
+    psi here, it makes the added noise couple the channels as that scan's array
+    does. A measurement of each scan, not a model: the array, its tuning and the
+    sample are all in it.
+
+    Args:
+        fraction: The share of each FID, from its end, that is taken as noise.
+    """
+
+    def __init__(self, fraction=0.1):
+        self.fraction = float(fraction)
+
+    def matrix(self, n_coils: int) -> np.ndarray:
+        raise TypeError('FromData measures every sample\'s covariance from its data: "matrices"')
+
+    def matrices(self, data, coil_axis, spectral_axis=4):
+        """
+        Every sample's channel covariance, "(B, C, C)" with unit diagonal, on the data's backend.
+
+        Args:
+            data: Time-domain data, "(B, ...)", its spectral axis at *spectral_axis*.
+            coil_axis: Where its channels are.
+            spectral_axis: Where its points are.
+        """
+        shape = ops.shape(data)
+        batch, n, coils = int(shape[0]), int(shape[spectral_axis]), int(shape[coil_axis])
+        tail = ops.take(data, np.arange(n - max(2, round(self.fraction * n)), n),
+                        axis=spectral_axis)
+        order = [a for a in range(len(shape)) if a != coil_axis] + [coil_axis]
+        x = ops.reshape(ops.transpose(tail, order), (batch, -1, coils))
+        x = x - ops.mean(x, axis=1, keepdims=True)
+        cov = ops.matmul(ops.transpose(x, (0, 2, 1)), ops.conj(x))
+        sd = ops.cast_like(ops.sqrt(ops.sum(ops.abs(x) ** 2, axis=1)), cov)    # its diagonal
+        return cov / (sd[:, :, None] * sd[:, None, :])
 
 
 #**************************************************************************************************#
@@ -396,7 +446,8 @@ class Noise(BaseModule):
 
     Args:
         covariance: How the channels of a receive array share their noise;
-            :class:"Independent" by default.
+            :class:"Independent" by default. 'independent' and 'data' (each
+            sample's own, :class:"FromData") name them, for a spec in JSON.
         profile: How loud the noise is from place to place across a volume;
             :class:"Flat" by default. An image-domain description, so it is
             applied in image space only.
@@ -434,6 +485,18 @@ class Noise(BaseModule):
     # The level broadcasts, so a batch can carry one SNR / sigma per sample.
     PER_SAMPLE_PARAMS = ('snr', 'snr_db', 'sigma', 'sigma_frac')
 
+    @property
+    def covariance(self):
+        """How the channels share their noise (a NoiseCovariance)."""
+        return self._covariance
+
+    @covariance.setter
+    def covariance(self, value):
+        # a name as a spec in JSON gives it, however it is set - a pipeline sets its settings too
+        if isinstance(value, str):
+            value = {'independent': Independent, 'data': FromData}[value]()
+        self._covariance = value or Independent()
+
     #: The spatial axes of a batched array, for the k-space paths.
     SPATIAL_AXES = (1, 2, 3)
 
@@ -448,7 +511,7 @@ class Noise(BaseModule):
                  global_scale: Optional[bool] = None):
         super().__init__()
 
-        self.covariance = covariance or Independent()
+        self.covariance = covariance
         self.profile = profile or Flat()
         self.snr = snr
         self.snr_db = snr_db
@@ -726,7 +789,7 @@ class Noise(BaseModule):
                             + ops.cast_like(imag * widened, data_array) ** 2)
 
         noise = ops.complex_from(real * widened, imag * widened)
-        noise = self._correlate(noise, dim_tags)
+        noise = self._correlate(noise, dim_tags, data_array)
         return data_array + ops.cast_like(noise, data_array)
 
     def _via_kspace(self, data_array, sigma, snr, state, dim_tags):
@@ -769,17 +832,21 @@ class Noise(BaseModule):
     #*******************#
     #   coil coupling   #
     #*******************#
-    def _correlate(self, noise, dim_tags):
+    def _correlate(self, noise, dim_tags, data=None):
         """
         Give the channels the covariance the array actually has.
 
-        Independent draws are mixed by the Cholesky factor of psi, which is the
-        standard way to turn white noise into noise with a given covariance.
-        Data without a coil axis has nothing to correlate and is left alone.
+        Independent draws are mixed by a square root of psi - its Cholesky factor
+        where psi is one matrix, the standard way to turn white noise into noise
+        with a given covariance; any root of each sample's own where the
+        covariance is measured per sample ("FromData") - in one matrix product
+        along the coil axis. Data without a coil axis has nothing to correlate and
+        is left alone.
 
         Args:
             noise: White complex noise, the shape of the data.
             dim_tags: Higher-dimension tags, to find the coil axis.
+            data: The data the noise goes onto, which a measured covariance is read from.
 
         Returns:
             The noise, correlated across channels.
@@ -794,22 +861,24 @@ class Noise(BaseModule):
             return noise
 
         n_coils = int(shape[axis])
-        factor = np.linalg.cholesky(
-            self.covariance.matrix(n_coils)
-            + 1e-8 * np.eye(n_coils, dtype=np.complex128))
+        if isinstance(self.covariance, FromData):
+            # a root of every sample's psi, A A^H = psi: its eigenvectors times sqrt(eigenvalues)
+            values, vectors = ops.eigh(self.covariance.matrices(data, axis))
+            values = ops.where(values > 0, values, values * 0)
+            root = vectors * ops.cast_like(ops.sqrt(values), vectors)[:, None, :]
+        else:
+            root = ops.match_backend(np.linalg.cholesky(
+                self.covariance.matrix(n_coils) + 1e-8 * np.eye(n_coils, dtype=np.complex128)),
+                noise)
+        root = ops.cast_like(root, noise)
 
-        # Mix along the coil axis. The factor is lower triangular, so channel i
-        # is a combination of the first i+1 white channels and nothing more.
-        columns = []
-        for i in range(n_coils):
-            mixed = None
-            for j in range(i + 1):
-                weight = complex(factor[i, j])
-                if weight == 0:
-                    continue
-                term = ops.take(noise, np.array([j]), axis=axis) * ops.cast_like(
-                    ops.match_backend(np.array(weight, np.complex128), noise), noise)
-                mixed = term if mixed is None else mixed + term
-            columns.append(mixed)
-
-        return ops.concatenate(columns, axis=axis)
+        # channel i of the mixed noise is sum_j root[i, j] white_j: a product along the coil axis
+        order = [a for a in range(len(shape)) if a != axis] + [axis]
+        moved = ops.transpose(noise, order)
+        if len(ops.shape(root)) == 2:
+            mixed = ops.matmul(moved, ops.transpose(root, (1, 0)))
+        else:
+            flat = ops.reshape(moved, (int(shape[0]), -1, n_coils))
+            mixed = ops.reshape(ops.matmul(flat, ops.transpose(root, (0, 2, 1))),
+                                ops.shape(moved))
+        return ops.transpose(mixed, [int(a) for a in np.argsort(order)])
