@@ -519,7 +519,7 @@ def wsvd_weights_from_moments(second, first, index, dyn_mask, samples_per_transi
                               gram_index, coil_mask, conj_noise=False, conj_gram=False):
     """
     "noise_covariance", then "wsvd_weights" from a reference: in one Triton launch for complex64
-    on CUDA ("_wsvd_kernel"), reading rows *index* and *gram_index* where they lie.
+    on CUDA ("raw_processing_kernels"), reading rows *index* and *gram_index* where they lie.
 
     Args:
         second, first: Noise moments (S, D, C, C) and (S, D, C) ("noise_moments").
@@ -538,9 +538,9 @@ def wsvd_weights_from_moments(second, first, index, dyn_mask, samples_per_transi
         index = torch.arange(first.shape[0], device=gram.device)
     if gram_index is None:
         gram_index = torch.arange(gram.shape[0], device=gram.device)
-    kernels = triton_kernels('wsvd') if gram.is_cuda and gram.dtype == torch.complex64 else None
+    kernels = triton_kernels() if gram.is_cuda and gram.dtype == torch.complex64 else None
     if kernels is not None:
-        return kernels.weights(second, first, index, dyn_mask, samples_per_transient, gram,
+        return kernels.wsvd_weights(second, first, index, dyn_mask, samples_per_transient, gram,
                                gram_index, coil_mask, conj_noise, conj_gram, MIN_SAMPLES_PER_COIL)
     second, first, gram = second[index], first[index], gram[gram_index]
     if conj_noise:
@@ -595,33 +595,21 @@ def phasor(angle):
 # A cost evaluation of the alignment needs, per transient, the dot products of its weighted rows
 # with cos and sin of theta_t = 2 pi t nu. As torch operations that is theta, its cosine and its
 # sine written out for every point, and two matrix-vector products that read the rows twice. One
-# Triton kernel ("_shift_kernel") forms the same angles in registers (in float32, in the same
-# order) and reads every row once; libdevice's cos and sin keep full precision at the angles of
-# a whole FID.
-_SHIFT_KERNEL = []
-_KERNELS = {}
+# Triton kernel ("raw_processing_kernels.shift_sums") forms the same angles in registers (in
+# float32, in the same order) and reads every row once; libdevice's cos and sin keep full
+# precision at the angles of a whole FID.
+_KERNELS = []
 
 
-def triton_kernels(name):
-    """The Triton module "augmentrum.processing._<name>_kernel", imported once; None without it."""
-    if name not in _KERNELS:
+def triton_kernels():
+    """The Triton kernels ("raw_processing_kernels"), imported once; None without Triton."""
+    if not _KERNELS:
         try:
-            _KERNELS[name] = __import__(f'augmentrum.processing._{name}_kernel',
-                                        fromlist=['_'])
+            from augmentrum.processing import raw_processing_kernels
+            _KERNELS.append(raw_processing_kernels)
         except ImportError:
-            _KERNELS[name] = None
-    return _KERNELS[name]
-
-
-def _load_shift_kernel():
-    """The Triton kernels, imported once; None without Triton."""
-    if not _SHIFT_KERNEL:
-        try:
-            from augmentrum.processing import _shift_kernel
-            _SHIFT_KERNEL.append(_shift_kernel)
-        except ImportError:
-            _SHIFT_KERNEL.append(None)
-    return _SHIFT_KERNEL[0]
+            _KERNELS.append(None)
+    return _KERNELS[0]
 
 
 def shift_sums(rows, nu):
@@ -633,13 +621,14 @@ def shift_sums(rows, nu):
     if not (rows.is_cuda and rows.dtype == torch.float32 and nu.dtype == torch.float32
             and rows.is_contiguous()):
         return None
-    if _load_shift_kernel() is None:
+    kernels = triton_kernels()
+    if kernels is None:
         return None
     lead, r, n = rows.shape[:-2], rows.shape[-2], rows.shape[-1]
     flat = nu.reshape(-1).contiguous()
     cos = torch.empty((flat.numel(), r), dtype=rows.dtype, device=rows.device)
     sin = torch.empty_like(cos)
-    _SHIFT_KERNEL[0].launch(rows.reshape(-1, r, n), flat, cos, sin)
+    kernels.shift_sums(rows.reshape(-1, r, n), flat, cos, sin)
     return cos.reshape(lead + (r,)), sin.reshape(lead + (r,))
 
 
@@ -1046,7 +1035,7 @@ def _align(fids, mask, sw_hz, sf_mhz, ppmlim, passes=2, bracket_iterations=1,
     # the target: the transient nearest the mean of the valid ones, first of any tie; measured in
     # double precision, where a tie is one - two transients are always equidistant from their
     # mean, and in single precision rounding alone would pick between them
-    kernels = triton_kernels('distance') if x.is_cuda and x.dtype == torch.complex64 else None
+    kernels = triton_kernels() if x.is_cuda and x.dtype == torch.complex64 else None
     if kernels is not None:
         dist = kernels.distances(x, mask)
     else:
@@ -1060,15 +1049,15 @@ def _align(fids, mask, sw_hz, sf_mhz, ppmlim, passes=2, bracket_iterations=1,
     target = x.gather(1, first_true(near)[:, None, None].expand(b, 1, n))[:, 0]
 
     profile = ShiftProfile(x, target, first, last)
-    fused = x.is_cuda and _load_shift_kernel() is not None
+    fused = x.is_cuda and triton_kernels() is not None
     if (fused and x.is_cuda and profile.rows.dtype == torch.float32 and passes == 2
             and bracket_iterations == 1 and brent_iterations == 2 and locked_steps == 0
             and tuple(free_steps) == (2, 3) and max_shift_hz is None):
-        # the whole search below, one transient per program ("_shift_kernel.align_search"), of
-        # the transients that move only
+        # the whole search below, one transient per program
+        # ("raw_processing_kernels.align_search"), of the transients that move only
         per = lambda v: v[:, None].expand(b, d).reshape(-1).contiguous()
         moving = mask & (mask.sum(dim=-1, keepdim=True) > 1)
-        phi, nu = _SHIFT_KERNEL[0].align_search(profile.rows.reshape(-1, 12, n),
+        phi, nu = triton_kernels().align_search(profile.rows.reshape(-1, 12, n),
                                                 profile.q0.reshape(-1).contiguous(),
                                                 per(profile.y_energy), per(profile.norm), sw_hz,
                                                 moving.reshape(-1))
@@ -1174,7 +1163,7 @@ def _real_median(parts, mask):
     The mean of the two middle values for an even count - torch.median would
     return the lower one - with the invalid entries sorted behind the valid.
     """
-    kernels = triton_kernels('median') if parts.is_cuda and parts.dtype == torch.float32 else None
+    kernels = triton_kernels() if parts.is_cuda and parts.dtype == torch.float32 else None
     if kernels is not None:
         return kernels.median(parts, mask)
     count = mask.sum(dim=-1)

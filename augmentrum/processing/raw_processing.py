@@ -67,7 +67,7 @@ class _PooledRaw:
         from augmentrum.processing import torch_engine as engine
 
         pool = self.rows.tensor
-        kernels = engine.triton_kernels('combine') if pool.is_cuda else None
+        kernels = engine.triton_kernels() if pool.is_cuda else None
         if (kernels is not None and pool.dtype == self.dtype == torch.complex64
                 and pool.dim() == 7 and pool.is_contiguous() and weights.dim() == 3
                 and self.tags[:2] == ['DIM_COIL', 'DIM_DYN']):
