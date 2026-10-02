@@ -361,17 +361,26 @@ def shift_sums(rows, nu, cos, sin):
 # float32 formulas in the same order, launched without FMA contraction so that every operation
 # rounds as its own torch kernel does, with IEEE division and square root.
 @triton.jit
-def _sums(base, n, nu, two_pi, STRIDE: tl.constexpr, R: tl.constexpr, R_PAD: tl.constexpr,
-          BLOCK: tl.constexpr):
-    """The (R_PAD,) dot products of rows base[0], base[STRIDE], ... with cos and sin of theta."""
+def _sums(base, n, nu, two_pi, MOMENTS: tl.constexpr, R_PAD: tl.constexpr, BLOCK: tl.constexpr):
+    """
+    The (R_PAD,) dot products with cos and sin of theta of the rows (h, q) x (re, im) at *base*,
+    each weighted 0 .. MOMENTS - 1 times (by n + 1 for h, by n for q) as "ShiftProfile.rows"
+    lays them out, the products formed as torch forms them.
+    """
     r = tl.arange(0, R_PAD)
+    c = r // MOMENTS
+    j = r % MOMENTS
     acc_c = tl.zeros([R_PAD, BLOCK], dtype=tl.float32)
     acc_s = tl.zeros([R_PAD, BLOCK], dtype=tl.float32)
     for start in range(0, n, BLOCK):
         t = start + tl.arange(0, BLOCK)
         theta = (two_pi * t.to(tl.float32)) * nu
-        mask = (r[:, None] < R) & (t[None, :] < n)
-        vals = tl.load(base + (r[:, None] * STRIDE) * n + t[None, :], mask=mask, other=0.0)
+        mask = (r[:, None] < 4 * MOMENTS) & (t[None, :] < n)
+        vals = tl.load(base + c[:, None] * n + t[None, :], mask=mask, other=0.0)
+        if MOMENTS > 1:
+            w = (t[None, :] + tl.where(c[:, None] < 2, 1, 0)).to(tl.float32)
+            vals = tl.where(j[:, None] == 1, vals * w,
+                            tl.where(j[:, None] == 2, vals * (w * w), vals))
         acc_c += vals * libdevice.cos(theta)[None, :]
         acc_s += vals * libdevice.sin(theta)[None, :]
     return tl.sum(acc_c, axis=1), tl.sum(acc_s, axis=1)
@@ -386,7 +395,7 @@ def _pick(vec, j, R_PAD: tl.constexpr):
 @triton.jit
 def _at(base, n, nu, q0, two_pi, neg_two_pi, BLOCK: tl.constexpr):
     """ShiftProfile.at(nu): (K real, K imag, E) at one shift."""
-    c, s = _sums(base, n, nu, two_pi, 3, 4, 4, BLOCK)
+    c, s = _sums(base, n, nu, two_pi, 1, 4, BLOCK)
     kr = _pick(c, 0, 4) + _pick(s, 1, 4)
     ki = _pick(c, 1, 4) - _pick(s, 0, 4)
     er = _pick(c, 2, 4) + _pick(s, 3, 4)
@@ -538,7 +547,7 @@ def _brent_step(x, w, v, fx, fw, fv, a, b, deltax, rat, done, base_ptr, n, nu0, 
 def _newton_free(base, n, nu, low, high, cap, q0, two_pi, neg_two_pi, rate, rate2,
                  BLOCK: tl.constexpr):
     """One step of torch_engine._newton with the phase free (phi None)."""
-    c, s = _sums(base, n, nu, two_pi, 1, 12, 16, BLOCK)
+    c, s = _sums(base, n, nu, two_pi, 3, 16, BLOCK)
     angle = neg_two_pi * nu
     lr, li = libdevice.cos(angle), libdevice.sin(angle)
     # K, K' and K'' (h rows 0-5), E' and E'' (q rows 6-11), as ShiftProfile.at forms them
@@ -634,7 +643,7 @@ def align_search_kernel(rows_ptr, q0_ptr, energy_ptr, norm_ptr, moving_ptr, phi_
     nu = tl.load(nu_ptr + m) * 0.0
     phi = nu
     if tl.load(moving_ptr + m) != 0:
-        base = rows_ptr + m.to(tl.int64) * 12 * n
+        base = rows_ptr + m.to(tl.int64) * 4 * n
         q0 = tl.load(q0_ptr + m)
         y_energy = tl.load(energy_ptr + m)
         norm = tl.load(norm_ptr + m)
@@ -650,8 +659,9 @@ def align_search_kernel(rows_ptr, q0_ptr, energy_ptr, norm_ptr, moving_ptr, phi_
 
 def align_search(rows, q0, energy, norm, sw_hz, moving):
     """
-    Run the search: *rows* (M, 12, T) float32 contiguous, *q0*, *energy*, *norm* (M,); only the
-    transients *moving* (M,) bool marks are searched, the others are returned at zero.
+    Run the search: *rows* (M, 4, T) float32 contiguous ("ShiftProfile.plain"), *q0*, *energy*,
+    *norm* (M,); only the transients *moving* (M,) bool marks are searched, the others are
+    returned at zero.
 
     Returns:
         "(phi, nu)": (M,) phase in radians and shift in cycles per sample.

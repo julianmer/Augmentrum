@@ -650,7 +650,7 @@ class ShiftProfile:
     A pass needs "sum_n w_n^j c_n e^{-i theta_n}" for c in (h, q) and moments
     j <= 2. Split into real and imaginary parts that is a set of dot products
     of fixed weighted rows with cos(theta) and sin(theta), so the rows are
-    weighted once here and every pass is two batched matrix products - real
+    weighted once ("rows") and every pass is two batched matrix products - real
     arithmetic, which torch runs several times faster than complex on CPU.
 
     Args:
@@ -681,14 +681,16 @@ class ShiftProfile:
         q[..., 0] = 0
 
         self.lag = torch.arange(n, device=x.device, dtype=real_of(x))
-        index = self.lag + 1
-        # rows: (h, q) x (re, im) x (moment 0, 1, 2); h is weighted by n + 1, q by n
+        self.plain = torch.stack([h.real, h.imag, q.real, q.imag], dim=-2)     # (B, D, 4, T)
+
+    @functools.cached_property
+    def rows(self):
+        """(h, q) x (re, im) x (moment 0, 1, 2), (B, D, 12, T); h is weighted by n + 1, q by n."""
         rows = []
-        for c, w in ((h, index), (q, self.lag)):
-            for part in (c.real, c.imag):
-                rows += [part, part * w, part * w ** 2]
-        self.rows = torch.stack(rows, dim=-2)                       # (B, D, 12, T)
-        self.plain = self.rows[..., 0::3, :].contiguous()           # moment 0 only
+        for r, w in ((0, self.lag + 1), (1, self.lag + 1), (2, self.lag), (3, self.lag)):
+            part = self.plain[..., r, :]
+            rows += [part, part * w, part * w ** 2]
+        return torch.stack(rows, dim=-2)
 
     def shared(self, nus):
         """K and E at shifts every transient shares, (nus,) -> each (B, D, P)."""
@@ -1050,14 +1052,14 @@ def _align(fids, mask, sw_hz, sf_mhz, ppmlim, passes=2, bracket_iterations=1,
 
     profile = ShiftProfile(x, target, first, last)
     fused = x.is_cuda and triton_kernels() is not None
-    if (fused and x.is_cuda and profile.rows.dtype == torch.float32 and passes == 2
+    if (fused and x.is_cuda and profile.plain.dtype == torch.float32 and passes == 2
             and bracket_iterations == 1 and brent_iterations == 2 and locked_steps == 0
             and tuple(free_steps) == (2, 3) and max_shift_hz is None):
         # the whole search below, one transient per program
         # ("raw_processing_kernels.align_search"), of the transients that move only
         per = lambda v: v[:, None].expand(b, d).reshape(-1).contiguous()
         moving = mask & (mask.sum(dim=-1, keepdim=True) > 1)
-        phi, nu = triton_kernels().align_search(profile.rows.reshape(-1, 12, n),
+        phi, nu = triton_kernels().align_search(profile.plain.reshape(-1, 4, n),
                                                 profile.q0.reshape(-1).contiguous(),
                                                 per(profile.y_energy), per(profile.norm), sw_hz,
                                                 moving.reshape(-1))
