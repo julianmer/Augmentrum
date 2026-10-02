@@ -362,6 +362,32 @@ class TestEstimates:
         assert torch.allclose(masked[..., keep], gathered, rtol=1e-10, atol=0)
         assert torch.all(masked[..., [1, 4]] == 0)
 
+    @pytest.mark.skipif(not CUDA, reason="CUDA not available")
+    @pytest.mark.parametrize('conj', [False, True])
+    def test_fused_coil_weights_equal_the_steps(self, conj):
+        """The weights of the one launch (complex64 on CUDA) are those of the steps, on the CPU."""
+        gen = torch.Generator().manual_seed(4)
+
+        def draw(*shape):
+            return torch.randn(*shape, dtype=torch.complex64, generator=gen)
+
+        noise = draw(3, 8, 60, 20)                                      # (S, D, L, C)
+        reference = draw(3, 1, 200, 20) + 4 * draw(3, 1, 200, 1) * draw(3, 1, 1, 20)
+        args = [noise.mT @ noise.conj(), noise.sum(dim=-2), torch.tensor([2, 0, 1, 2]),
+                torch.rand(4, 8, generator=gen) < 0.6, 60, reference.mH @ reference,
+                torch.tensor([1, 1, 0, 2]), torch.rand(4, 20, generator=gen) < 0.6]
+        args[3][:, 0] = True
+        args[3][0, 1:] = False                                          # too few: not whitened
+        args[7][:, 1] = True
+        args[7][3] = False
+        args[7][3, 7] = True                                            # a single coil
+        cuda = [a.cuda() if torch.is_tensor(a) else a for a in args]
+        fused = engine.wsvd_weights_from_moments(*cuda, conj_noise=conj, conj_gram=conj).cpu()
+        steps = engine.wsvd_weights_from_moments(*args, conj_noise=conj, conj_gram=conj)
+        scale = steps.abs().amax(dim=-1, keepdim=True)
+        assert ((fused - steps).abs() / scale).max() < 1e-5
+        assert torch.all(fused[~args[7][:, None]] == 0)
+
 
 #**************************************************************************************************#
 #                                    Class TestMaskedSubsets                                       #

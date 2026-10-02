@@ -35,7 +35,8 @@ __all__ = ['real_of', 'complex_of', 'tiny', 'fid_to_spec', 'masked_median', 'noi
            'combine_coils', 'principal_vector', 'wsvd_weights', 'align', 'alignment_phasor',
            'unlike_mask', 'unwrap', 'ecc_phase', 'peak_phase', 'peak_shift_hz', 'shift_phasor',
            'first_true', 'upload', 'constant', 'window_spans', 'Step', 'run_steps', 'GraphedSteps',
-           'wsvd_weight_steps', 'peak_shift_steps', 'peak_shift_each']
+           'wsvd_weight_steps', 'wsvd_weights_from_moments', 'peak_shift_steps',
+           'peak_shift_each']
 
 
 #: FSL-MRS estimate_noise_cov: the last tenth of every FID is noise.
@@ -512,6 +513,44 @@ def wsvd_weight_steps(gram, cov, coil_mask, whiten, with_reference):
     single = (coil_mask.sum(dim=-1) == 1).reshape(shape + (1,))
     unit = torch.zeros_like(weights).scatter(-1, first, 1.0)
     return torch.where(single, unit, weights)
+
+
+def wsvd_weights_from_moments(second, first, index, dyn_mask, samples_per_transient, gram,
+                              gram_index, coil_mask, conj_noise=False, conj_gram=False):
+    """
+    "noise_covariance", then "wsvd_weights" from a reference: in one Triton launch for complex64
+    on CUDA ("_wsvd_kernel"), reading rows *index* and *gram_index* where they lie.
+
+    Args:
+        second, first: Noise moments (S, D, C, C) and (S, D, C) ("noise_moments").
+        index: The rows of the batch's samples, (B,); None for the moments in order.
+        dyn_mask: Transients to pool, (B, D) bool, or None.
+        samples_per_transient: Noise samples one transient contributes.
+        gram: Reference Gram matrices, (R, V, C, C).
+        gram_index: Their rows, (B,), or None.
+        coil_mask: Active coils, (B, C) bool, or None.
+        conj_noise, conj_gram: Whether to conjugate the moments, the Gram matrices.
+
+    Returns:
+        The weights, (B, V, C).
+    """
+    if index is None:
+        index = torch.arange(first.shape[0], device=gram.device)
+    if gram_index is None:
+        gram_index = torch.arange(gram.shape[0], device=gram.device)
+    kernels = triton_kernels('wsvd') if gram.is_cuda and gram.dtype == torch.complex64 else None
+    if kernels is not None:
+        return kernels.weights(second, first, index, dyn_mask, samples_per_transient, gram,
+                               gram_index, coil_mask, conj_noise, conj_gram, MIN_SAMPLES_PER_COIL)
+    second, first, gram = second[index], first[index], gram[gram_index]
+    if conj_noise:
+        second, first = second.conj(), first.conj()
+    gram = gram.conj() if conj_gram else gram
+    cov, samples = noise_covariance(second, first, samples_per_transient, dyn_mask)
+    if coil_mask is None:
+        coil_mask = torch.ones(first.shape[::2], dtype=torch.bool, device=cov.device)
+    whiten = samples >= MIN_SAMPLES_PER_COIL * coil_mask.sum(dim=1)
+    return wsvd_weights(gram, cov, coil_mask, whiten, True)
 
 
 def principal_vector(gram, squarings=12, steps=2):

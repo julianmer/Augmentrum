@@ -1647,39 +1647,43 @@ class RawProcessor(BaseModule):
 
         b, v, c, d, n = shape
         tail = n - int((1 - engine.NOISE_FRACTION) * n)
+        index = None
         if pools[0] is not None:
             second, first = pools[0].cached(
                 ('RawProcessor.noise_moments', tuple(tags), n),
                 lambda pool: self._pool_noise_moments(pool.data, tags, tail))
             index = inputs['index']
-            second, first = second[index], first[index]
-            if self.conj:
-                second, first = second.conj(), first.conj()
         else:
             second, first = engine.noise_moments(x[..., n - tail:])
-        cov, samples = engine.noise_covariance(second, first, v * tail, dyn_mask)
-
-        active = (coil_mask if coil_mask is not None
-                  else torch.ones(b, c, dtype=torch.bool, device=cov.device))
-        whiten = samples >= engine.MIN_SAMPLES_PER_COIL * active.sum(dim=1)
         if coil_mask is None and dyn_mask is None and v * d * tail < \
                 engine.MIN_SAMPLES_PER_COIL * c:
             report['no_prewhiten'] = True
 
         if w is None:
+            if index is not None:
+                second, first = second[index], first[index]
+                if self.conj:
+                    second, first = second.conj(), first.conj()
+            cov, samples = engine.noise_covariance(second, first, v * tail, dyn_mask)
+            active = (coil_mask if coil_mask is not None
+                      else torch.ones(b, c, dtype=torch.bool, device=cov.device))
+            whiten = samples >= engine.MIN_SAMPLES_PER_COIL * active.sum(dim=1)
             gram = engine.reference_gram(x.permute(0, 1, 3, 4, 2))          # (B, V, D, C, C)
             weights = yield from engine.wsvd_weight_steps(gram, cov, active, whiten, False)
             return engine.combine_coils(x, weights.to(x.dtype)).unsqueeze(2), None
 
+        gram_index = None
         if pools[1] is not None:
             gram = pools[1].cached(
                 ('RawProcessor.water_gram', tuple(wtags), n),
                 lambda pool: self._pool_water_gram(pool.water, wtags))
-            gram = gram[inputs['water_index']]
-            gram = gram.conj() if self.conj else gram
+            gram_index = inputs['water_index']
         else:
             gram = engine.reference_gram(w.mean(dim=3).transpose(-1, -2))   # (B, V, C, C)
-        weights = yield from engine.wsvd_weight_steps(gram, cov, active, whiten, True)
+        weights = engine.wsvd_weights_from_moments(
+            second, first, index, dyn_mask, v * tail, gram, gram_index, coil_mask,
+            conj_noise=self.conj and index is not None,
+            conj_gram=self.conj and gram_index is not None)
         if x is None:
             return (yield engine.Step(self._combine_raw, weights, w, late=('met',)))
         x = engine.combine_coils(x, weights.to(x.dtype))
