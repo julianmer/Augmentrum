@@ -15,7 +15,7 @@ from augmentrum import Augmentrum
 from augmentrum.core import Backend
 from augmentrum.core.pipeline import AugmentationPipeline
 from augmentrum.augmentation import (AmplitudeScaling, FrequencyShift,
-                                     LineBroadening, Noise, PhaseShift)
+                                     LineBroadening, Noise, PhaseShift, ZeroFill)
 
 
 #**************************************************************************************************#
@@ -457,10 +457,10 @@ class TestPerSampleSampling:
         return np.tile(fid.astype(np.complex64), (n, 1))
 
     def test_declared_params_are_drawn_per_sample(self):
-        """shift_hz is declared and comes back as a vector; first_order_deg is not."""
+        """shift_hz is declared and comes back as a vector; target_pts is not."""
         pipeline = AugmentationPipeline(
-            [FrequencyShift(), PhaseShift()],
-            user_kwargs={'shift_hz': (5.0, 15.0), 'first_order_deg': (5.0, 10.0)})
+            [FrequencyShift(), ZeroFill(target_pts=2048)],
+            user_kwargs={'shift_hz': (5.0, 15.0), 'target_pts': (2048, 4096)})
 
         params = pipeline.sample_batch_parameters(6)
 
@@ -469,8 +469,8 @@ class TestPerSampleSampling:
         assert np.all((shifts >= 5.0) & (shifts <= 15.0))
         assert len(np.unique(shifts)) > 1, "six draws collapsed to one value"
 
-        ramp = params[1]['first_order_deg']
-        assert np.ndim(ramp) == 0, "an undeclared parameter must stay scalar"
+        target = params[1]['target_pts']
+        assert np.ndim(target) == 0, "an undeclared parameter must stay scalar"
 
     def test_frequency_shift_vector_matches_per_row_scalars(self):
         """One vector pass is exactly the per-row scalar passes stacked."""

@@ -300,5 +300,68 @@ class TestPhaseFrequencyIntegration:
         assert result_data is not None
 
 
+#**************************************************************************************************#
+#                                  Class TestFirstOrderPivot                                       #
+#**************************************************************************************************#
+#                                                                                                  #
+# The first-order ramp pivots on the centre of the spectrum and is drawn per sample.               #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestFirstOrderPivot:
+    """The first-order ramp pivots on the centre of the spectrum and is drawn per sample."""
+
+    N, OFFSETS = 2048, (0, 51, -256)
+
+    def _lines(self, batch):
+        """(batch, 1, 1, 1, N) FIDs, each a sum of lines OFFSETS bins from the centre."""
+        n = np.arange(self.N)
+        fid = sum(np.exp(-2j * np.pi * k * n / self.N) for k in self.OFFSETS)
+        return np.broadcast_to(fid, (batch, 1, 1, 1, self.N)).copy()
+
+    def _phases(self, fids):
+        """The phase (deg) every sample's spectrum has at each line's bin."""
+        spec = np.fft.fftshift(np.fft.ifft(np.asarray(fids), axis=-1), axes=-1)
+        bins = [self.N // 2 + k for k in self.OFFSETS]
+        return np.rad2deg(np.angle(spec.reshape(spec.shape[0], -1)[:, bins]))
+
+    @pytest.mark.parametrize('backend', [Backend.NUMPY, Backend.PYTORCH])
+    def test_ramp_pivots_on_the_centre(self, backend):
+        """A line at the centre keeps its phase; the others turn by first_order_deg x offset / N."""
+        from augmentrum.core.pipeline import AugmentationPipeline
+        from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+
+        fids = self._lines(1)
+        data = NIfTI_MRS_Plus([gen_nifti_mrs(fids[0], 1 / 4000, 123.2)], backend=backend)
+        out, _ = AugmentationPipeline([PhaseShift(first_order_deg=90.0)])(data, None)
+        out = np.asarray(out.get_data(Backend.NUMPY)).reshape(1, -1)
+        added = self._phases(out) - self._phases(fids)
+        np.testing.assert_allclose(added[0], [90.0 * k / self.N for k in self.OFFSETS], atol=1e-6)
+
+    def test_each_sample_gets_its_own_ramp(self):
+        """An injected (batch,) first_order_deg turns every sample by its own ramp."""
+        from augmentrum.core.pipeline import AugmentationPipeline
+        from fsl_mrs.core.nifti_mrs import gen_nifti_mrs
+
+        fids = self._lines(4)
+        data = NIfTI_MRS_Plus([gen_nifti_mrs(f, 1 / 4000, 123.2) for f in fids],
+                              backend=Backend.NUMPY)
+        values = np.array([-300.0, -20.0, 45.0, 360.0])
+        out, _ = AugmentationPipeline([PhaseShift()])(
+            data, None, batch_params={0: {'first_order_deg': values}})
+        out = np.asarray(out.get_data(Backend.NUMPY)).reshape(4, -1)
+        added = self._phases(out) - self._phases(fids)
+        expected = values[:, None] * np.array(self.OFFSETS)[None, :] / self.N
+        np.testing.assert_allclose(added, expected, atol=1e-6)
+
+    def test_a_range_is_drawn_per_sample(self):
+        """Sampling a first_order_deg range gives every sample of a batch its own value."""
+        from augmentrum.core.pipeline import AugmentationPipeline
+
+        pipeline = AugmentationPipeline([PhaseShift()],
+                                        user_kwargs={'first_order_deg': (-360.0, 360.0)})
+        drawn = np.asarray(pipeline.sample_batch_parameters(8)[0]['first_order_deg'])
+        assert drawn.shape == (8,) and len(np.unique(drawn)) == 8
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

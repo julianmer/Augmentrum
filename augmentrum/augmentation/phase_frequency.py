@@ -45,8 +45,10 @@ class PhaseShift(BaseModule):
     zero_order_deg : float
         Zero-order phase shift in degrees (default: 0.0)
     first_order_deg : float
-        First-order phase shift in degrees (default: 0.0)
-        Applied as linear ramp from left to right edge
+        First-order phase shift in degrees (default: 0.0): a linear ramp
+        across the spectral width, from -first_order_deg/2 at its lower edge
+        to +first_order_deg/2 at its upper one, through zero at the centre
+        (the reference frequency), as FSL-MRS' first-order phase pivots
 
     Examples
     --------
@@ -65,10 +67,9 @@ class PhaseShift(BaseModule):
     # Acts on every coil and transient alike, so per-sample masks pass through.
     MASKS = 'pass'
 
-    # A constant rotation broadcasts, so a batch can carry one phase per
-    # sample. The first-order ramp stays one per batch: its value decides the
-    # module's domain, and a mixed batch would have no single answer.
-    PER_SAMPLE_PARAMS = ('zero_order_deg',)
+    # A constant rotation and a ramp both broadcast, so a batch can carry one
+    # of each per sample; any non-zero ramp puts the batch in its spectrum.
+    PER_SAMPLE_PARAMS = ('zero_order_deg', 'first_order_deg')
 
     def __init__(self, zero_order_deg: float = 0.0, first_order_deg: float = 0.0):
         """Initialize phase shift module."""
@@ -115,8 +116,9 @@ class PhaseShift(BaseModule):
             sw_hz = 1.0 / nifti.dwelltime
 
             # Apply phase shifts
-            fid_phased = self._apply_phase(
-                fid, sw_hz, self.sample_of(self.zero_order_deg, len(processed_data)))
+            i = len(processed_data)
+            fid_phased = self._apply_phase(fid, sw_hz, self.sample_of(self.zero_order_deg, i),
+                                           self.sample_of(self.first_order_deg, i))
 
             # Update NIFTI_MRS data
             nifti[:] = fid_phased
@@ -141,16 +143,17 @@ class PhaseShift(BaseModule):
             Tuple of (processed_data, water_array)
         """
         sw_hz = kwargs.get('sw_hz', 1.0)
-        result = self._apply_phase(data_array, sw_hz, self.zero_order_deg)
+        result = self._apply_phase(data_array, sw_hz, self.zero_order_deg, self.first_order_deg)
         return result, water_array
 
-    def _apply_phase(self, fid, sw_hz: float, zero_order_deg):
+    def _apply_phase(self, fid, sw_hz: float, zero_order_deg, first_order_deg):
         """
         Apply phase shifts to FID data (any backend tensor).
 
         Zero-order phase is a constant complex multiplication (fully
         vectorized); a "(batch,)" *zero_order_deg* rotates each sample by its
-        own phase. First-order phase requires FFT → ramp → IFFT (tensor_ops).
+        own phase, and a "(batch,)" *first_order_deg* gives each its own ramp.
+        First-order phase requires FFT → ramp → IFFT (tensor_ops).
         """
         # Zero-order: fully vectorized constant multiply
         if np.any(np.asarray(zero_order_deg) != 0.0):
@@ -161,8 +164,8 @@ class PhaseShift(BaseModule):
             fid = fid * to_backend(np.asarray(phase_factor), fid)
 
         # First-order: needs spectral domain
-        if self.first_order_deg != 0.0:
-            fid = self._first_order_phase(fid, self.first_order_deg)
+        if np.any(np.asarray(first_order_deg) != 0.0):
+            fid = self._first_order_phase(fid, first_order_deg)
 
         return fid
 
@@ -174,32 +177,42 @@ class PhaseShift(BaseModule):
         return fid * to_backend(factor, fid)
 
     @staticmethod
-    def _first_order_phase(fid, phc1_deg: float):
+    def _centred_ramp(n):
+        """The ramp's unit axis on the fftshifted spectrum: -1/2 at the first bin, 0 at the centre."""
+        return (np.arange(n, dtype=np.float64) - n // 2) / n
+
+    @classmethod
+    def _first_order_phase(cls, fid, phc1_deg):
         """
         Apply first-order phase shift (any backend tensor).
 
         Uses backend-agnostic FFT from tensor_ops.
         The linear phase ramp is a numpy array; multiplication with the
-        spectrum tensor auto-promotes to the correct backend.
+        spectrum tensor auto-promotes to the correct backend. A "(batch,)"
+        *phc1_deg* gives every sample its own ramp.
         """
         # The data is already a spectrum: a first-order shift declares the
         # frequency domain, so the module is put there before it runs.
         spec = fid
         N = fid.shape[-1]
-        ramp_shape = [1] * (len(fid.shape) - 1) + [N]
+        ndim = len(fid.shape)
+        ramp_shape = [1] * (ndim - 1) + [N]
 
         if on_cuda(spec):
             # the same float64 ramp (deg2rad is a multiply by pi / 180), on the device
             import torch
-            u = device_axis(('unit_ramp', N), lambda: np.linspace(0.0, 1.0, N, dtype=np.float64),
-                            spec)
-            angle = (float(phc1_deg) * u) * (np.pi / 180.0)
-            ramp = torch.polar(torch.ones_like(angle), angle).reshape(ramp_shape)
+            u = device_axis(('centred_ramp', N), lambda: cls._centred_ramp(N),
+                            spec).reshape(ramp_shape)
+            phc1 = np.asarray(phc1_deg, dtype=np.float64)
+            phc1 = (float(phc1) if phc1.ndim == 0
+                    else device_values(phc1, spec).reshape((-1,) + (1,) * (ndim - 1)))
+            angle = (phc1 * u) * (np.pi / 180.0)
+            ramp = torch.polar(torch.ones_like(angle), angle)
             return spec * ramp.to(spec.dtype)
 
         # Linear ramp (numpy — no gradients needed for coordinates)
-        u = np.linspace(0.0, 1.0, N, dtype=np.float64)
-        ramp = np.exp(1j * np.deg2rad(phc1_deg * u)).reshape(ramp_shape)
+        u = cls._centred_ramp(N).reshape(ramp_shape)
+        ramp = np.exp(1j * np.deg2rad(BaseModule.per_sample(phc1_deg, ndim) * u))
 
         # Apply the ramp; the caller puts the data back where it was
         return spec * to_backend(ramp, spec)
