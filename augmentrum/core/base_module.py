@@ -24,7 +24,7 @@ from nifti_mrs_plus import ops
 from nifti_mrs_plus.random import SeedGenerator
 from augmentrum.core import precision as prec
 from augmentrum.core.pool import (masks_of, set_masks, origin_of, set_origin, rewrap,
-                                  water_masks)
+                                  water_masks, PooledBatch)
 
 
 #: A header fact not read yet (None is a valid answer: "not there").
@@ -103,6 +103,16 @@ class BaseModule(ABC):
     # exactly as they were (samplers that only mask, taps). The batch then
     # keeps its pool origin, and consumers may use results the pool cached.
     PRESERVES_VALUES: bool = False
+
+    def takes_stand_in(self) -> bool:
+        """
+        Whether this module can be handed a pending pooled batch ("PendingRows")
+        without its values: as a stand-in of its shape, and the rows themselves in
+        'pool_rows'. True for a module that reads no values (a sampler drawing
+        masks), or that reads the rows where they lie and gathers them itself
+        otherwise (the raw processor); every other module gets the values.
+        """
+        return False
 
     # The working precision, set by every module's "precision" argument: 'single', 'double',
     # or None to follow the data. The data are cast to it on the way in (augmentrum.core.
@@ -501,7 +511,16 @@ class BaseModule(ABC):
             kwargs.setdefault('water_pool_origin', origins[1])
 
         # ── Get data in native backend format (not forced to numpy!), in the working precision ──
-        original = data.get_data(backend)
+        # A batch still standing for pool rows hands a module that takes it so a stand-in of its
+        # shape, as long as no cast would have to read it: the rows are then gathered where their
+        # values are first read, or never.
+        rows = data.pending_rows() if isinstance(data, PooledBatch) else None
+        stand_in = rows.stand_in() if rows is not None and self.takes_stand_in() else None
+        if stand_in is not None and prec.cast(stand_in, self.precision) is not stand_in:
+            stand_in = None
+        if stand_in is not None:
+            kwargs['pool_rows'] = rows
+        original = stand_in if stand_in is not None else data.get_data(backend)
         water_original = water.get_data(backend) if water is not None else None
         data_array = prec.cast(original, self.precision)
         water_array = prec.cast(water_original, self.precision)
@@ -514,6 +533,10 @@ class BaseModule(ABC):
         )
         if moved is not None:
             processed_data = self._spectral_axis_back(processed_data)
+        # a stand-in handed back unchanged leaves the batch standing for its rows
+        untouched = stand_in is not None and self.PRESERVES_VALUES
+        if untouched:
+            processed_data = None
 
         # ── Write back ──
         operation_name = self.__class__.__name__
@@ -534,7 +557,7 @@ class BaseModule(ABC):
         set_masks(water_out, water_masks(masks))
         if self.PRESERVES_VALUES:
             # values still equal the pool's only if nothing, not even a cast, touched them
-            set_origin(data_out, origins[0] if processed_data is original else None)
+            set_origin(data_out, origins[0] if untouched or processed_data is original else None)
             set_origin(water_out, origins[1] if processed_water is water_original else None)
 
         return data_out, water_out

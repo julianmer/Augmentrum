@@ -27,8 +27,8 @@ from nifti_mrs_plus import NIfTI_MRS_Plus, Backend, ops
 from nifti_mrs_plus.core import get_provenance
 
 
-__all__ = ['TensorPool', 'PooledBatch', 'PoolOrigin', 'masks_of', 'set_masks', 'origin_of',
-           'set_origin', 'rewrap', 'apply_masks', 'water_masks', 'finalize_masks']
+__all__ = ['TensorPool', 'PooledBatch', 'PoolOrigin', 'PendingRows', 'masks_of', 'set_masks',
+           'origin_of', 'set_origin', 'rewrap', 'apply_masks', 'water_masks', 'finalize_masks']
 
 
 #********************************#
@@ -181,6 +181,33 @@ class PooledBatch(NIfTI_MRS_Plus):
             self._init_metadata(objects, metadata)
         self._borrowed = True
         self._pending_provenance = []
+        self._rows = None
+
+    #******************#
+    #   pending rows   #
+    #******************#
+    def pending_rows(self) -> Optional['PendingRows']:
+        """The pool rows this batch still stands for without having gathered them, or None."""
+        return self._rows
+
+    def _resolve(self):
+        """Gather the pool rows a pending batch stands for: the first read of its values."""
+        rows, self._rows = self._rows, None
+        if rows is not None:
+            self.set_data(rows.gather(), self._backend, dim_tags=rows.tags)
+
+    def get_data(self, backend=None, dtype=None):
+        self._resolve()
+        return super().get_data(backend, dtype)
+
+    def set_data(self, tensor, backend=None, dim_tags=()):
+        # values of its own replace the rows the batch stood for
+        self._rows = None
+        return super().set_data(tensor, backend, dim_tags=dim_tags)
+
+    def numpy(self):
+        self._resolve()
+        return super().numpy()
 
     #***************#
     #   ownership   #
@@ -193,6 +220,7 @@ class PooledBatch(NIfTI_MRS_Plus):
         never written into); without one the borrowed objects are copied.
         Recorded provenance lands in the new objects' headers.
         """
+        self._resolve()
         if not self._borrowed:
             return super().materialize()
         self._headers = {}                  # the objects about to be built have headers of their own
@@ -250,6 +278,7 @@ class PooledBatch(NIfTI_MRS_Plus):
         return super().sync_headers(source_idx)
 
     def __setitem__(self, idx, values):
+        self._resolve()
         if not (self._backend != Backend.NIFTI_LIST and isinstance(idx, slice)
                 and idx == slice(None) and not isinstance(values, list)):
             self._own()
@@ -279,6 +308,8 @@ def rewrap(source, nifti_list, backend, volatile, state):
         out = PooledBatch(nifti_list=nifti_list, backend=backend, volatile=volatile,
                           state=state, headers=source._headers if same else None)
         out._pending_provenance = list(source._pending_provenance)
+        # values left untouched: the new wrapper stands for the same rows until they are read
+        out._rows = source._rows if same and backend == source._backend else None
         return out
     return NIfTI_MRS_Plus(nifti_list=nifti_list, backend=backend, volatile=volatile,
                           state=state)
@@ -308,6 +339,57 @@ class PoolOrigin:
     pool: 'TensorPool'
     indices: Any
     role: str
+
+
+#**************************************************************************************************#
+#                                        Class PendingRows                                         #
+#**************************************************************************************************#
+#                                                                                                  #
+# The pool rows a batch stands for until something reads its values.                              #
+#                                                                                                  #
+#**************************************************************************************************#
+class PendingRows:
+    """
+    The pool rows a batch stands for until something reads its values.
+
+    Drawing a raw batch from a pool on a GPU copies a quarter of a gigabyte of
+    coils and transients, and in a processing pipeline nothing but the coil
+    combination reads it. A batch drawn on the device therefore keeps only
+    which rows it is: the first read of its values gathers them (the copy it
+    always made), and a module that can read the rows where they lie - the raw
+    processor's coil combination - never makes it. A module that reads no
+    values at all (a sampler drawing masks) is handed "stand_in", a tensor of
+    the batch's shape, dtype and device that holds no memory of its own.
+
+    Attributes:
+        pool: The TensorPool.
+        role: 'data' or 'water'.
+        indices: Pool index of every sample, a (batch,) tensor on the device.
+        host: The same indices on the host, read without a wait for the device.
+        tags: The batch's higher-dimension tags.
+    """
+
+    def __init__(self, pool, role, indices, host, tags):
+        self.pool, self.role, self.indices, self.host, self.tags = pool, role, indices, host, tags
+
+    @property
+    def tensor(self):
+        """The pooled tensor the rows are taken from."""
+        return self.pool.data if self.role == 'data' else self.pool.water
+
+    def gather(self):
+        """The rows, gathered into a tensor of the batch's own: the batch's values."""
+        return self.pool._gather(self.role, self.tensor, self.indices)
+
+    def stand_in(self):
+        """A tensor of the batch's shape, dtype and device that reads one row for all (no copy)."""
+        tensor = self.tensor
+        return tensor[:1].expand((len(self.host),) + tuple(tensor.shape[1:]))
+
+    def rows(self):
+        """Every sample's row, a view into the pool."""
+        tensor = self.tensor
+        return [tensor[i] for i in self.host]
 
 
 #**************************************************************************************************#
@@ -455,10 +537,18 @@ class TensorPool:
                 continue
             batch = PooledBatch([group.nifti_list[i] for i in indices], backend=self.backend,
                                 volatile=self.volatile)
-            batch.set_data(self._gather(role, tensor, idx), self.backend, dim_tags=tags)
+            if role == 'data' and self._on_gpu():
+                # gathered where its values are first read, if anywhere ("PendingRows")
+                batch._rows = PendingRows(self, role, idx, tuple(int(i) for i in indices), tags)
+            else:
+                batch.set_data(self._gather(role, tensor, idx), self.backend, dim_tags=tags)
             set_origin(batch, PoolOrigin(self, idx, role))
             out.append(batch)
         return out[0], out[1]
+
+    def _on_gpu(self):
+        """Whether the pool is a torch tensor on an accelerator."""
+        return self.backend == Backend.PYTORCH and self.data.device.type != 'cpu'
 
     def _gather(self, role, tensor, idx):
         """

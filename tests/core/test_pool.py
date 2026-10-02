@@ -223,3 +223,68 @@ def test_batches_live_on_the_device():
     data, water = next(aug.dataloader())
     assert data.device.type == 'cuda' and water.device.type == 'cuda'
     assert next(iter(aug.as_torch_dataloader())).device.type == 'cuda'
+
+
+#******************#
+#   pending rows   #
+#******************#
+@pytest.mark.skipif(not CUDA, reason="CUDA not available")
+def test_a_pending_batch_reads_as_its_rows():
+    """A batch drawn on the device gathers its rows where its values are first read."""
+    _, _, pool = _pool(device='cuda')
+    data, _ = pool.batch([2, 0, 2])
+    assert data.pending_rows() is not None
+    values = data.get_data(Backend.PYTORCH)
+    assert data.pending_rows() is None
+    assert torch.equal(values, pool.data[[2, 0, 2]])
+
+
+@pytest.mark.skipif(not CUDA, reason="CUDA not available")
+def test_new_values_replace_the_rows():
+    """Values a step installs are the batch's, never overwritten by the rows it stood for."""
+    _, _, pool = _pool(device='cuda')
+    data, _ = pool.batch([1, 3])
+    new = torch.zeros_like(pool.data[[1, 3]])
+    data.set_data(new, Backend.PYTORCH)
+    assert data.pending_rows() is None
+    assert torch.equal(data.get_data(Backend.PYTORCH), new)
+
+
+def _drawn(pipeline, outputs, monkeypatch, pending):
+    """Three batches of a raw pipeline on the device, drawn pending or gathered up front."""
+    with monkeypatch.context() as patch:
+        if not pending:
+            patch.setattr(TensorPool, '_on_gpu', lambda self: False)
+        mets, wats = _raw_niftis(coils=4, transients=6, points=256)
+        aug = Augmentrum(mets, wats, pipelines={'train': pipeline}, outputs={'train': outputs},
+                         registration_method='torch', backend='pytorch', device='cuda',
+                         batch_size=3, volatile=True, seed=3)
+        loader = aug.dataloader()
+        return [next(loader) for _ in range(3)]
+
+
+@pytest.mark.skipif(not CUDA, reason="CUDA not available")
+def test_a_tap_before_processing_sees_the_raw_values(monkeypatch):
+    """A step that reads the raw batch gets its values, pending or not."""
+    pipeline = ['tap:raw', {'coil_sampling': {'per_sample': True, 'n_coils': (2, 4)}},
+                'processing']
+    for a, b in zip(_drawn(pipeline, ('raw', 'data'), monkeypatch, True),
+                    _drawn(pipeline, ('raw', 'data'), monkeypatch, False)):
+        assert torch.equal(a[0], b[0])
+        torch.testing.assert_close(a[1], b[1], rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize('conj', [False, True])
+@pytest.mark.skipif(not CUDA, reason="CUDA not available")
+def test_processing_reads_pending_rows_as_the_gathered_batch(conj, monkeypatch):
+    """
+    The coil combination reads a pending batch's rows where they lie; a setting that needs the
+    whole batch in the graphs (conj) gathers it first. Either way the result is the gathered
+    batch's, to rounding.
+    """
+    pipeline = [{'coil_sampling': {'per_sample': True, 'n_coils': (2, 4)}},
+                {'average_sampling': {'per_sample': True, 'n_averages': (2, 6)}},
+                {'processing': {'conj': conj}}]
+    for a, b in zip(_drawn(pipeline, ('data',), monkeypatch, True),
+                    _drawn(pipeline, ('data',), monkeypatch, False)):
+        torch.testing.assert_close(a[0], b[0], rtol=1e-5, atol=1e-6)

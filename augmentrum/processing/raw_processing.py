@@ -43,6 +43,38 @@ def _complex_like(x):
 
 
 #**************************************************************************************************#
+#                                         Class _PooledRaw                                         #
+#**************************************************************************************************#
+#                                                                                                  #
+# A raw batch that was never gathered, combined over its coils row by row where the pool holds it. #
+#                                                                                                  #
+#**************************************************************************************************#
+class _PooledRaw:
+    """
+    A raw batch that was never gathered, combined over its coils row by row where the pool holds it.
+
+    The coil combination is the one read of a raw batch in the torch engine. Each sample's row
+    is put in the engine's layout as a view, so the combination reads it in place: the same
+    products as on the gathered batch, without the quarter-gigabyte copy before them.
+    """
+
+    def __init__(self, rows, tags, dtype):
+        self.rows, self.tags, self.dtype = rows, list(tags), dtype
+
+    def combine(self, weights):
+        """"torch_engine.combine_coils" of the batch the rows make up, (B, V, D, T)."""
+        import torch
+        from augmentrum.processing import torch_engine as engine
+
+        out = []
+        for b, row in enumerate(self.rows.rows()):
+            x = RawProcessor._to_torch_layout(move_axis(row[None], RawProcessor.SPECTRAL_AXIS, -1),
+                                              self.tags)[0].to(self.dtype)
+            out.append(engine.combine_coils(x, weights[b:b + 1].to(self.dtype)))
+        return torch.cat(out)
+
+
+#**************************************************************************************************#
 #                                        Class RawProcessor                                        #
 #**************************************************************************************************#
 #                                                                                                  #
@@ -114,6 +146,10 @@ class RawProcessor(BaseModule):
 
     # Coil combination and averaging aggregate over exactly the drawn entries.
     MASKS = 'consume'
+
+    def takes_stand_in(self):
+        """The torch engine reads a pooled batch's rows where they lie, or gathers them itself."""
+        return self.registration_method == 'torch'
 
     #: Registration methods that run only on tensors.
     TENSOR_ONLY_REGISTRATION = ('pattern', 'torch')
@@ -680,7 +716,8 @@ class RawProcessor(BaseModule):
         if self.registration_method == 'torch':
             met, wat = self._process_torch(met, wat, tags, wtags, sw_hz, sf_mhz, masks,
                                            kwargs.get('pool_origin'),
-                                           kwargs.get('water_pool_origin'), sf_samples)
+                                           kwargs.get('water_pool_origin'), sf_samples,
+                                           kwargs.get('pool_rows'))
             if wat is not None and len(ops.shape(wat)) > 5:
                 wat = move_axis(wat, -1, self.SPECTRAL_AXIS)
             return met, wat
@@ -1304,7 +1341,7 @@ class RawProcessor(BaseModule):
     CUDA_GRAPHS = True
 
     def _process_torch(self, met, wat, tags, wtags, sw_hz, sf_mhz, masks, origin=None,
-                       water_origin=None, sf_samples=None):
+                       water_origin=None, sf_samples=None, rows=None):
         """
         The raw pipeline as batched torch operations on the data's device.
 
@@ -1341,6 +1378,8 @@ class RawProcessor(BaseModule):
             water_origin: PoolOrigin of the water, or None.
             sf_samples: Every sample's frequency in MHz where the batch's
                 scans differ ("_sf_samples"), else None.
+            rows: The pool rows *met* stands in for ("PendingRows"), where the
+                batch has not gathered them; None where *met* holds the values.
 
         Returns:
             "(met, wat)" with collapsed dimensions removed, spectral axis last,
@@ -1376,6 +1415,9 @@ class RawProcessor(BaseModule):
         # nor keep a second one.
         deferred = (self.coil and not self.conj and 'DIM_COIL' in tags and c > 1
                     and self.coil_method == 'fsl-mrs' and w is not None and pools[0] is not None)
+        if rows is not None and not deferred:
+            # values the graphs read: the rows gathered, as the batch would have done
+            x = self._to_torch_layout(move_axis(rows.gather(), self.SPECTRAL_AXIS, -1), tags)[0]
         inputs = dict(met=None if deferred else x, wat=w, coil_mask=masks.get('DIM_COIL'),
                       dyn_mask=masks.get('DIM_DYN'))
         for key, held in zip(('index', 'water_index'), pools):
@@ -1403,7 +1445,8 @@ class RawProcessor(BaseModule):
                                                      (4.55, 4.7)))
         steps = lambda given: self._torch_steps(given, list(tags), list(wtags), sw_hz, spans,
                                                 pools, x.shape, spatial)
-        values = {'sf_mhz': sf_mhz, 'sf_samples': sf_samples, 'met': x}
+        values = {'sf_mhz': sf_mhz, 'sf_samples': sf_samples,
+                  'met': x if rows is None or not deferred else _PooledRaw(rows, tags, x.dtype)}
 
         tensors = [t for t in list(inputs.values()) + [x] if t is not None]
         if (self.CUDA_GRAPHS and x.device.type == 'cuda'
@@ -1637,10 +1680,15 @@ class RawProcessor(BaseModule):
 
     @staticmethod
     def _combine_raw(weights, water, met):
-        """The coil combination of a batch that stayed outside the graphs (see "_torch_steps")."""
+        """
+        The coil combination of a batch that stayed outside the graphs (see "_torch_steps"); of
+        a pooled batch that was never gathered, each sample's row combined where it lies.
+        """
         from augmentrum.processing import torch_engine as engine
 
-        return (engine.combine_coils(met, weights.to(met.dtype)).unsqueeze(2),
+        combined = (met.combine(weights) if isinstance(met, _PooledRaw)
+                    else engine.combine_coils(met, weights.to(met.dtype)))
+        return (combined.unsqueeze(2),
                 engine.combine_coils(water, weights.to(water.dtype)).unsqueeze(2))
 
     @staticmethod

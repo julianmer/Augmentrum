@@ -103,6 +103,10 @@ class DimensionSampler(BaseModule):
     MASKS = 'draw'
     PRESERVES_VALUES = True
 
+    def takes_stand_in(self):
+        """A per-sample draw reads the batch's shape and device, never its values."""
+        return bool(self.per_sample) and self.PRESERVES_VALUES
+
     def __init__(self, mode: str = 'random', count=None, scheme: str = 'random',
                  stride: int = 1, seed=None, per_sample: bool = False):
         super().__init__()
