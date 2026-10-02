@@ -1007,13 +1007,15 @@ def _align(fids, mask, sw_hz, sf_mhz, ppmlim, passes=2, bracket_iterations=1,
     if (fused and x.is_cuda and profile.rows.dtype == torch.float32 and passes == 2
             and bracket_iterations == 1 and brent_iterations == 2 and locked_steps == 0
             and tuple(free_steps) == (2, 3) and max_shift_hz is None):
-        # the whole search below, one transient per program ("_shift_kernel.align_search")
+        # the whole search below, one transient per program ("_shift_kernel.align_search"), of
+        # the transients that move only
         per = lambda v: v[:, None].expand(b, d).reshape(-1).contiguous()
+        moving = mask & (mask.sum(dim=-1, keepdim=True) > 1)
         phi, nu = _SHIFT_KERNEL[0].align_search(profile.rows.reshape(-1, 12, n),
                                                 profile.q0.reshape(-1).contiguous(),
-                                                per(profile.y_energy), per(profile.norm), sw_hz)
+                                                per(profile.y_energy), per(profile.norm), sw_hz,
+                                                moving.reshape(-1))
         phi, eps = phi.reshape(b, d), nu.reshape(b, d) * sw_hz
-        moving = mask & (mask.sum(dim=-1, keepdim=True) > 1)
         return torch.where(moving, phi, 0.0), torch.where(moving, eps, 0.0)
     nu = torch.zeros(b, d, dtype=real_of(x), device=x.device)
     k, _ = profile.at(nu)

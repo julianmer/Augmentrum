@@ -326,28 +326,35 @@ def _pass(base, n, nu, q0, y_energy, norm, sw_hz, reach, cap, inv_n, two_pi, neg
 
 
 @triton.jit
-def align_search_kernel(rows_ptr, q0_ptr, energy_ptr, norm_ptr, phi_ptr, nu_ptr, n, sw_hz, reach,
-                        cap, inv_n, two_pi, neg_two_pi, rate, rate2, p1_nu, p2_nu, p3_nu,
-                        BLOCK: tl.constexpr):
-    """The alignment search of one transient per program: its phase (rad) and shift (cycles)."""
+def align_search_kernel(rows_ptr, q0_ptr, energy_ptr, norm_ptr, moving_ptr, phi_ptr, nu_ptr, n,
+                        sw_hz, reach, cap, inv_n, two_pi, neg_two_pi, rate, rate2, p1_nu, p2_nu,
+                        p3_nu, BLOCK: tl.constexpr):
+    """
+    The alignment search of one transient per program: its phase (rad) and shift (cycles); a
+    transient that does not move (not drawn, or its sample's only one) is left at zero unsearched.
+    """
     m = tl.program_id(0)
-    base = rows_ptr + m.to(tl.int64) * 12 * n
-    q0 = tl.load(q0_ptr + m)
-    y_energy = tl.load(energy_ptr + m)
-    norm = tl.load(norm_ptr + m)
     nu = tl.load(nu_ptr + m) * 0.0
-    nu = _pass(base, n, nu, q0, y_energy, norm, sw_hz, reach, cap, inv_n, two_pi, neg_two_pi,
-               rate, rate2, p1_nu, p2_nu, p3_nu, False, 2, BLOCK)
-    nu = _pass(base, n, nu, q0, y_energy, norm, sw_hz, reach, cap, inv_n, two_pi, neg_two_pi,
-               rate, rate2, p1_nu, p2_nu, p3_nu, True, 3, BLOCK)
-    kr, ki, _ = _at(base, n, nu, q0, two_pi, neg_two_pi, BLOCK)
-    tl.store(phi_ptr + m, libdevice.atan2(ki, kr))
+    phi = nu
+    if tl.load(moving_ptr + m) != 0:
+        base = rows_ptr + m.to(tl.int64) * 12 * n
+        q0 = tl.load(q0_ptr + m)
+        y_energy = tl.load(energy_ptr + m)
+        norm = tl.load(norm_ptr + m)
+        nu = _pass(base, n, nu, q0, y_energy, norm, sw_hz, reach, cap, inv_n, two_pi,
+                   neg_two_pi, rate, rate2, p1_nu, p2_nu, p3_nu, False, 2, BLOCK)
+        nu = _pass(base, n, nu, q0, y_energy, norm, sw_hz, reach, cap, inv_n, two_pi,
+                   neg_two_pi, rate, rate2, p1_nu, p2_nu, p3_nu, True, 3, BLOCK)
+        kr, ki, _ = _at(base, n, nu, q0, two_pi, neg_two_pi, BLOCK)
+        phi = libdevice.atan2(ki, kr)
+    tl.store(phi_ptr + m, phi)
     tl.store(nu_ptr + m, nu)
 
 
-def align_search(rows, q0, energy, norm, sw_hz):
+def align_search(rows, q0, energy, norm, sw_hz, moving):
     """
-    Run the search: *rows* (M, 12, T) float32 contiguous, *q0*, *energy*, *norm* (M,).
+    Run the search: *rows* (M, 12, T) float32 contiguous, *q0*, *energy*, *norm* (M,); only the
+    transients *moving* (M,) bool marks are searched, the others are returned at zero.
 
     Returns:
         "(phi, nu)": (M,) phase in radians and shift in cycles per sample.
@@ -360,7 +367,7 @@ def align_search(rows, q0, energy, norm, sw_hz):
     gold = 1.618034
     probes = (np.array([0.0, 1.0, 1.0 + gold, -gold]) / sw_hz).astype(np.float32)
     align_search_kernel[(m,)](
-        rows, q0, energy, norm, phi, nu, n, float(sw_hz), float(np.float32(sw_hz / 4 / sw_hz)),
+        rows, q0, energy, norm, moving.to(torch.int8).contiguous(), phi, nu, n, float(sw_hz), float(np.float32(sw_hz / 4 / sw_hz)),
         float(np.float32(0.5 / sw_hz)), float(np.float32(1.0 / n)), 6.283185307179586,
         -6.283185307179586, 6.283185307179586, -6.283185307179586 ** 2, float(probes[1]),
         float(probes[2]), float(probes[3]), BLOCK=BLOCK, enable_fp_fusion=False)
