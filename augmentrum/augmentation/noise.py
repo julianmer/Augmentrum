@@ -679,8 +679,13 @@ class Noise(BaseModule):
             x = ops.fftshift(ops.ifftn(ops.ifftshift(x, axis=axes), axes, norm='ortho'),
                              axis=axes)
 
+        kernels = self._kernels(x) if global_scale and ndim > 1 else None
         if state is not None and state.spectral == 'frequency':
             peak = ops.amax(ops.abs(x), axis=axis, keepdims=True)
+        elif kernels is not None:
+            # every sample's spectrum where its points lie, its |.| and max in one pass
+            peak = kernels.spectrum_peak(x, axis).reshape((-1,) + (1,) * (ndim - 1))
+            peak = peak / float(np.sqrt(shape[axis]))
         else:
             # The backends transform their last axis only, so the spectral one
             # is brought there when a coil or average axis sits behind it.
@@ -689,16 +694,10 @@ class Noise(BaseModule):
                 x = ops.transpose(x, [d for d in range(ndim) if d != axis] + [axis])
             if not ops.is_complex(x):
                 x = ops.complex_from(x, x * 0.0)     # tf.signal.fft takes complex only
-            spectrum = ops.fft(x)
-            kernels = self._kernels(spectrum) if global_scale and ndim > 1 else None
-            if kernels is not None:
-                # |.| and every batch element's max in one pass, the spectrum read once
-                peak = kernels.peak(spectrum).reshape((-1,) + (1,) * (ndim - 1))
-            else:
-                peak = ops.amax(ops.abs(spectrum), axis=-1, keepdims=True)
-                if moved:
-                    peak = ops.transpose(peak, list(range(axis)) + [ndim - 1]
-                                         + list(range(axis, ndim - 1)))
+            peak = ops.amax(ops.abs(ops.fft(x)), axis=-1, keepdims=True)
+            if moved:
+                peak = ops.transpose(peak, list(range(axis)) + [ndim - 1]
+                                     + list(range(axis, ndim - 1)))
             peak = peak / float(np.sqrt(shape[axis]))
 
         if global_scale and ndim > 1:

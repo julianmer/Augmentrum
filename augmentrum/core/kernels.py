@@ -827,12 +827,19 @@ def peak_kernel(x_ptr, out_ptr, N, BLOCK: tl.constexpr):
     tl.atomic_max(out_ptr + b, tl.max(libdevice.hypot(re, im), axis=0))
 
 
-def peak(x):
-    """The largest |x| of every sample of complex64 *x* (B, ...), (B,) float32."""
-    b, n = x.shape[0], x[0].numel()
-    out = torch.zeros(b, dtype=torch.float32, device=x.device)
-    peak_kernel[(b, triton.cdiv(n, PEAK_POINTS))](torch.view_as_real(x.contiguous()), out, n,
-                                                  BLOCK=PEAK_POINTS)
+def spectrum_peak(x, axis):
+    """
+    The largest |fft| along *axis* of every sample of complex64 *x* (B, ...), (B,) float32: each
+    sample's transform taken where its points lie (a strided batch, not a transposed copy), and
+    its |.| and maximum in one pass.
+    """
+    shape = x.shape
+    out = torch.zeros(shape[0], dtype=torch.float32, device=x.device)
+    for b in range(shape[0]):
+        spectrum = torch.fft.fft(x[b].reshape(math.prod(shape[1:axis]), shape[axis], -1), dim=1)
+        n = spectrum.numel()
+        peak_kernel[(1, triton.cdiv(n, PEAK_POINTS))](torch.view_as_real(spectrum), out[b:], n,
+                                                      BLOCK=PEAK_POINTS)
     return out
 
 
