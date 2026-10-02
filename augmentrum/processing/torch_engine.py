@@ -1129,6 +1129,9 @@ def _real_median(parts, mask):
     The mean of the two middle values for an even count - torch.median would
     return the lower one - with the invalid entries sorted behind the valid.
     """
+    kernels = triton_kernels('median') if parts.is_cuda and parts.dtype == torch.float32 else None
+    if kernels is not None:
+        return kernels.median(parts, mask)
     count = mask.sum(dim=-1)
     ordered = torch.where(mask[:, None, None, :], parts, torch.inf).sort(dim=-1).values
     shape = ordered.shape[:-1] + (1,)
