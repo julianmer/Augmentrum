@@ -992,10 +992,13 @@ def _align(fids, mask, sw_hz, sf_mhz, ppmlim, passes=2, bracket_iterations=1,
     first, last = spans if spans is not None else ppm_window(n, sw_hz, sf_mhz, ppmlim)
     reach = (sw_hz / 4 if max_shift_hz is None else max_shift_hz) / sw_hz
 
-    # the target: the transient nearest the mean of the valid ones, first of any tie
-    weights = mask.to(real_of(x))
-    avg = (x * weights[..., None]).sum(dim=1, keepdim=True) / weights.sum(dim=1)[:, None, None]
-    dist = torch.linalg.vector_norm(x - avg, dim=-1).masked_fill(~mask, torch.inf)
+    # the target: the transient nearest the mean of the valid ones, first of any tie; measured in
+    # double precision, where a tie is one - two transients are always equidistant from their
+    # mean, and in single precision rounding alone would pick between them
+    x64 = x.to(torch.complex128)
+    weights = mask.to(torch.float64)
+    avg = (x64 * weights[..., None]).sum(dim=1, keepdim=True) / weights.sum(dim=1)[:, None, None]
+    dist = torch.linalg.vector_norm(x64 - avg, dim=-1).masked_fill(~mask, torch.inf)
     near = dist <= dist.min(dim=-1, keepdim=True).values * (1 + 1e-9)
     target = x.gather(1, first_true(near)[:, None, None].expand(b, 1, n))[:, 0]
 

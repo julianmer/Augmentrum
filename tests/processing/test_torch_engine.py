@@ -279,6 +279,14 @@ class TestEstimates:
         assert torch.allclose(eps[keep].reshape(N_B, 4), sub_eps, atol=1e-9)
         assert torch.allclose(phi[keep].reshape(N_B, 4), sub_phi, atol=1e-9)
 
+    def test_two_transients_align_to_the_first(self):
+        """Two transients tie as the target - both are equidistant from their mean - and the
+        first is taken, whatever single-precision rounding would say: it aligns to itself."""
+        g = torch.Generator().manual_seed(0)
+        fids = torch.randn(200, 2, 256, dtype=torch.complex64, generator=g)
+        phi, eps = engine.align(fids, torch.ones(200, 2, dtype=torch.bool), SW, SF, (0.2, 4.2))
+        assert torch.all(phi[:, 0].abs() < 1e-5) and torch.all(eps[:, 0].abs() < 1e-3)
+
     def test_single_transient_is_not_aligned(self):
         fids = torch.randn(2, 3, 64, dtype=torch.complex128)
         keep = torch.tensor([[True, False, False], [True, True, True]])
