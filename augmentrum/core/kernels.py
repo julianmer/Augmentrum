@@ -1710,3 +1710,144 @@ def spurious_echoes(data, params, t, mode, tau):
         flat.shape[0] // b, MODE=mode, TAU=bool(tau), ROW=triton.next_power_of_2(n),
         BLOCK=ECHO_POINTS, enable_fp_fusion=False)
     return out.reshape(data.shape)
+
+
+#   residual water   #
+#********************#
+@triton.jit
+def residual_water_kernel(spec_ptr, lobes_ptr, params_ptr, out_ptr, N, B, PER_SAMPLE,
+                          BLOCK: tl.constexpr):
+    """
+    One program per row of the complex64 spectra *spec* (B * PER_SAMPLE, N): the row plus its
+    sample's water - its lobes (complex128) times its phase factor, cast to complex64, times its
+    amplitude scale (as float32) times the row's largest |real|. Every product rounds as torch's:
+    fma(a_re, b_re, -a_im b_im) + i fma(a_re, b_im, a_im b_re), the amplitude a real number.
+    """
+    r = tl.program_id(0)
+    b = r // PER_SAMPLE
+    j = tl.arange(0, BLOCK)
+    inside = j < N
+    q = tl.arange(0, 2)
+    at = (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :]
+    s_re, s_im = tl.split(tl.load(spec_ptr + at, mask=inside[:, None], other=0.0))
+    ref = tl.max(tl.where(inside, tl.abs(s_re), 0.0), axis=0)
+    amp = tl.load(params_ptr + 3 * B + b).to(tl.float32) * ref
+
+    lobe = tl.load(params_ptr + b).to(tl.int64)
+    f_re = tl.load(params_ptr + B + b)
+    f_im = tl.load(params_ptr + 2 * B + b)
+    w = tl.load(lobes_ptr + (lobe * N + j[:, None]) * 2 + q[None, :], mask=inside[:, None],
+                other=0.0)
+    w_re, w_im = tl.split(w)
+    u_re = tl.fma(w_re, f_re, -(w_im * f_im)).to(tl.float32)
+    u_im = tl.fma(w_re, f_im, w_im * f_re).to(tl.float32)
+    o_re = s_re + tl.fma(u_re, amp, -(u_im * 0.0))
+    o_im = s_im + tl.fma(u_re, 0.0, u_im * amp)
+    tl.store(out_ptr + at, tl.join(o_re, o_im), mask=inside[:, None])
+
+
+def residual_water(spec, lobes, params):
+    """
+    "ResidualWater.process_tensor" on complex64 spectra *spec* (B, ..., N): *lobes* (L, N)
+    complex128, *params* (4, B) float64 - each sample's row of *lobes*, the real and imaginary
+    parts of its phase factor, and its amplitude scale.
+    """
+    n, b = spec.shape[-1], spec.shape[0]
+    flat = spec.contiguous().reshape(-1, n)
+    out = torch.empty_like(flat)
+    residual_water_kernel[(flat.shape[0],)](
+        torch.view_as_real(flat), torch.view_as_real(lobes), params, torch.view_as_real(out), n,
+        b, flat.shape[0] // b, BLOCK=triton.next_power_of_2(n), enable_fp_fusion=False,
+        num_warps=8)
+    return out.reshape(spec.shape)
+
+
+#***********#
+#   phase   #
+#***********#
+#: Points each program of the phase kernels turns.
+PHASE_POINTS = 256
+
+
+@triton.jit
+def _turned(re, im, angle):
+    """
+    (re + i im) e^{i angle} as torch forms it: the float64 phasor (torch.polar) cast to complex64,
+    then the complex64 product fma(re, c, -im s) + i fma(re, s, im c).
+    """
+    c = libdevice.cos(angle).to(tl.float32)
+    s = libdevice.sin(angle).to(tl.float32)
+    return tl.fma(re, c, -(im * s)), tl.fma(re, s, im * c)
+
+
+@triton.jit
+def phase_kernel(x_ptr, params_ptr, axis_ptr, consts_ptr, out_ptr, N, B, PER_SAMPLE,
+                 ZERO: tl.constexpr, RAMP: tl.constexpr, BLOCK: tl.constexpr):
+    """
+    One program per row of the complex64 *x* (B * PER_SAMPLE, N) and block of points: the row
+    times its sample's factor f cast to complex64 (ZERO), then times e^{i (p axis_j) c} (RAMP),
+    p, f and the angle in float64; consts: c.
+    """
+    r = tl.program_id(0)
+    b = r // PER_SAMPLE
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    inside = j < N
+    q = tl.arange(0, 2)
+    at = (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :]
+    re, im = tl.split(tl.load(x_ptr + at, mask=inside[:, None], other=0.0))
+    if ZERO:
+        f_re = tl.load(params_ptr + B + b).to(tl.float32)
+        f_im = tl.load(params_ptr + 2 * B + b).to(tl.float32)
+        re, im = tl.fma(re, f_re, -(im * f_im)), tl.fma(re, f_im, im * f_re)
+    if RAMP:
+        p = tl.load(params_ptr + b)
+        angle = (p * tl.load(axis_ptr + j, mask=inside, other=0.0)) * tl.load(consts_ptr)
+        re, im = _turned(re, im, angle)
+    tl.store(out_ptr + at, tl.join(re, im), mask=inside[:, None])
+
+
+def phase(x, params, axis, consts, zero, ramp):
+    """
+    "PhaseShift" and "FrequencyShift" on complex64 *x* (B, ..., N): each row times its sample's
+    factor f (with *zero*), then times e^{i (p axis_j) c} (with *ramp*). *params* (1 or 3, B)
+    float64: p, and f's real and imaginary parts; *axis* (N,) and *consts* (c,) float64.
+    """
+    n, b = x.shape[-1], x.shape[0]
+    flat = x.contiguous().reshape(-1, n)
+    out = torch.empty_like(flat)
+    phase_kernel[(flat.shape[0], triton.cdiv(n, PHASE_POINTS))](
+        torch.view_as_real(flat), params, axis, consts, torch.view_as_real(out), n, b,
+        flat.shape[0] // b, ZERO=bool(zero), RAMP=bool(ramp), BLOCK=PHASE_POINTS,
+        enable_fp_fusion=False)
+    return out.reshape(x.shape)
+
+
+@triton.jit
+def eddy_current_kernel(x_ptr, angle_ptr, out_ptr, N, PER_SAMPLE, BLOCK: tl.constexpr):
+    """
+    One program per row of the complex64 *x* (B * PER_SAMPLE, N) and block of points: the row
+    times e^{i angle} of its sample's angles (B, N) float64.
+    """
+    r = tl.program_id(0)
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    inside = j < N
+    q = tl.arange(0, 2)
+    at = (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :]
+    re, im = tl.split(tl.load(x_ptr + at, mask=inside[:, None], other=0.0))
+    angle = tl.load(angle_ptr + (r // PER_SAMPLE).to(tl.int64) * N + j, mask=inside, other=0.0)
+    re, im = _turned(re, im, angle)
+    tl.store(out_ptr + at, tl.join(re, im), mask=inside[:, None])
+
+
+def eddy_current(x, angle):
+    """
+    "EddyCurrent.process_tensor" on complex64 *x* (B, ..., N): each row times e^{i angle} of its
+    sample's angles *angle* (B, N) float64.
+    """
+    n, b = x.shape[-1], x.shape[0]
+    flat = x.contiguous().reshape(-1, n)
+    out = torch.empty_like(flat)
+    eddy_current_kernel[(flat.shape[0], triton.cdiv(n, PHASE_POINTS))](
+        torch.view_as_real(flat), angle, torch.view_as_real(out), n, flat.shape[0] // b,
+        BLOCK=PHASE_POINTS, enable_fp_fusion=False)
+    return out.reshape(x.shape)

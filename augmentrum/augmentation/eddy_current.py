@@ -19,7 +19,8 @@ from typing import Optional, List, Tuple
 from scipy.signal import butter, filtfilt
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import batch_profile, device_values, on_cuda, to_backend
+from augmentrum.processing.utils import (batch_profile, device_kernels, device_values, on_cuda,
+                                         to_backend)
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
 from nifti_mrs_plus.ops import to_numpy
@@ -461,6 +462,14 @@ class EddyCurrent(BaseModule):
 
         phases = self._phases(batch, n_points, float(sw_hz), self.rng.numpy_rng(),
                               water_of=water_of)
+        kernels = device_kernels(data_array) if ndim > 1 else None
+        if kernels is not None:
+            # the same float64 angle formed here, where the trajectories are, in one upload; its
+            # phasor and the product in one launch
+            strength = np.array([float(self.sample_of(self.strength, i))
+                                 for i in range(phases.shape[0])])[:, None]
+            angle = device_values(strength * phases, data_array)
+            return kernels.eddy_current(data_array, angle), water_array
         if on_cuda(data_array) and ndim > 1:
             # the trajectories travel as they are; the phasor is formed on the device
             import torch

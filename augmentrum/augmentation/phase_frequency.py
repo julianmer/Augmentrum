@@ -20,7 +20,8 @@ from typing import Optional, List
 
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import device_axis, device_values, on_cuda, to_backend
+from augmentrum.processing.utils import (device_axis, device_kernels, device_values, on_cuda,
+                                         to_backend)
 from nifti_mrs_plus import Backend
 from nifti_mrs_plus.ops import fft, ifft, fftshift, ifftshift
 
@@ -155,8 +156,16 @@ class PhaseShift(BaseModule):
         own phase, and a "(batch,)" *first_order_deg* gives each its own ramp.
         First-order phase requires FFT → ramp → IFFT (tensor_ops).
         """
+        zero = np.any(np.asarray(zero_order_deg) != 0.0)
+        first = np.any(np.asarray(first_order_deg) != 0.0)
+        kernels = device_kernels(fid) if len(fid.shape) > 1 and (zero or first) else None
+        if kernels is not None:
+            # both shifts in one launch, each rounded as below
+            params, u, consts = self._kernel_inputs(fid, zero_order_deg, first_order_deg)
+            return kernels.phase(fid, params, u, consts, zero, first)
+
         # Zero-order: fully vectorized constant multiply
-        if np.any(np.asarray(zero_order_deg) != 0.0):
+        if zero:
             phi = np.deg2rad(self.per_sample(np.asarray(zero_order_deg, dtype=np.float64),
                                              len(fid.shape)))
             # complex factor * any-backend tensor — works everywhere
@@ -164,10 +173,26 @@ class PhaseShift(BaseModule):
             fid = fid * to_backend(np.asarray(phase_factor), fid)
 
         # First-order: needs spectral domain
-        if np.any(np.asarray(first_order_deg) != 0.0):
+        if first:
             fid = self._first_order_phase(fid, first_order_deg)
 
         return fid
+
+    def _kernel_inputs(self, fid, zero_order_deg, first_order_deg):
+        """
+        The inputs of "augmentrum.core.kernels.phase" on *fid*'s device, as "_apply_phase" and
+        "_first_order_phase" form them: per sample (3, B) float64 in one upload (the first-order
+        phase in degrees, the zero-order factor's real and imaginary parts), the centred ramp,
+        and pi / 180.
+        """
+        batch, n = fid.shape[0], fid.shape[-1]
+        phi = np.deg2rad(np.broadcast_to(np.asarray(zero_order_deg, dtype=np.float64), (batch,)))
+        factor = np.exp(-1j * phi)
+        params = np.stack([np.broadcast_to(np.asarray(first_order_deg, dtype=np.float64),
+                                           (batch,)), factor.real, factor.imag])
+        u = device_axis(('centred_ramp', n), lambda: self._centred_ramp(n), fid)
+        degree = device_axis(('degree',), lambda: [np.pi / 180.0], fid)
+        return device_values(params, fid), u, degree
 
     @staticmethod
     def _zero_order_phase(fid, phase_deg: float):
@@ -330,6 +355,16 @@ class FrequencyShift(BaseModule):
         N = fid.shape[-1]
         shape = [1] * (len(fid.shape) - 1) + [N]
         shift = self.per_sample(np.asarray(shift_hz, dtype=np.float64), len(fid.shape))
+
+        kernels = device_kernels(fid) if len(fid.shape) > 1 else None
+        if kernels is not None:
+            # the same phase, (2 pi shift) t, its phasor and the product in one launch
+            t = device_axis(('time', N, float(sw_hz)),
+                            lambda: np.arange(N, dtype=np.float64) / float(sw_hz), fid)
+            turn = 2.0 * math.pi * np.broadcast_to(np.asarray(shift_hz, dtype=np.float64),
+                                                   (fid.shape[0],))
+            unit = device_axis(('unit',), lambda: [1.0], fid)
+            return kernels.phase(fid, device_values(turn[None], fid), t, unit, False, True)
 
         if on_cuda(fid):
             # the same float64 phase, formed in the same order, on the device
