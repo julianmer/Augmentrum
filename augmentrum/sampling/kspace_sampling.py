@@ -1271,14 +1271,13 @@ class Eccentric2D(Trajectory):
         n_samp = int(params.get("samples_per_shot",
                                 max(8, int(2 * math.pi * radius_frac * max(nx, ny) / 2))))
 
-        shots = []
-        for center in centers:
-            theta = rng.uniform(0.0, 2.0 * math.pi) \
-                + np.linspace(0.0, 2.0 * math.pi, n_samp, endpoint=True)
-            theta_b = ops.asarray_like(like, theta)
-            kx = (float(center[0]) + radius_frac * ops.cos(theta_b)) * kmax_x
-            ky = (float(center[1]) + radius_frac * ops.sin(theta_b)) * kmax_y
-            shots.append(ops.stack([kx, ky], axis=1))
+        theta = rng.uniform(0.0, 2.0 * math.pi, (n_shots, 1)) \
+            + np.linspace(0.0, 2.0 * math.pi, n_samp, endpoint=True)
+        theta_b = ops.asarray_like(like, theta)
+        centers_b = ops.asarray_like(like, centers)
+        kx = (centers_b[:, :1] + radius_frac * ops.cos(theta_b)) * kmax_x
+        ky = (centers_b[:, 1:] + radius_frac * ops.sin(theta_b)) * kmax_y
+        shots = list(ops.stack([kx, ky], axis=2))
 
         meta = {
             "trajectory_type":    "eccentric_2d",
@@ -1363,6 +1362,7 @@ class ConcentricShells3D(Trajectory):
         shots = []
         total_samples = 0
         shots_per_shell = []
+        units = {}          # (sps, sign) -> unit circle with kz = 1, shared by equal circles
         for si in range(n_shells):
             frac = (min_frac + (1.0 - min_frac) * si / (n_shells - 1)
                     if n_shells > 1 else 1.0)
@@ -1377,12 +1377,14 @@ class ConcentricShells3D(Trajectory):
                     max(6, int(round(circ_bins)))
                 # Alternate direction shell-locally, as the 2D rings do.
                 sign = 1.0 if li % 2 == 0 else -1.0
-                phi = ops.linspace_like(like, 0.0, sign * 2.0 * math.pi, sps)
+                if (sps, sign) not in units:
+                    phi = ops.linspace_like(like, 0.0, sign * 2.0 * math.pi, sps)
+                    units[sps, sign] = ops.stack([ops.cos(phi), ops.sin(phi),
+                                                  ops.full_like_shape(like, (sps,), 1.0)], axis=1)
                 sin_t = math.sin(theta)
-                kx = ops.cos(phi) * (frac * sin_t * kmax_x)
-                ky = ops.sin(phi) * (frac * sin_t * kmax_y)
-                kz = ops.full_like_shape(like, (sps,), frac * math.cos(theta) * kmax_z)
-                shots.append(ops.stack([kx, ky, kz], axis=1))
+                shots.append(units[sps, sign] * ops.asarray_like(
+                    like, [frac * sin_t * kmax_x, frac * sin_t * kmax_y,
+                           frac * math.cos(theta) * kmax_z]))
                 total_samples += sps
 
         n_shots_total = len(shots)
@@ -1714,17 +1716,17 @@ class ConesRosette3D(Trajectory):
         t     = ops.linspace_like(like, 0.0, math.pi, sps)   # petal: 0 → π
         sin_t = ops.sin(t)                         # envelope — 0 at both ends
 
-        shots = []
-        for ci, theta_cone in enumerate(cone_angles):
-            sin_ca = math.sin(float(theta_cone))
-            cos_ca = math.cos(float(theta_cone))   # negative for θ > π/2 → −kz petals
-            for pi_ in range(ppc):
-                phi = pi_ * 2.0 * math.pi / ppc + ci * GOLDEN_ANGLE_RAD
-                kx = sin_t * sin_ca * ops.cos(t + phi) * kmax_x
-                ky = sin_t * sin_ca * ops.sin(t + phi) * kmax_y
-                kz = sin_t * cos_ca * kmax_z       # sign follows cos(θ) naturally
-                shot = ops.stack([kx, ky, kz], axis=1)
-                shots.append(shot)
+        # One row per shot, cone-major: shot ci * ppc + pi_ is petal pi_ of cone ci.
+        ci, pi_ = np.divmod(np.arange(n_cones * ppc), ppc)
+        sin_ca = np.array([math.sin(float(a)) for a in cone_angles])[ci, None]
+        # negative for θ > π/2 → −kz petals
+        cos_ca = np.array([math.cos(float(a)) for a in cone_angles])[ci, None]
+        phi = (pi_ * 2.0 * math.pi / ppc + ci * GOLDEN_ANGLE_RAD)[:, None]
+        sin_ca, cos_ca, phi = (ops.asarray_like(like, v) for v in (sin_ca, cos_ca, phi))
+        kx = sin_t * sin_ca * ops.cos(t + phi) * kmax_x
+        ky = sin_t * sin_ca * ops.sin(t + phi) * kmax_y
+        kz = sin_t * cos_ca * kmax_z       # sign follows cos(θ) naturally
+        shots = list(ops.stack([kx, ky, kz], axis=2))
 
         n_shots = len(shots)
         kmax_xv, kmax_yv, kmax_zv = KspaceGeometry._kmax_from_geometry(geom)
@@ -2327,11 +2329,9 @@ class StackOfEccentric(StackOf):
             kz_params = {**params, "seed": None if kz_seed is None else int(kz_seed)}
             shots2d, inplane_meta = Eccentric2D._build(geom2d, kz_params, like)
             crossing.append(inplane_meta["center_crossing"])
-            for shot2d in shots2d:
-                nrows = ops.shape(shot2d)[0]
-                kz_col = ops.full_like_shape(like, (nrows,), float(kz_val))
-                all_shots.append(ops.concatenate(
-                    [shot2d, ops.stack([kz_col], axis=1)], axis=1))
+            shots2d = ops.stack(shots2d)
+            kz_col = ops.full_like_shape(like, ops.shape(shots2d)[:2] + (1,), float(kz_val))
+            all_shots.extend(ops.concatenate([shots2d, kz_col], axis=2))
 
         kmax_x, kmax_y, kmax_z = KspaceGeometry._kmax_from_geometry(geometry)
         n_total = len(all_shots)
@@ -2652,13 +2652,13 @@ class ShotUndersampler:
         rng = np.random.default_rng(params.get("seed"))
         tol = params.get("center_tol")
 
-        crossing = np.zeros(n_shots, dtype=bool)
-        for i, shot in enumerate(coords_per_shot):
-            inplane = ops.to_numpy(shot)[:, :2]
-            min_norm = float(np.linalg.norm(inplane, axis=1).min())
-            step = float(np.median(np.linalg.norm(np.diff(inplane, axis=0), axis=1)))
-            limit = float(tol) if tol is not None else 0.75 * step
-            crossing[i] = min_norm <= limit
+        pts = np.stack([ops.to_numpy(shot) for shot in coords_per_shot])
+        kx, ky = pts[:, :, 0], pts[:, :, 1]
+        dx, dy = np.diff(kx, axis=1), np.diff(ky, axis=1)
+        min_norm = np.sqrt(kx * kx + ky * ky).min(axis=1).astype(np.float64)
+        step = np.median(np.sqrt(dx * dx + dy * dy), axis=1).astype(np.float64)
+        limit = float(tol) if tol is not None else 0.75 * step
+        crossing = min_norm <= limit
 
         mask = crossing.copy()
         n_fill = n_keep - int(mask.sum())
@@ -2833,8 +2833,8 @@ class ShotUndersampler:
         n_shells = int(params.get("n_shells", 4))
         shell_afs_param = params.get("shell_afs", None)
 
-        norms = np.array([float(np.linalg.norm(ops.to_numpy(s).mean(axis=0)))
-                          for s in coords_per_shot], dtype=np.float32)
+        centroids = np.stack([ops.to_numpy(s) for s in coords_per_shot], axis=1).mean(axis=0)
+        norms = np.sqrt([c.dot(c) for c in centroids]).astype(np.float32)
         if norms.max() > 0:
             norms_n = norms / norms.max()
         else:
@@ -3131,9 +3131,9 @@ class GridMask:
         # Normalized radius in [0, 1] from the k-space center of the sub-grid.
         coords = np.meshgrid(
             *[(np.arange(n) - n // 2) / max(n / 2.0, 1.0) for n in sub_shape],
-            indexing="ij",
+            indexing="ij", sparse=True,
         )
-        r = np.sqrt(np.sum([c ** 2 for c in coords], axis=0))
+        r = np.sqrt(sum(c ** 2 for c in coords))
         r = r / max(r.max(), 1e-12)
 
         # Fully-sampled center, sized per axis so anisotropic grids behave.
