@@ -1225,9 +1225,10 @@ class GraphedStep:
     The training step (network, signal model, loss, backward, Adam) captured once as a CUDA graph
     and replayed: one launch instead of a few hundred small kernels, each of which waits for its
     turn while other jobs share the GPU. The forward pass and the loss are compiled first, which
-    fuses their kernels (and those of the backward pass) into far fewer; random ops stay the eager
-    ones. The first *warmup* steps run eagerly on a side stream (real training steps, the first
-    one compiles); the training loss is summed on the device and read at evaluations.
+    fuses their kernels (and those of the backward pass) into far fewer, and so is Adam's update;
+    random ops stay the eager ones. The first *warmup* steps run eagerly on a side stream (real
+    training steps, the first one compiles); the training loss is summed on the device and read
+    at evaluations.
     """
 
     def __init__(self, net, model, opt, warmup=3):
@@ -1238,6 +1239,7 @@ class GraphedStep:
         self.stream = torch.cuda.Stream()
         self.loss_sum = None
         self.loss = torch.compile(self._loss)
+        self.update = torch.compile(opt.step)
 
     def _loss(self, x, y):
         theta_n, norm = self.net(x)
@@ -1246,7 +1248,7 @@ class GraphedStep:
     def _step(self, x, y):
         loss = self.loss(x, y)
         loss.backward()
-        self.opt.step()
+        self.update()
         self.loss_sum += loss.detach()
 
     def __call__(self, x, y):
