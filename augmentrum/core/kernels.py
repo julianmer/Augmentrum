@@ -1565,3 +1565,148 @@ def macromolecules(spec, scale, units):
         flat.shape[0] // scale.shape[0], 2 * n if units.shape[0] > 1 else 0,
         ROW=triton.next_power_of_2(n), BLOCK=MM_POINTS, enable_fp_fusion=False)
     return out.reshape(spec.shape)
+
+
+#*********************#
+#   spurious echoes   #
+#*********************#
+#: Points each program of the spurious echoes adds to.
+ECHO_POINTS = 256
+
+#: Rows of the echo parameters, each (E, B) - one value per echo and sample.
+ECHO_PARAMS = ('delay_s', 'shift', 't_echo', 'T2', 'gaussian', 'omega', 'phase', 'amp', 'gain_re',
+               'gain_im', 'damping', 'plain')
+
+
+@triton.jit
+def _cmul(a_re, a_im, b_re, b_im):
+    """
+    The complex product a b as torch rounds it, fma(a_re, b_re, -a_im b_im) + i fma(a_re, b_im,
+    a_im b_re); a real factor x is x + 0i.
+    """
+    return tl.fma(a_re, b_re, -(a_im * b_im)), tl.fma(a_re, b_im, a_im * b_re)
+
+
+@triton.jit
+def _hypot(re, im):
+    """
+    |re + i im| as torch takes it: CUDA's hypotf as nvcc builds it - both parts scaled by a power
+    of two from the larger one's exponent, an fma, an IEEE square root, no flush to zero
+    (libdevice.hypot in Triton takes an approximate root and differs in the last bit).
+    """
+    a = tl.abs(re).to(tl.int32, bitcast=True)
+    b = tl.abs(im).to(tl.int32, bitcast=True)
+    small = tl.minimum(a, b).to(tl.float32, bitcast=True)
+    big = tl.maximum(a, b)
+    e = big & -0x2000000
+    scale = (e ^ 0x7E800000).to(tl.float32, bitcast=True)
+    v = big.to(tl.float32, bitcast=True)
+    r = tl.sqrt_rn(tl.fma(v * scale, v * scale, (small * scale) * (small * scale)))
+    r = r * (e | 0x800000).to(tl.float32, bitcast=True)
+    return tl.where(small == 0.0, v, tl.where(small == float('inf'), small, r))
+
+
+@triton.jit
+def _localized(t, at, B):
+    """The localized envelope at times *t* of the echo whose parameters start at *at*."""
+    d = t - tl.load(at + 2 * B)
+    T2 = tl.load(at + 3 * B)
+    if tl.load(at + 4 * B) > 0:
+        envelope = libdevice.exp(libdevice.div_rn(-(d * d), 2.0 * (T2 * T2)))
+    else:
+        envelope = libdevice.exp(libdevice.div_rn(-tl.abs(d), T2))
+    return envelope
+
+
+@triton.jit
+def spurious_echoes_kernel(x_ptr, params_ptr, t_ptr, out_ptr, N, B, E, PER_SAMPLE,
+                           MODE: tl.constexpr, TAU: tl.constexpr, ROW: tl.constexpr,
+                           BLOCK: tl.constexpr):
+    """
+    One program per row of the complex64 FIDs *x* (B * PER_SAMPLE, N) and block of points: the
+    row plus its sample's echoes, summed in complex64, each profile built in float64 at times *t*
+    as "SpuriousEchoes.process_tensor" builds it and cast to complex64. echo: the row's max |.|
+    times the localized echo; replica: the row delayed by its shift times the damped, phased and
+    shifted decay from the delay on; hybrid: amp times the delayed row (over its max |.| + 1e-30,
+    times that or, with TAU, |.| at the delay) under the localized envelope and modulation.
+    """
+    r = tl.program_id(0)
+    b = r // PER_SAMPLE
+    row = x_ptr + r.to(tl.int64) * N * 2
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    inside = j < N
+    q = tl.arange(0, 2)
+    x_re, x_im = tl.split(tl.load(row + j[:, None] * 2 + q[None, :], mask=inside[:, None],
+                                  other=0.0))
+    t = tl.load(t_ptr + j, mask=inside, other=0.0)
+    if MODE != 'replica':
+        k = tl.arange(0, ROW)
+        w_re, w_im = tl.split(tl.load(row + k[:, None] * 2 + q[None, :],
+                                      mask=(k < N)[:, None], other=0.0))
+        peak = tl.max(_hypot(w_re, w_im), axis=0)
+    g_re = tl.full([BLOCK], -0.0, tl.float32)
+    g_im = tl.full([BLOCK], -0.0, tl.float32)
+    for e in range(E):
+        at = params_ptr + e * 12 * B + b
+        omega = tl.load(at + 5 * B)
+        if MODE == 'echo':
+            angle = omega * t + tl.load(at + 6 * B)
+            p_re, p_im = _cmul(tl.load(at + 7 * B) * _localized(t, at, B), 0.0,
+                               libdevice.cos(angle), libdevice.sin(angle))
+            h_re, h_im = _cmul(peak, 0.0, p_re.to(tl.float32), p_im.to(tl.float32))
+        else:
+            delay = tl.load(at)
+            shift = tl.maximum(tl.load(at + B).to(tl.int32), 0)
+            src = j - shift
+            d_re, d_im = tl.split(tl.load(row + src[:, None] * 2 + q[None, :],
+                                          mask=(inside & (src >= 0))[:, None], other=0.0))
+            if MODE == 'replica':
+                td = tl.maximum(t - delay, 0.0)
+                v_re, v_im = _cmul(tl.load(at + 8 * B), tl.load(at + 9 * B),
+                                   libdevice.exp(tl.load(at + 10 * B) * td), 0.0)
+                v_re, v_im = _cmul(v_re, v_im, libdevice.cos(omega * td),
+                                   libdevice.sin(omega * td))
+                v_re, v_im = _cmul(v_re, v_im, tl.where(t >= delay, 1.0, 0.0), 0.0)
+                h_re, h_im = _cmul(d_re, d_im, v_re.to(tl.float32), v_im.to(tl.float32))
+            else:
+                angle = omega * (t - delay) + tl.load(at + 6 * B)
+                m_re = libdevice.cos(angle)
+                m_im = libdevice.sin(angle)
+                if tl.load(at + 3 * B) < 1e4:
+                    m_re, m_im = _cmul(_localized(t, at, B), 0.0, m_re, m_im)
+                m_re = m_re.to(tl.float32)
+                m_im = m_im.to(tl.float32)
+                amp = tl.load(at + 7 * B).to(tl.float32)
+                if tl.load(at + 11 * B) > 0:
+                    h_re, h_im = _cmul(d_re, d_im, m_re, m_im)
+                    h_re, h_im = _cmul(h_re, h_im, amp, 0.0)
+                else:
+                    top = peak + 1e-30
+                    ref = top
+                    if TAU:
+                        at_delay = row + tl.minimum(shift, N - 1) * 2
+                        ref = _hypot(tl.load(at_delay), tl.load(at_delay + 1))
+                    inv = libdevice.div_rn(1.0, top)
+                    h_re, h_im = _cmul(amp * ref, 0.0, d_re * inv, d_im * inv)
+                    h_re, h_im = _cmul(h_re, h_im, m_re, m_im)
+        g_re = g_re + h_re
+        g_im = g_im + h_im
+    tl.store(out_ptr + (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :],
+             tl.join(x_re + g_re, x_im + g_im), mask=inside[:, None])
+
+
+def spurious_echoes(data, params, t, mode, tau):
+    """
+    "SpuriousEchoes.process_tensor" on complex64 FIDs *data* (B, ..., N), its transient mask
+    aside: *params* (E, 12, B) float64 on the device, one row per name in ECHO_PARAMS (gaussian
+    and plain 1.0 or 0.0), *t* the time axis (N,) float64, *mode* 'echo', 'replica' or 'hybrid';
+    *tau* takes the hybrid amplitude at the delay.
+    """
+    n, (e, _, b) = data.shape[-1], params.shape
+    flat = data.contiguous().reshape(-1, n)
+    out = torch.empty_like(flat)
+    spurious_echoes_kernel[(flat.shape[0], triton.cdiv(n, ECHO_POINTS))](
+        torch.view_as_real(flat), params, t, torch.view_as_real(out), n, b, e,
+        flat.shape[0] // b, MODE=mode, TAU=bool(tau), ROW=triton.next_power_of_2(n),
+        BLOCK=ECHO_POINTS, enable_fp_fusion=False)
+    return out.reshape(data.shape)

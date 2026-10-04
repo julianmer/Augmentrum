@@ -22,8 +22,8 @@ import numpy as np
 from typing import Optional, List, Dict
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import (batch_profile, device_axis, device_values, on_cuda,
-                                         ppm_reference, to_backend)
+from augmentrum.processing.utils import (batch_profile, device_axis, device_kernels,
+                                         device_values, on_cuda, ppm_reference, to_backend)
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
 
@@ -383,6 +383,21 @@ class SpuriousEchoes(BaseModule):
         return (device_values(echo['amp'], like) * envelope
                 * torch.polar(torch.ones_like(angle), angle))
 
+    def _kernel_inputs(self, table: List[Dict], batch: int, like):
+        """
+        The echoes' parameters for "augmentrum.core.kernels.spurious_echoes", (E, 12, B) float64
+        on *like*'s device in one upload: each value as "process_tensor" forms it on the host.
+        """
+        params = np.empty((len(table), 12, batch))
+        for e, drawn in enumerate(table):
+            phase = np.deg2rad(self.global_phase_deg) + np.deg2rad(drawn['phase_deg'])
+            gain = drawn['amp'] * np.exp(1j * phase)
+            params[e] = np.broadcast_arrays(
+                drawn['delay_s'], drawn['shift'], drawn['t_echo'], drawn['T2'],
+                drawn['gaussian_env'], 2.0 * np.pi * drawn['freq_hz'], phase, drawn['amp'],
+                gain.real, gain.imag, -np.pi * drawn['decay_hz'], np.all(drawn['T2'] >= 1e4))
+        return device_values(params, like)
+
     def _hybrid_modulation(self, echo: Dict, t: np.ndarray) -> np.ndarray:
         """What multiplies the (normalized) delayed copy in hybrid mode."""
         phase = np.deg2rad(self.global_phase_deg) + np.deg2rad(echo['phase_deg'])
@@ -506,6 +521,13 @@ class SpuriousEchoes(BaseModule):
             view = [1] * ndim
             view[0], view[dyn_axis] = batch, int(shape[dyn_axis])
             mask = self._transient_mask(batch, int(shape[dyn_axis])).reshape(view)
+        kernels = device_kernels(data_array) if ndim > 1 and mask is None else None
+        if kernels is not None:
+            # every echo built, added up and added to the data in one launch
+            return kernels.spurious_echoes(
+                data_array, self._kernel_inputs(table, batch, data_array),
+                device_axis(('time', n_points, float(sw_hz)), lambda: t, data_array), self.mode,
+                self.alpha_reference == 'tau'), water_array
         ghost_total = None
 
         for drawn in table:
