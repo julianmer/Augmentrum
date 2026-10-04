@@ -220,6 +220,40 @@ def test_water_keeps_the_acquired_transients_and_squeezes_a_single_one():
         cows._acquired_water(empty)
 
 
+def test_a_known_broken_header_is_read_from_a_repaired_copy(tmp_path, monkeypatch):
+    """
+    A file HEADER_REPAIRS knows as published is read from a patched copy, checked by its md5;
+    the file itself (here read-only, as a DataLad copy is) is never written, any other file is
+    read as it is, and a repair that does not give the expected file is refused.
+    """
+    import hashlib
+    md5 = lambda blob: hashlib.md5(bytes(blob)).hexdigest()
+    published = bytes(range(64))
+    repaired = bytearray(published)
+    repaired[4:6] = b'ok'
+    path = tmp_path / 'scan.dat'
+    path.write_bytes(published)
+    path.chmod(0o444)
+    monkeypatch.setitem(cows.HEADER_REPAIRS, 'scan.dat',
+                        (md5(published), ((4, b'ok'),), md5(repaired)))
+    with cows._readable(str(path)) as readable:
+        assert readable != str(path)
+        with open(readable, 'rb') as f:
+            assert f.read() == bytes(repaired)
+    assert path.read_bytes() == published
+
+    other = tmp_path / 'other.dat'
+    other.write_bytes(published)
+    with cows._readable(str(other)) as readable:
+        assert readable == str(other)
+
+    monkeypatch.setitem(cows.HEADER_REPAIRS, 'scan.dat',
+                        (md5(published), ((4, b'no'),), md5(repaired)))
+    with pytest.raises(ValueError, match='header repair'):
+        with cows._readable(str(path)):
+            pass
+
+
 #*************#
 #   loading   #
 #*************#

@@ -17,9 +17,13 @@
 #*************#
 #   imports   #
 #*************#
+import contextlib
+import hashlib
 import json
 import os
 import re
+import shutil
+import tempfile
 import warnings
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -187,6 +191,49 @@ def _stamp(nifti, scan: COWSScan):
 #*************#
 #   readers   #
 #*************#
+#: TWIX files of OpenNeuro ds006812 whose header has to be repaired before mapVBVD can read them:
+#: file name -> (md5 as published, ((offset, bytes), ...), md5 repaired). sub-01 acq-06's
+#: multi-RAID header lists a coil-sensitivity adjustment as a second measurement whose place is
+#: 516 bytes off; the repair makes the scan the file's one measurement (45 bytes, data untouched).
+HEADER_REPAIRS = {
+    'sub-01_acq-06_svs_slaser_vapor7_metab_Occipital.dat': (
+        'f51334c86867c868537c73d93549ceb9',
+        ((4, b'\x01'), (8, b'\xfe'), (12, b'\xd5'), (16, b'\xfc?\x15\x02'), (24, b'@\xba\x1f'),
+         (96, b'mag_svs_slaser_cu_9_vapor_Occipital')),
+        'd9160d10ef5a8c1c1d416e5eb80e7016')}
+
+
+def _md5(path):
+    digest = hashlib.md5()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 22), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@contextlib.contextmanager
+def _readable(path):
+    """
+    *path* itself, or - where HEADER_REPAIRS knows it as published - a repaired copy of it in a
+    temporary folder, checked against the repaired md5. The file itself is never written (it may
+    be a read-only DataLad / git-annex copy).
+    """
+    repair = HEADER_REPAIRS.get(os.path.basename(path))
+    if repair is None or _md5(path) != repair[0]:
+        yield path
+        return
+    with tempfile.TemporaryDirectory() as folder:
+        copy = os.path.join(folder, os.path.basename(path))
+        shutil.copyfile(path, copy)
+        with open(copy, 'r+b') as f:
+            for offset, blob in repair[1]:
+                f.seek(offset)
+                f.write(blob)
+        if _md5(copy) != repair[2]:
+            raise ValueError(f'{path}: the header repair did not give the expected file')
+        yield copy
+
+
 def read_twix(path, remove_oversampling: bool = True):
     """
     Read one COWS TWIX file into standard NIfTI-MRS.
@@ -215,7 +262,7 @@ def read_twix(path, remove_oversampling: bool = True):
 
     Returns:
         "(data, water)" NIFTI_MRS objects with dim tags DIM_COIL, DIM_DYN and
-        DIM_COIL[, DIM_DYN].
+        DIM_COIL[, DIM_DYN]. A file of HEADER_REPAIRS is read from a repaired copy.
     """
     from fsl_mrs.core.nifti_mrs import split
     from spec2nii.Siemens.twixfunctions import process_twix
@@ -229,14 +276,14 @@ def read_twix(path, remove_oversampling: bool = True):
             "\"pip install pymapvbvd\", or point this at data already "
             "converted to NIfTI-MRS.") from error
 
-    twix = mapVBVD(str(path), quiet=True)
-    if isinstance(twix, list):                      # multi-RAID file: the last is the scan
-        twix = twix[-1]
-
     name = os.path.basename(path)
     overrides = {'dims': (None, None, None), 'tags': (None, None, None)}
-    images, _ = process_twix(twix, os.path.splitext(name)[0], name, 'image', overrides,
-                             quiet=True, remove_os=remove_oversampling)
+    with _readable(str(path)) as readable:          # mapVBVD reads the data when asked for it
+        twix = mapVBVD(readable, quiet=True)
+        if isinstance(twix, list):                  # multi-RAID file: the last is the scan
+            twix = twix[-1]
+        images, _ = process_twix(twix, os.path.splitext(name)[0], name, 'image', overrides,
+                                 quiet=True, remove_os=remove_oversampling)
 
     water, data = split(images[0], 'DIM_USER_0', 0)
     data = safe_squeeze(data, dims=['DIM_USER_0'])
