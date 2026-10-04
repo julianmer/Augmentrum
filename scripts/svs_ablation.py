@@ -14,8 +14,12 @@
 #          grid on every visible GPU.                                                              #
 #                                                                                                  #
 # The grid on another machine (e.g. Kay's), from the Augmentrum root:                              #
-#   1. env: Python 3.11, pip install -e .[torch] fsl-mrs==2.5.0 pymapvbvd==0.6.1 spec2nii==0.8.15  #
-#      wandb; A100: torch 2.6 (cu124); Blackwell: torch >= 2.7 built for CUDA >= 12.8              #
+#   1. env (FSL-MRS comes from conda only, so Augmentrum goes in without dependencies):            #
+#      conda create -n augmentrum python=3.11 fsl_mrs=2.5.0 pymapvbvd=0.6.1 spec2nii=0.8.15 \      #
+#        -c conda-forge -c https://fsl.fmrib.ox.ac.uk/fsldownloads/fslconda/public/                #
+#      conda activate augmentrum                                                                   #
+#      pip install torch --index-url https://download.pytorch.org/whl/cu128                        #
+#      pip install nifti-mrs "nifti-mrs-plus[ops]" shutup wandb && pip install --no-deps -e .      #
 #   2. tar xzf cows_grid_bundle.tar.gz (the basis, the test and selection sets, and the header-    #
 #      repaired sub-01 acq-06 scan: OpenNeuro's copy has a broken multi-RAID header)               #
 #   3. python scripts/svs_ablation.py grid (log: results/cows/grid/grid.log)                       #
