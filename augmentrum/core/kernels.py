@@ -58,6 +58,25 @@ def _normalised(re, im, floor):
     return re / norm, im / norm
 
 
+@triton.jit
+def _hypot(re, im):
+    """
+    |re + i im| as torch takes it: CUDA's hypotf as nvcc builds it - both parts scaled by a power
+    of two from the larger one's exponent, an fma, an IEEE square root, no flush to zero
+    (libdevice.hypot in Triton takes an approximate root and differs in the last bit).
+    """
+    a = tl.abs(re).to(tl.int32, bitcast=True)
+    b = tl.abs(im).to(tl.int32, bitcast=True)
+    small = tl.minimum(a, b).to(tl.float32, bitcast=True)
+    big = tl.maximum(a, b)
+    e = big & -0x2000000
+    scale = (e ^ 0x7E800000).to(tl.float32, bitcast=True)
+    v = big.to(tl.float32, bitcast=True)
+    r = tl.sqrt_rn(tl.fma(v * scale, v * scale, (small * scale) * (small * scale)))
+    r = r * (e | 0x800000).to(tl.float32, bitcast=True)
+    return tl.where(small == 0.0, v, tl.where(small == float('inf'), small, r))
+
+
 #******************#
 #   wsvd weights   #
 #******************#
@@ -632,7 +651,7 @@ def _window_peak(spec_ptr, r, M, FIRST, LAST, W: tl.constexpr):
     at = (r.to(tl.int64) * M + (k + M // 2) % M) * 2
     re = tl.load(spec_ptr + at, mask=valid, other=0.0)
     im = tl.load(spec_ptr + at + 1, mask=valid, other=0.0)
-    size = tl.where(valid, libdevice.hypot(re, im), -1.0)
+    size = tl.where(valid, _hypot(re, im), -1.0)
     top = tl.max(size, axis=0)
     peak = tl.min(tl.where(size == top, k, LAST), axis=0)
     at = (r.to(tl.int64) * M + (peak + M // 2) % M) * 2
@@ -940,9 +959,9 @@ def _newton_free(base, n, nu, low, high, cap, q0, two_pi, neg_two_pi, rate, rate
     e1 = 2.0 * (e1r * -0.0 - e1i * -rate)
     e2 = (2.0 * (_pick(c, 8, 16) + _pick(s, 11, 16))) * rate2
 
-    mag = tl.maximum(libdevice.hypot(kr, ki), 1.1754943508222875e-38)
+    mag = tl.maximum(_hypot(kr, ki), 1.1754943508222875e-38)
     slope = libdevice.div_rn(kr * k1r - (-ki) * k1i, mag)
-    k1abs = libdevice.hypot(k1r, k1i)
+    k1abs = _hypot(k1r, k1i)
     curve = libdevice.div_rn((k1abs * k1abs + (kr * k2r - (-ki) * k2i)) - slope * slope, mag)
     grad = e1 - 2.0 * slope
     hess = e2 - 2.0 * curve
@@ -1195,7 +1214,7 @@ def peak_kernel(x_ptr, out_ptr, N, BLOCK: tl.constexpr):
     z = tl.load(x_ptr + (b.to(tl.int64) * N + p[:, None]) * 2 + q[None, :],
                 mask=(p < N)[:, None], other=0.0)
     re, im = tl.split(z)
-    tl.atomic_max(out_ptr + b, tl.max(libdevice.hypot(re, im), axis=0))
+    tl.atomic_max(out_ptr + b, tl.max(_hypot(re, im), axis=0))
 
 
 def spectrum_peak(x, axis):
@@ -1343,7 +1362,7 @@ def add_peaks_kernel(spec_ptr, spectra_ptr, params_ptr, out_ptr, N, B, P, PER_SA
     s = tl.load(spec_ptr + (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :],
                 mask=inside[:, None], other=0.0)
     s_re, s_im = tl.split(s)
-    level = tl.abs(s_re) if REAL else libdevice.hypot(s_re, s_im)
+    level = tl.abs(s_re) if REAL else _hypot(s_re, s_im)
     ref = tl.max(tl.where(inside, level, 0.0), axis=0)
     ref = tl.where(ref > 0, ref, 1.0)
 
@@ -1585,25 +1604,6 @@ def _cmul(a_re, a_im, b_re, b_im):
     a_im b_re); a real factor x is x + 0i.
     """
     return tl.fma(a_re, b_re, -(a_im * b_im)), tl.fma(a_re, b_im, a_im * b_re)
-
-
-@triton.jit
-def _hypot(re, im):
-    """
-    |re + i im| as torch takes it: CUDA's hypotf as nvcc builds it - both parts scaled by a power
-    of two from the larger one's exponent, an fma, an IEEE square root, no flush to zero
-    (libdevice.hypot in Triton takes an approximate root and differs in the last bit).
-    """
-    a = tl.abs(re).to(tl.int32, bitcast=True)
-    b = tl.abs(im).to(tl.int32, bitcast=True)
-    small = tl.minimum(a, b).to(tl.float32, bitcast=True)
-    big = tl.maximum(a, b)
-    e = big & -0x2000000
-    scale = (e ^ 0x7E800000).to(tl.float32, bitcast=True)
-    v = big.to(tl.float32, bitcast=True)
-    r = tl.sqrt_rn(tl.fma(v * scale, v * scale, (small * scale) * (small * scale)))
-    r = r * (e | 0x800000).to(tl.float32, bitcast=True)
-    return tl.where(small == 0.0, v, tl.where(small == float('inf'), small, r))
 
 
 @triton.jit
