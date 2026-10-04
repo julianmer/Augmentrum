@@ -27,8 +27,8 @@ from scipy.signal import hilbert
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from augmentrum.processing.utils import (ppm_axis, batch_profile, per_sample_factor,
-                                         causal_lineshape, device_axis, device_values,
-                                         on_cuda, to_backend)
+                                         causal_lineshape, device_axis, device_kernels,
+                                         device_values, on_cuda, to_backend)
 from nifti_mrs_plus import Backend
 from nifti_mrs_plus import ops
 
@@ -498,15 +498,24 @@ class SemiParametrized(MMSource):
         import torch
         import torch.nn.functional as F
         batch, n = widths.size, ppm.size
+        kernels = device_kernels(like)
+        if kernels is not None and self.amp_mod > 0:
+            # the same arithmetic in four launches around the mean and the two transforms: the
+            # envelopes, the broadened absorption parts enveloped, the filter, the normalisation
+            stack = self._stencils(widths, ppm)
+            params = device_values(np.concatenate([weights.ravel(), stack.ravel(), base.real]),
+                                   like)
+            consts = device_axis(
+                ('semi-parametrized', n, self.amp_mod),
+                lambda: np.concatenate([np.cos(k * np.linspace(0.0, np.pi, n)) for k in (1, 2, 3)]
+                                       + [[1.0 / k for k in (1, 2, 3)] + [self.amp_mod, 1.0 / n]]),
+                like)
+            return kernels.semi_parametrized(params, stack.shape[1], consts, batch, n)
         spectra = device_values(base, like).reshape(1, n).repeat(batch, 1)
 
         if np.any(widths > 0):
-            dppm = float(np.median(np.abs(np.diff(ppm))))
-            kernels = [self._kernel(w, dppm) if w > 0 else np.ones(1) for w in widths]
-            half = max(k.size // 2 for k in kernels)
-            stack = np.zeros((batch, 2 * half + 1))
-            for b, k in enumerate(kernels):
-                stack[b, half - k.size // 2:half + k.size // 2 + 1] = k
+            stack = self._stencils(widths, ppm)
+            half = stack.shape[1] // 2
             weight = device_values(np.repeat(stack, 2, axis=0)[:, None, :], like)
             parts = torch.stack([spectra.real, spectra.imag], dim=1).reshape(1, 2 * batch, n)
             parts = F.conv1d(parts, weight, padding=half, groups=2 * batch).reshape(batch, 2, n)
@@ -526,6 +535,17 @@ class SemiParametrized(MMSource):
 
         peak = torch.amax(torch.abs(spectra.real), dim=-1, keepdim=True)
         return torch.where(peak > 0, spectra / torch.where(peak > 0, peak, 1.0), spectra)
+
+    def _stencils(self, widths, ppm):
+        """Each sample's stencil ("_kernel", a unit impulse where its width is 0) centred in
+        zeros to the longest, "(batch, 2 half + 1)"."""
+        dppm = float(np.median(np.abs(np.diff(ppm))))
+        kernels = [self._kernel(w, dppm) if w > 0 else np.ones(1) for w in widths]
+        half = max(k.size // 2 for k in kernels)
+        stack = np.zeros((widths.size, 2 * half + 1))
+        for b, k in enumerate(kernels):
+            stack[b, half - k.size // 2:half + k.size // 2 + 1] = k
+        return stack
 
     @staticmethod
     def _kernel(width, dppm):
@@ -658,6 +678,20 @@ class Macromolecules(BaseModule):
                                    (batch, ppm.size)).copy()
         return self.source.profiles(ppm, rng, batch, sf_mhz=sf_mhz, like=like)
 
+    def _kernel_inputs(self, profiles, batch, like):
+        """
+        The scales (float64 on *like*'s device) and unit profiles for
+        "augmentrum.core.kernels.macromolecules": host-built profiles as (re, im) pairs after the
+        scales in one upload (a single row for a fixed source), the device's as they are.
+        """
+        scale = np.full(batch, self.mm_scale, dtype=np.float64)
+        if on_cuda(profiles):
+            return device_values(scale, like), profiles
+        rows = profiles if self.source.varies else profiles[:1]
+        pairs = np.stack([rows.real, rows.imag], axis=-1).ravel()
+        values = device_values(np.concatenate([scale, pairs]), like)
+        return values[:batch], values[batch:]
+
     def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
         """
         Add the MM profile to spectra on any tensor backend.
@@ -690,6 +724,11 @@ class Macromolecules(BaseModule):
         ppm = ppm_axis(n_points, float(sw_hz), float(sf_mhz), nucleus)
         profiles = self._profiles(batch, ppm, float(sf_mhz),
                                   like=spec if on_cuda(spec) and ndim > 1 else None)
+        kernels = device_kernels(spec) if ndim > 1 else None
+        if kernels is not None:
+            # the same arithmetic in one launch: each row's peak, its amplitude, the profile added
+            return kernels.macromolecules(spec, *self._kernel_inputs(profiles, batch, spec)), \
+                water_array
         if on_cuda(profiles):
             unit = profiles.reshape((batch,) + (1,) * (ndim - 2) + (n_points,))
         else:

@@ -1396,3 +1396,172 @@ def artificial_peaks(spec, params, consts, real):
         n, b, p, flat.shape[0] // b, REAL=bool(real), BLOCK=triton.next_power_of_2(n),
         enable_fp_fusion=False, num_warps=8)
     return out.reshape(spec.shape)
+
+
+#********************#
+#   macromolecules   #
+#********************#
+#: Points each program of the macromolecule kernels fills.
+MM_POINTS = 256
+
+
+@triton.jit
+def mm_envelope_kernel(params_ptr, consts_ptr, out_ptr, N, BLOCK: tl.constexpr):
+    """
+    One program per (sample b, block of points): "SemiParametrized"'s envelope before its mean
+    is taken, 1 + sum_k w_bk cos(k x) / k for k = 1, 2, 3, each step rounded as its torch
+    operation rounds - a quotient by k its reciprocal times. params: the weights (B, 3) first;
+    consts: the cosine rows (3, N), then 1 / k.
+    """
+    b = tl.program_id(0)
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    inside = j < N
+    envelope = tl.full([BLOCK], 1.0, tl.float64)
+    for k in tl.static_range(3):
+        w = tl.load(params_ptr + b * 3 + k)
+        cos = tl.load(consts_ptr + k * N + j, mask=inside)
+        envelope = envelope + (w * cos) * tl.load(consts_ptr + 3 * N + k)
+    tl.store(out_ptr + b.to(tl.int64) * N + j, envelope, mask=inside)
+
+
+@triton.jit
+def mm_absorption_kernel(params_ptr, envelope_ptr, mean_ptr, consts_ptr, out_ptr, N, B, TAPS,
+                         BLOCK: tl.constexpr):
+    """
+    One program per (sample b, block of points): the base profile's real part convolved with the
+    sample's stencil as torch's depthwise convolution sums it - an fma per tap in the zero-padded
+    input, from the first - times the envelope e as 1 + amp_mod (e - mean e), clipped at 0.
+    params: the weights (B, 3), the stencils (B, TAPS) and the real part (N); consts: amp_mod
+    after the cosines and 1 / k.
+    """
+    b = tl.program_id(0)
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    inside = j < N
+    stencil = params_ptr + 3 * B + b * TAPS
+    base = params_ptr + 3 * B + B * TAPS
+    acc = tl.zeros([BLOCK], dtype=tl.float64)
+    for k in range(TAPS):
+        i = j - TAPS // 2 + k
+        valid = (i >= 0) & (i < N)
+        acc = tl.where(valid, tl.fma(tl.load(stencil + k), tl.load(base + i, mask=valid), acc),
+                       acc)
+    envelope = tl.load(envelope_ptr + b.to(tl.int64) * N + j, mask=inside)
+    amp_mod = tl.load(consts_ptr + 3 * N + 3)
+    envelope = tl.maximum(1.0 + amp_mod * (envelope - tl.load(mean_ptr + b)), 0.0)
+    tl.store(out_ptr + b.to(tl.int64) * N + j, acc * envelope, mask=inside)
+
+
+@triton.jit
+def mm_analytic_kernel(half_ptr, out_ptr, N, H, BLOCK: tl.constexpr):
+    """
+    One program per (row, block of bins): the row's full transform times "scipy.signal.hilbert"'s
+    filter h (1, 2 ... 2, 1 where N is even, 0 beyond), from its one-sided transform (H bins) -
+    each bin past H the conjugate of its mirror, as torch fills it - in torch's complex product,
+    fma(x_re, h, -(x_im 0)) + i fma(x_re, 0, x_im h).
+    """
+    r = tl.program_id(0)
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    inside = j < N
+    upper = j >= H
+    q = tl.arange(0, 2)
+    x = tl.load(half_ptr + (r.to(tl.int64) * H + tl.where(upper, N - j, j)[:, None]) * 2
+                + q[None, :], mask=inside[:, None], other=0.0)
+    re, im = tl.split(x)
+    im = tl.where(upper, -im, im)
+    h = tl.where((j == 0) | (2 * j == N), 1.0, tl.where(j < (N + 1) // 2, 2.0, 0.0))
+    h = h.to(tl.float64)
+    tl.store(out_ptr + (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :],
+             tl.join(tl.fma(re, h, -(im * 0.0)), tl.fma(re, 0.0, im * h)), mask=inside[:, None])
+
+
+@triton.jit
+def mm_unit_kernel(x_ptr, consts_ptr, out_ptr, N, ROW: tl.constexpr, BLOCK: tl.constexpr):
+    """
+    One program per (row, block of points) of the analytic signals: the unnormalised inverse
+    transform times 1 / N as torch scales it (a product with 1 / N + 0i), over the row's peak
+    |real| - its reciprocal times - where that is positive. The peak is 1 / N times the row's
+    largest |real|, as rounding keeps order. consts: 1 / N after the cosines, 1 / k and amp_mod.
+    """
+    r = tl.program_id(0)
+    row = x_ptr + r.to(tl.int64) * N * 2
+    i = tl.arange(0, ROW)
+    s = tl.load(consts_ptr + 3 * N + 4)
+    peak = s * tl.max(tl.abs(tl.load(row + i * 2, mask=i < N, other=0.0)), axis=0)
+    scale = libdevice.div_rn(tl.full([], 1.0, tl.float64), tl.where(peak > 0, peak, 1.0))
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    q = tl.arange(0, 2)
+    re, im = tl.split(tl.load(row + j[:, None] * 2 + q[None, :], mask=(j < N)[:, None],
+                              other=0.0))
+    re, im = tl.fma(s, re, -(0.0 * im)), tl.fma(s, im, 0.0 * re)
+    tl.store(out_ptr + (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :],
+             tl.join(re * scale, im * scale), mask=(j < N)[:, None])
+
+
+def semi_parametrized(params, taps, consts, batch, n):
+    """
+    "SemiParametrized._device_profiles" with an envelope, (B, N) complex128: *params* float64
+    holds the envelope weights (B, 3), the stencils (B, taps) and the base profile's real part
+    (N); *consts* the envelope's cosines (3, N), 1 / k for k = 1, 2, 3, amp_mod and 1 / N. The
+    mean and both transforms stay torch's.
+    """
+    envelope = torch.empty((batch, n), dtype=torch.float64, device=params.device)
+    grid = (batch, triton.cdiv(n, MM_POINTS))
+    mm_envelope_kernel[grid](params, consts, envelope, n, BLOCK=MM_POINTS, enable_fp_fusion=False)
+    absorption = torch.empty_like(envelope)
+    mm_absorption_kernel[grid](params, envelope, envelope.mean(dim=-1), consts, absorption, n,
+                               batch, taps, BLOCK=MM_POINTS, enable_fp_fusion=False)
+    half = torch.fft.rfft(absorption, dim=-1)
+    full = torch.empty((batch, n), dtype=torch.complex128, device=params.device)
+    mm_analytic_kernel[grid](torch.view_as_real(half), torch.view_as_real(full), n,
+                             half.shape[-1], BLOCK=MM_POINTS, enable_fp_fusion=False)
+    signal = torch.fft.ifft(full, dim=-1, norm='forward')
+    unit = torch.empty_like(signal)
+    mm_unit_kernel[grid](torch.view_as_real(signal), consts, torch.view_as_real(unit), n,
+                         ROW=triton.next_power_of_2(n), BLOCK=MM_POINTS, enable_fp_fusion=False)
+    return unit
+
+
+@triton.jit
+def add_mm_kernel(spec_ptr, unit_ptr, scale_ptr, out_ptr, N, PER_SAMPLE, UNIT_ROW,
+                  ROW: tl.constexpr, BLOCK: tl.constexpr):
+    """
+    One program per (row, block of points) of the complex64 spectra *spec* (B * PER_SAMPLE, N):
+    the row plus its sample's unit profile (UNIT_ROW values after the previous sample's, 0 when
+    all share one) cast to complex64, times the sample's scale in float32 and the row's peak
+    |real|, the product rounded as torch's: fma(a_re, b_re, -a_im b_im) + i fma(a_re, b_im,
+    a_im b_re).
+    """
+    r = tl.program_id(0)
+    b = r // PER_SAMPLE
+    row = spec_ptr + r.to(tl.int64) * N * 2
+    i = tl.arange(0, ROW)
+    peak = tl.max(tl.abs(tl.load(row + i * 2, mask=i < N, other=0.0)), axis=0)
+    amp = tl.load(scale_ptr + b).to(tl.float32) * peak
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    inside = (j < N)[:, None]
+    q = tl.arange(0, 2)
+    s_re, s_im = tl.split(tl.load(row + j[:, None] * 2 + q[None, :], mask=inside, other=0.0))
+    u = tl.load(unit_ptr + b.to(tl.int64) * UNIT_ROW + j[:, None] * 2 + q[None, :], mask=inside,
+                other=0.0)
+    u_re, u_im = tl.split(u.to(tl.float32))
+    tl.store(out_ptr + (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :],
+             tl.join(s_re + tl.fma(u_re, amp, -(u_im * 0.0)), s_im + tl.fma(u_re, 0.0, u_im * amp)),
+             mask=inside)
+
+
+def macromolecules(spec, scale, units):
+    """
+    "Macromolecules.process_tensor" on complex64 spectra *spec* (B, ..., N): every row plus its
+    sample's unit profile times the sample's *scale* ((B,) float64) and the row's peak |real|.
+    *units*: the profiles, complex128 or float64 (re, im) pairs, a row of N per sample or one
+    for all.
+    """
+    n = spec.shape[-1]
+    units = (torch.view_as_real(units) if units.is_complex() else units).reshape(-1, 2 * n)
+    flat = spec.contiguous().reshape(-1, n)
+    out = torch.empty_like(flat)
+    add_mm_kernel[(flat.shape[0], triton.cdiv(n, MM_POINTS))](
+        torch.view_as_real(flat), units, scale, torch.view_as_real(out), n,
+        flat.shape[0] // scale.shape[0], 2 * n if units.shape[0] > 1 else 0,
+        ROW=triton.next_power_of_2(n), BLOCK=MM_POINTS, enable_fp_fusion=False)
+    return out.reshape(spec.shape)
