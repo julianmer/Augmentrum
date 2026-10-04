@@ -692,7 +692,7 @@ MEDIAN_ROWS = 64
 
 #: What an entry a sample does not keep sorts as: beyond every kept one, but finite - Triton's sort
 #: (3.2) misorders rows that hold infinities.
-BEYOND: tl.constexpr = 3.0e38
+BEYOND = tl.constexpr(3.0e38)
 
 
 @triton.jit
