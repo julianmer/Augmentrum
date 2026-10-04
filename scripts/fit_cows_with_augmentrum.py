@@ -57,7 +57,7 @@ from scripts.fsl_fitting_framework import FSLFittingFramework
 DEFAULT_CONFIG = {
     # Data paths
     'data_dir': 'data/openneuro_ds006812/',      # COWS data (openneuro TWIX format)
-    'basis_dir': 'data/BasisSets/TE26_basis/',   # Default basis set (JSON format)
+    'basis_dir': 'data/basis_sets/TE26_basis/',   # Default basis set (JSON format)
 
     # Output
     'save_dir': 'results/cows_fit/',
@@ -695,7 +695,7 @@ Examples:
 
   # Fit COWS data with LCModel .raw basis
   python fit_cows_with_augmentrum.py \\
-      --basis data/BasisSets/raw_basis_functions/ \\
+      --basis data/basis_sets/raw_basis_functions/ \\
       --basis-bw 2000 --basis-cf 127.8
 
   # Fit only OCCIPITAL with VAPOR suppression
@@ -704,7 +704,7 @@ Examples:
 
   # Fit with the FID-A .mat basis set
   python fit_cows_with_augmentrum.py \\
-      --basis data/BasisSets/basis_functions_metab_mm_mat/
+      --basis data/basis_sets/basis_functions_metab_mm_mat/
 
   # Load and view previously saved results
   python fit_cows_with_augmentrum.py --load-only results/cows_fit/

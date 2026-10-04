@@ -20,11 +20,9 @@
 #      conda activate augmentrum                                                                   #
 #      pip install torch --index-url https://download.pytorch.org/whl/cu128                        #
 #      pip install nifti-mrs "nifti-mrs-plus[ops]" shutup wandb && pip install --no-deps -e .      #
-#   2. tar xzf cows_grid_bundle.tar.gz (the basis, the test and selection sets, and the header-    #
-#      repaired sub-01 acq-06 scan: OpenNeuro's copy has a broken multi-RAID header)               #
-#   3. python scripts/svs_ablation.py grid (log: results/cows/grid/grid.log)                       #
+#   2. python scripts/svs_ablation.py grid (log: results/cows/grid/grid.log)                       #
 #      (later, e.g. grid --steps 4000000 continues every run from its last.pt to 4M)               #
-#   4. send back results/cows/grid without the checkpoints: tar czf cows_grid_runs.tar.gz          #
+#   3. send back results/cows/grid without the checkpoints: tar czf cows_grid_runs.tar.gz          #
 #      --exclude=last.pt --exclude=checkpoints results/cows/grid                                   #
 #                                                                                                  #
 ####################################################################################################
@@ -80,8 +78,12 @@ from scipy.optimize import minimize
 #   settings   #
 #**************#
 DATA_DIR = os.environ.get('COWS_DATA_DIR', 'data/openneuro_ds006812')
-BASIS_DIR = os.environ.get('COWS_BASIS_DIR', 'data/BasisSets/TE26_basis_summed')
+BASIS_DIR = os.environ.get('COWS_BASIS_DIR', 'data/basis_sets/TE26_basis_summed')
 CACHE_DIR = os.environ.get('COWS_CACHE_DIR', 'data/cows_cache')
+#: the test sets' inputs, in git: every scan as Osprey fitted it, and every processed scan's SNR
+#: (written by "testset_inputs" from the pipeline's results)
+TESTSET_ROWS = 'data/cows/osprey_rows.json'
+TESTSET_SNR = 'data/cows/scan_snr.json'
 
 BW, POINTS = 4000.0, 2048                   # COWS after oversampling removal; the basis to match
 PPM_WINDOW = (0.5, 4.2)                     # the network's input and loss, every tool's fit window
@@ -859,14 +861,24 @@ def simulate_rows(rows, basis, chunk=100):
 def testset_rows(path):
     """
     The rows a test set copies (rows of "simulate_rows", in the data's units): osprey-rows'
-    (<fits>/rows_osprey.npz: each scan as Osprey fitted it, in Osprey's own model) or rows'
-    (<fits>/rows.npz: each tool's concentrations, the rest fitted to the scan).
+    (<fits>/rows_osprey.npz: each scan as Osprey fitted it, in Osprey's own model), its copy in
+    git (TESTSET_ROWS, "testset_inputs") or rows' (<fits>/rows.npz: each tool's concentrations,
+    the rest fitted to the scan).
 
     Returns:
         (rows {key: (M, ...)}, tool per row, stem per row).
     """
-    z = np.load(path)
-    rows = {k: z[k] for k in ROW_KEYS + (('kernel',) if 'kernel' in z.files else ())}
+    if path.endswith('.json'):
+        with open(path) as f:
+            z = json.load(f)
+        span = z.pop('baseline')                  # each baseline's non-zero span, the rest 0
+        z['baseline'] = np.zeros((len(z['stem']), span['length']), complex)
+        part = slice(span['first'], span['first'] + len(span['re'][0]))
+        z['baseline'].real[:, part], z['baseline'].imag[:, part] = span['re'], span['im']
+        z = {k: np.asarray(v) for k, v in z.items() if k != 'source'}
+    else:
+        z = np.load(path)
+    rows = {k: z[k] for k in ROW_KEYS + (('kernel',) if 'kernel' in z else ())}
     ok = np.all([np.isfinite(v).reshape(len(v), -1).all(1) for v in rows.values()], axis=0)
     return {k: v[ok] for k, v in rows.items()}, z['tool'][ok], [str(s) for s in z['stem'][ok]]
 
@@ -1034,10 +1046,15 @@ def generate_testset(rows_path, processed, out_dir, seed=0, n=1000, jitter=0.1, 
     p['con'] = p['con'] * scale
     p['baseline'] = p['baseline'] * scale
 
-    z = np.load(processed)
-    pool = (np.ones(len(z['fids']), bool) if subjects is None
-            else np.isin([str(x) for x in z['subjects']], subjects))
-    snr_pool = scan_snr(z['fids'][pool], basis.ppm)
+    if processed.endswith('.json'):                # every scan's SNR, as "testset_inputs" kept it
+        with open(processed) as f:
+            scans = json.load(f)
+        found, every = scans['subject'], np.array(scans['snr'])
+    else:
+        z = np.load(processed)
+        found, every = [str(x) for x in z['subjects']], None
+    pool = np.ones(len(found), bool) if subjects is None else np.isin(found, subjects)
+    snr_pool = every[pool] if every is not None else scan_snr(z['fids'][pool], basis.ppm)
     snr = rng.choice(snr_pool, n) * np.exp(snr_jitter * rng.standard_normal(n))
     clean = simulate_rows(p, basis)
     naa = (basis.ppm >= PPM_NAA[0]) & (basis.ppm <= PPM_NAA[1])
@@ -1049,7 +1066,8 @@ def generate_testset(rows_path, processed, out_dir, seed=0, n=1000, jitter=0.1, 
     first, last = basis.window()
     config = dict(seed=seed, n=n, subjects=subjects, jitter=jitter, snr_jitter=snr_jitter,
                   tcr_ref=tcr_ref,
-                  unit_scale=scale, rows=rows_path, processed=processed,
+                  unit_scale=scale, rows=input_source(rows_path),
+                  processed=input_source(processed),
                   rows_per_tool={t: int((tools == t).sum()) for t in ('fsl_pb', 'lcmodel', 'osprey')},
                   drawn={t: int((tools[idx] == t).sum()) for t in ('fsl_pb', 'lcmodel', 'osprey')},
                   snr_pool=dict(n=int(snr_pool.size), median=float(np.median(snr_pool))),
@@ -1062,6 +1080,43 @@ def generate_testset(rows_path, processed, out_dir, seed=0, n=1000, jitter=0.1, 
     np.savez(path, spectra=spectra, **p, snr=snr, noise_sd=sd, names=np.array(names),
              config=text, hash=digest, tool=tools[idx], stem=np.array(stems)[idx])
     return path
+
+
+def input_source(path):
+    """A test set's input as its config names it: a JSON copy ("testset_inputs") by the file it was
+    taken from, so that a set built from the copy is the set built from the original, hash and all."""
+    if not path.endswith('.json'):
+        return path
+    with open(path) as f:
+        return json.load(f)['source']
+
+
+def testset_inputs(rows_path, processed, basis_dir=BASIS_DIR, out_rows=TESTSET_ROWS,
+                   out_snr=TESTSET_SNR):
+    """
+    The test sets' inputs as text, for git: *rows_path*'s rows (each baseline as the span where
+    any is non-zero) and every scan of *processed* with its SNR, each file naming its source.
+    Floats are written exactly (shortest repr), so the sets built from them are the same sets.
+    """
+    z = np.load(rows_path)
+    base = z['baseline']
+    used = np.flatnonzero(np.abs(base).max(0) > 0)
+    part = slice(int(used[0]), int(used[-1]) + 1)
+    rows = dict(source=rows_path, names=[str(n) for n in z['names']],
+                tool=[str(t) for t in z['tool']], stem=[str(t) for t in z['stem']],
+                **{k: z[k].tolist() for k in ROW_KEYS + ('kernel',) if k != 'baseline'},
+                baseline=dict(length=base.shape[1], first=part.start,
+                              re=base[:, part].real.tolist(), im=base[:, part].imag.tolist()))
+    p = np.load(processed)
+    snr = scan_snr(p['fids'], load_basis(basis_dir).ppm)
+    scans = dict(source=processed, stem=[str(s) for s in p['stems']],
+                 subject=[str(s) for s in p['subjects']], snr=snr.tolist())
+    for path, data in ((out_rows, rows), (out_snr, scans)):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(data, f)
+            f.write('\n')
+    return out_rows, out_snr
 
 
 #**************************************************************************************************#
@@ -2518,16 +2573,19 @@ def challenge(data_dir, truth_dir, out, workers, methods=METHODS):
 def pipeline():
     """
     The data, end to end, each step its own command: the 90 scans processed and fitted by every
-    tool, Osprey's fits as test-set rows, the test (seed 0) and the selection set (seed 1), every
-    tool on the test set, and the in-vivo fits figure.
+    tool, Osprey's fits as test-set rows and their copy in git (TESTSET_ROWS, TESTSET_SNR), the
+    test (seed 0) and the selection set (seed 1), every tool on the test set, and the in-vivo
+    fits figure.
     """
     r, me, nice = 'results/cows', [sys.executable, 'scripts/svs_ablation.py'], ['nice', '-n', '5']
     scans = f'{r}/processed_scans.npz'
     steps = ([me + ['process', '--out', scans],
               nice + me + ['invivo', '--processed', scans, '--out', f'{r}/invivo'],
-              nice + me + ['osprey-rows', '--fits', f'{r}/invivo', '--processed', scans]]
-             + [me + ['testset', '--rows', f'{r}/invivo/rows_osprey.npz', '--processed', scans,
-                      '--out', f'{r}/testsets_osprey', '--seed', str(seed)] for seed in (0, 1)]
+              nice + me + ['osprey-rows', '--fits', f'{r}/invivo', '--processed', scans],
+              me + ['testset-inputs', '--rows', f'{r}/invivo/rows_osprey.npz', '--processed',
+                    scans]]
+             + [me + ['testset', '--out', f'{r}/testsets_osprey', '--seed', str(seed)]
+                for seed in (0, 1)]
              + [nice + me + ['bench', f'{r}/testsets_osprey/test_n1000_s0.npz', '--out',
                              f'{r}/benchmark_osprey'],
                 [sys.executable, 'scripts/svs_figures.py', 'invivo', '--invivo', f'{r}/invivo',
@@ -2609,10 +2667,6 @@ STRENGTHS = {'line_broadening': ('lb_hz', 'gb_hz'), 'frequency_shift': ('shift_h
              'eddy_current': ('strength',), 'artificial_peaks': ('amp',),
              'spurious_echoes': ('amp',)}
 OPENNEURO = 'https://s3.amazonaws.com/openneuro.org'
-#: OpenNeuro's copy has a broken multi-RAID header (the second measurement 516 bytes off); ours is
-#: header-repaired (45 bytes, data untouched; 2026-09-17) and comes with the bundle: md5
-REPAIRED = {'sub-01/mrs/sourcedata/sub-01_acq-06_svs_slaser_vapor7_metab_Occipital.dat':
-            'd9160d10ef5a8c1c1d416e5eb80e7016'}
 LOG = os.path.join(SCREEN, 'screen.log')
 
 
@@ -3034,7 +3088,7 @@ def md5(path):
 
 def fetch():
     """The raw scans (sub-XX/mrs/sourcedata/*.dat) from OpenNeuro, once, each checked by its md5
-    (S3 ETag); REPAIRED comes with the bundle, never from OpenNeuro."""
+    (S3 ETag); a scan with a broken header is repaired as it is read (cows.HEADER_REPAIRS)."""
     ns = {'s3': 'http://s3.amazonaws.com/doc/2006-03-01/'}
     for i in range(1, 11):
         prefix = f'ds006812/sub-{i:02d}/mrs/sourcedata/'
@@ -3045,8 +3099,7 @@ def fetch():
                                for k in ('Key', 'Size', 'ETag'))
             rel, size, etag = rel[len('ds006812/'):], int(size), etag.strip('"')
             path = os.path.join(DATA_DIR, rel)
-            if (not rel.endswith('.dat') or rel in REPAIRED
-                    or (os.path.isfile(path) and os.path.getsize(path) == size)):
+            if not rel.endswith('.dat') or (os.path.isfile(path) and os.path.getsize(path) == size):
                 continue
             driver_log(f'fetch: {rel} ({size / 2 ** 20:.0f} MB)')
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -3056,10 +3109,6 @@ def fetch():
                     or ('-' not in etag and md5(path + '.part') != etag)):
                 raise SystemExit(f'fetch: {rel} arrived damaged; run again')
             os.replace(path + '.part', path)
-    for rel, digest in REPAIRED.items():
-        if not os.path.isfile(os.path.join(DATA_DIR, rel)) or md5(os.path.join(DATA_DIR, rel)) != digest:
-            raise SystemExit(f'{rel} is not the header-repaired copy: '
-                             'untar cows_grid_bundle.tar.gz in the Augmentrum root')
 
 
 def grid(args):
@@ -3075,9 +3124,11 @@ def grid(args):
         for sp in specs:
             print(f"  {sp['name']}: {json.dumps({k: sp.get(k) for k in ('samplers', 'modules')})}")
         return
-    missing = [p for p in (BASIS_DIR, TESTSET, SELECTION) if not os.path.exists(p)]
-    if missing:
-        raise SystemExit(f'missing {missing}: untar cows_grid_bundle.tar.gz in the Augmentrum root')
+    for seed, path in enumerate((TESTSET, SELECTION)):
+        if not os.path.isfile(path):             # from the inputs in git, as the pipeline builds it
+            driver_log(f'building {path}')
+            generate_testset(TESTSET_ROWS, TESTSET_SNR, os.path.dirname(path), seed,
+                             subjects=list(TESTSET_SUBJECTS[seed]))
     fetch()
     # the NIfTI cache once, before parallel runs (they would all write it at the same time)
     subprocess.run([PY, '-c', 'import sys; sys.path.insert(0, "scripts"); '
@@ -3178,9 +3229,11 @@ def main(argv=None):
     add_paths(p)
 
     p = sub.add_parser('testset', help='simulate a test set from the benchmark\'s in-vivo fits')
-    p.add_argument('--rows', required=True, help="osprey-rows' (or rows') .npz")
-    p.add_argument('--processed', required=True, help="'process' output (the SNR pool)")
-    p.add_argument('--out', required=True)
+    p.add_argument('--rows', default=TESTSET_ROWS,
+                   help="osprey-rows' (or rows') .npz, or its copy in git (default)")
+    p.add_argument('--processed', default=TESTSET_SNR,
+                   help="'process' output (the SNR pool), or its SNRs in git (default)")
+    p.add_argument('--out', default=os.path.dirname(TESTSET))
     p.add_argument('--seed', type=int, default=0, help='0: the test set, 1: the selection set')
     p.add_argument('--n', type=int, default=1000)
     add_paths(p)
@@ -3262,6 +3315,11 @@ def main(argv=None):
     p.add_argument('names', nargs='*', help='extend: stage B conditions (default: all)')
     p.add_argument('--n', type=int, nargs='+', default=list(B_SUBJECTS), help='extend: subjects')
     p.add_argument('--steps', type=int, default=10_000_000, help='extend: the new budget')
+    p = sub.add_parser('testset-inputs', help="the test sets' inputs in git, from osprey-rows' "
+                                              "and process' results")
+    p.add_argument('--rows', default='results/cows/invivo/rows_osprey.npz')
+    p.add_argument('--processed', default='results/cows/processed_scans.npz')
+    p.add_argument('--basis-dir', default=BASIS_DIR)
     p = sub.add_parser('grid', help='the cross-validated grid on every visible GPU')
     p.add_argument('--gpus', type=int, nargs='+', help='GPU indices (default: all visible)')
     p.add_argument('--per-gpu', type=int, help='runs per GPU (default: one per CPU core, '
@@ -3293,6 +3351,8 @@ def main(argv=None):
                 fmt = lambda r: f'({r[0]:g}, {r[1]:g})'
                 print(f'{mod:17s} {par:16s} {ivs:>28s}   {fmt(e["current"]):>16s}   '
                       f'{fmt(e["proposed"]):>16s}   {e["note"]}')
+    elif args.cmd == 'testset-inputs':
+        print(*testset_inputs(args.rows, args.processed, args.basis_dir))
     elif args.cmd == 'testset':
         path = generate_testset(args.rows, args.processed, args.out, args.seed, args.n,
                                 basis_dir=args.basis_dir,

@@ -268,7 +268,7 @@ class FSLFittingFramework:
 
     Usage:
         >>> framework = FSLFittingFramework(
-        ...     path2basis='data/BasisSets/TE26_basis/',
+        ...     path2basis='data/basis_sets/TE26_basis/',
         ...     method='Newton',
         ...     include_params=True,
         ...     save_path='results/cows_fit/'

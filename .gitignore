@@ -140,9 +140,12 @@ Thumbs.db
 
 # Data files (too large for git). "data/*" rather than "data/", because git
 # cannot re-include anything from an excluded directory - and the OpenNeuro
-# submodule below is declared in .gitmodules and has to stay tracked.
+# submodule below is declared in .gitmodules and has to stay tracked, as do the
+# small inputs the COWS study needs (its basis set and its test sets' inputs).
 data/*
 !data/openneuro_ds006812
+!data/basis_sets
+!data/cows
 *.nii
 *.nii.gz
 *.mat

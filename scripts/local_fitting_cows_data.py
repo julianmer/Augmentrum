@@ -763,7 +763,7 @@ Examples:
 
   # Fit COWS data with LCModel .raw basis
   python fit_cows_with_augmentrum.py \\
-      --basis data/BasisSets/raw_basis_functions/ \\
+      --basis data/basis_sets/raw_basis_functions/ \\
       --basis-bw 2000 --basis-cf 127.8
 
   # Fit only OCCIPITAL with VAPOR suppression
@@ -772,7 +772,7 @@ Examples:
 
   # Fit with the FID-A .mat basis set
   python fit_cows_with_augmentrum.py \\
-      --basis data/BasisSets/basis_functions_metab_mm_mat/
+      --basis data/basis_sets/basis_functions_metab_mm_mat/
 
   # Load and view previously saved results
   python fit_cows_with_augmentrum.py --load-only results/cows_fit/
