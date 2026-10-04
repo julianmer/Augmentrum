@@ -561,22 +561,51 @@ class Noise(BaseModule):
             water_array: Optional water reference tensor (unchanged).
             backend: Backend enum (unused - ops dispatch on the tensor).
             **kwargs: What BaseModule injects; "state" says which domain the
-                data is in and "dim_tags" where its coil axis sits.
+                data is in, "dim_tags" where its coil axis sits, and "pool_rows" the
+                pool rows a stand-in *data_array* is (see "takes_stand_in").
 
         Returns:
             Tuple of (noisy_data, water_array).
         """
         state = kwargs.get('state')
         dim_tags = kwargs.get('dim_tags')
+        rows = kwargs.get('pool_rows')
         sigma, snr = self._requested()
+        if rows is not None and not self._reads_rows(data_array, state, dim_tags):
+            data_array, rows = rows.gather(), None
 
         if (state is not None and state.spatial == 'image'
                 and state.sampling == 'undersampled'):
             return self._via_kspace(data_array, sigma, snr, state, dim_tags), water_array
 
-        scale = self._shaped(self._scale(data_array, sigma, snr, state),
+        scale = self._shaped(self._scale(data_array, sigma, snr, state, rows=rows),
                              ops.shape(data_array), state)
-        return self._add(data_array, scale, dim_tags), water_array
+        return self._add(data_array, scale, dim_tags, rows), water_array
+
+    def takes_stand_in(self) -> bool:
+        """
+        Coil-coupled noise reads a pooled raw batch's rows where they lie: its level and coupling
+        are every scan's own, which the pool keeps, and the draws go onto the rows in one pass
+        ("_reads_rows"). Otherwise the rows are gathered first.
+        """
+        return not isinstance(self.covariance, Independent)
+
+    def _reads_rows(self, data, state, dim_tags):
+        """Whether the noise goes onto pooled rows where they lie: coupled, flat, one level per
+        sample, in the time domain and image space, fully sampled, by the Triton kernels."""
+        shape = ops.shape(data)
+        tags = list(dim_tags or ())
+        return (self._kernels(data) is not None and 'DIM_COIL' in tags
+                and 5 + tags.index('DIM_COIL') < len(shape) and isinstance(self.profile, Flat)
+                and self._global(shape, self.SPECTRAL_AXIS)
+                and (state is None or (state.spectral, state.spatial, state.sampling)
+                     == ('time', 'image', 'full')))
+
+    @staticmethod
+    def _pooled(rows, key, build):
+        """*build* of the whole pooled tensor, computed once per pool, at the batch's rows."""
+        return rows.pool.cached(('Noise',) + key + (rows.role,),
+                                lambda pool: build(rows.tensor))[rows.indices]
 
     #**************#
     #   how loud   #
@@ -606,7 +635,7 @@ class Noise(BaseModule):
             return None, 10.0 ** (np.asarray(pick(self.snr_db), dtype=np.float64) / 20.0)
         return None, 1.0 / np.asarray(pick(self.sigma_frac), dtype=np.float64)
 
-    def _scale(self, data_array, sigma, snr, state, force_global: bool = False):
+    def _scale(self, data_array, sigma, snr, state, force_global: bool = False, rows=None):
         """
         The per-channel SD of the noise to add, in the data's own domain.
 
@@ -625,6 +654,7 @@ class Noise(BaseModule):
             force_global: Reduce the reference per batch element regardless of
                 "global_scale" - for noise added in k-space, which is one level
                 per batch element by definition.
+            rows: The pool rows *data_array* stands in for, or None.
 
         Returns:
             The SD, shaped to broadcast against the data.
@@ -638,16 +668,17 @@ class Noise(BaseModule):
             level = self._level(sigma, data_array, ndim)
             return level / float(np.sqrt(shape[axis])) if in_frequency else level
 
-        # One reference per batch element whenever there is more than one
-        # trace to share it, unless the caller decided otherwise.
-        global_scale = self.global_scale
-        if global_scale is None:
-            global_scale = int(np.prod(shape[1:axis] + shape[axis + 1:])) > 1
-
-        peak = self._peak(data_array, state, global_scale or force_global)
+        peak = self._peak(data_array, state, self._global(shape, axis) or force_global, rows)
         return peak / ops.cast_like(self._level(snr, peak, ndim), peak)
 
-    def _peak(self, data_array, state, global_scale: bool):
+    def _global(self, shape, axis):
+        """Whether the reference is one per batch element: whenever there is more than one trace
+        to share it, unless the caller decided otherwise."""
+        if self.global_scale is not None:
+            return self.global_scale
+        return int(np.prod(shape[1:axis] + shape[axis + 1:])) > 1
+
+    def _peak(self, data_array, state, global_scale: bool, rows=None):
         """
         The spectrum peak an SNR is relative to, in the data's own domain.
 
@@ -664,6 +695,7 @@ class Noise(BaseModule):
             data_array: The data, NIfTI layout.
             state: Where the data is; None means time domain, image space.
             global_scale: One peak per batch element rather than per trace.
+            rows: The pool rows *data_array* stands in for, or None.
 
         Returns:
             "max|spectrum|", with kept dimensions so it broadcasts.
@@ -683,9 +715,11 @@ class Noise(BaseModule):
         if state is not None and state.spectral == 'frequency':
             peak = ops.amax(ops.abs(x), axis=axis, keepdims=True)
         elif kernels is not None:
-            # every sample's spectrum where its points lie, its |.| and max in one pass
-            peak = kernels.spectrum_peak(x, axis).reshape((-1,) + (1,) * (ndim - 1))
-            peak = peak / float(np.sqrt(shape[axis]))
+            # every sample's spectrum where its points lie, its |.| and max in one pass; of
+            # pooled rows, every scan's once
+            peak = (self._pooled(rows, ('peak', axis), lambda t: kernels.spectrum_peak(t, axis))
+                    if rows is not None else kernels.spectrum_peak(x, axis))
+            peak = peak.reshape((-1,) + (1,) * (ndim - 1)) / float(np.sqrt(shape[axis]))
         else:
             # The backends transform their last axis only, so the spectral one
             # is brought there when a coil or average axis sits behind it.
@@ -768,7 +802,7 @@ class Noise(BaseModule):
     #************************#
     #   where noise enters   #
     #************************#
-    def _add(self, data_array, scale, dim_tags):
+    def _add(self, data_array, scale, dim_tags, rows=None):
         """
         Draw the noise at the given level and add it, on the data's own device.
 
@@ -776,6 +810,7 @@ class Noise(BaseModule):
             data_array: The data, any backend.
             scale: Per-channel SD, broadcastable against the data.
             dim_tags: Higher-dimension tags, to find the coil axis to correlate.
+            rows: The pool rows *data_array* stands in for, or None.
 
         Returns:
             The data with its noise.
@@ -793,10 +828,14 @@ class Noise(BaseModule):
             return ops.sqrt((data_array + ops.cast_like(real * widened, data_array)) ** 2
                             + ops.cast_like(imag * widened, data_array) ** 2)
 
-        coupling = self._coupling(shape, dim_tags, data_array)
+        coupling = self._coupling(shape, dim_tags, data_array, rows)
         kernels = self._kernels(data_array) if coupling is not None else None
         if kernels is not None and widened.numel() in (1, shape[0]):
-            # the draws scaled, coupled and added in one pass over the data
+            # the draws scaled, coupled and added in one pass over the data, or over the rows
+            # where they lie
+            if rows is not None:
+                return kernels.mixed_noise(rows.tensor, real, imag, widened, *coupling,
+                                           index=rows.indices)
             return kernels.mixed_noise(data_array, real, imag, widened, *coupling)
         noise = ops.complex_from(real * widened, imag * widened)
         noise = self._correlate(noise, coupling)
@@ -850,7 +889,7 @@ class Noise(BaseModule):
     #*******************#
     #   coil coupling   #
     #*******************#
-    def _coupling(self, shape, dim_tags, data):
+    def _coupling(self, shape, dim_tags, data, rows=None):
         """
         How the channels are given the covariance the array actually has.
 
@@ -865,6 +904,7 @@ class Noise(BaseModule):
             dim_tags: Higher-dimension tags, to find the coil axis.
             data: The complex data the noise goes onto, which a measured covariance is read
                 from.
+            rows: The pool rows *data* stands in for, or None.
 
         Returns:
             "(root, coil axis)", the root (C, C) or (B, C, C) in the data's dtype, or None.
@@ -879,15 +919,23 @@ class Noise(BaseModule):
 
         n_coils = int(shape[axis])
         if isinstance(self.covariance, FromData):
-            # a root of every sample's psi, A A^H = psi: its eigenvectors times sqrt(eigenvalues)
-            values, vectors = ops.eigh(self.covariance.matrices(data, axis))
-            values = ops.where(values > 0, values, values * 0)
-            root = vectors * ops.cast_like(ops.sqrt(values), vectors)[:, None, :]
+            # of pooled rows every scan's, decomposed once for the whole pool (in one batch, as
+            # the samples' are, so that each gets the root its batch gives it)
+            root = (self._pooled(rows, ('root', axis, self.covariance.fraction),
+                                 lambda t: self._root(t, axis))
+                    if rows is not None else self._root(data, axis))
         else:
             root = ops.match_backend(np.linalg.cholesky(
                 self.covariance.matrix(n_coils) + 1e-8 * np.eye(n_coils, dtype=np.complex128)),
                 data)
         return ops.cast_like(root, data), axis
+
+    def _root(self, data, axis):
+        """A root of every sample's measured psi, A A^H = psi: its eigenvectors times
+        sqrt(eigenvalues), (B, C, C)."""
+        values, vectors = ops.eigh(self.covariance.matrices(data, axis))
+        values = ops.where(values > 0, values, values * 0)
+        return vectors * ops.cast_like(ops.sqrt(values), vectors)[:, None, :]
 
     def _correlate(self, noise, coupling):
         """

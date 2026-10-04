@@ -844,12 +844,13 @@ def spectrum_peak(x, axis):
 
 
 @triton.jit
-def mixed_noise_kernel(data_ptr, real_ptr, imag_ptr, scale_ptr, root_ptr, out_ptr, M, C, K,
-                       C_PAD: tl.constexpr, K_PAD: tl.constexpr):
+def mixed_noise_kernel(data_ptr, index_ptr, real_ptr, imag_ptr, scale_ptr, root_ptr, out_ptr, M,
+                       C, K, C_PAD: tl.constexpr, K_PAD: tl.constexpr, ROWS: tl.constexpr):
     """
     One program per (point m, sample b): out[b, m] = data[b, m] + root[b] s_b (real + i
     imag)[b, m], each (C, K) with the coils as rows - the white draws at the sample's level,
-    coupled by a root of its channels' covariance, on the data.
+    coupled by a root of its channels' covariance, on the data; with ROWS, sample b's data is
+    row index[b] of the data.
     """
     m = tl.program_id(0)
     b = tl.program_id(1)
@@ -869,29 +870,32 @@ def mixed_noise_kernel(data_ptr, real_ptr, imag_ptr, scale_ptr, root_ptr, out_pt
           - tl.dot(r_im, n_im, input_precision='ieee'))
     im = (tl.dot(r_re, n_im, input_precision='ieee')
           + tl.dot(r_im, n_re, input_precision='ieee'))
-    d = tl.load(data_ptr + offset[:, :, None] * 2 + q[None, None, :], mask=inside[:, :, None],
+    row = tl.load(index_ptr + b).to(tl.int64) if ROWS else b.to(tl.int64)
+    at = ((row * M + m) * C + i[:, None]) * K + k[None, :]
+    d = tl.load(data_ptr + at[:, :, None] * 2 + q[None, None, :], mask=inside[:, :, None],
                 other=0.0)
     d_re, d_im = tl.split(d)
     tl.store(out_ptr + offset[:, :, None] * 2 + q[None, None, :], tl.join(d_re + re, d_im + im),
              mask=inside[:, :, None])
 
 
-def mixed_noise(data, real, imag, scale, root, axis):
+def mixed_noise(data, real, imag, scale, root, axis, index=None):
     """
     "Noise._add" with its channels coupled, in one pass: complex64 *data* (B, ...) with its coils
     at *axis*, the white draws *real* and *imag* (float32, its shape), the level *scale* (one per
     sample, or one for all) and the root *root* (B, C, C) or (C, C). Returns data + root
-    (scale (real + i imag)) along the coil axis.
+    (scale (real + i imag)) along the coil axis. With *index* (B,), *data* is a pool (S, ...)
+    and sample b its row index[b], read where it lies.
     """
-    shape = data.shape
+    shape = real.shape
     b, c = shape[0], shape[axis]
     m, k = math.prod(shape[1:axis]), math.prod(shape[axis + 1:])
     root = root.to(data.dtype).expand(b, c, c).contiguous()
     scale = scale.to(torch.float32).reshape(-1).expand(b).contiguous()
-    out = torch.empty_like(data)
+    out = torch.empty(shape, dtype=data.dtype, device=data.device)
     mixed_noise_kernel[(m, b)](
-        torch.view_as_real(data.contiguous()), real.contiguous(), imag.contiguous(), scale,
-        torch.view_as_real(root), torch.view_as_real(out), m, c, k,
-        C_PAD=max(16, triton.next_power_of_2(c)), K_PAD=max(16, triton.next_power_of_2(k)),
-        num_warps=8)
+        torch.view_as_real(data.contiguous()), index if index is not None else scale,
+        real.contiguous(), imag.contiguous(), scale, torch.view_as_real(root),
+        torch.view_as_real(out), m, c, k, C_PAD=max(16, triton.next_power_of_2(c)),
+        K_PAD=max(16, triton.next_power_of_2(k)), ROWS=index is not None, num_warps=8)
     return out

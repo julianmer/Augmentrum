@@ -288,3 +288,16 @@ def test_processing_reads_pending_rows_as_the_gathered_batch(conj, monkeypatch):
     for a, b in zip(_drawn(pipeline, ('data',), monkeypatch, True),
                     _drawn(pipeline, ('data',), monkeypatch, False)):
         torch.testing.assert_close(a[0], b[0], rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.skipif(not CUDA, reason="CUDA not available")
+def test_coupled_noise_reads_pending_rows_as_the_gathered_batch(monkeypatch):
+    """
+    Noise coupled by each scan's own covariance goes onto a pending batch's rows where they lie,
+    its level and coupling the pool's per scan: the same draws as on the gathered batch.
+    """
+    pipeline = [{'noise': {'covariance': 'data', 'snr': (5.0, 50.0)}}, 'tap:raw', 'processing']
+    for a, b in zip(_drawn(pipeline, ('raw', 'data'), monkeypatch, True),
+                    _drawn(pipeline, ('raw', 'data'), monkeypatch, False)):
+        torch.testing.assert_close(a[0], b[0], rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(a[1], b[1], rtol=1e-5, atol=1e-6)
