@@ -17,6 +17,7 @@
 #   imports   #
 #*************#
 import argparse
+import csv
 import glob
 import json
 import os
@@ -1417,6 +1418,227 @@ def fig_paper(R):
     R.args.out = out
 
 
+#**********#
+#   grid   #
+#**********#
+#: the grid's conditions in a few words, where TERSE says too little or nothing
+GRID_TERSE = dict(TERSE, **{
+    'all-full': 'All', 'all-two-thirds': 'All, two thirds', 'all-one-third': 'All, one third',
+    'noise-snr60': 'SNR 60–330', 'noise-snr30': 'SNR 30–330', 'noise-coils': 'Raw coils',
+    'frequency_shift-x4': 'Frequency shift', 'phase-zero-x4': 'Zero-order phase',
+    'phase-first-x4': 'First-order phase', 'phase-both-x4': 'Zero + first order',
+    'broadening-narrowing': 'Narrowing', 'spurious_echoes-hybrid': 'Hybrid echo',
+    'spurious_echoes-echo-amp0p1': 'Echo', 'spurious_echoes-replica-amp0p2': 'Replica',
+    'eddy_current-x2': 'Eddy, synthetic', 'eddy_current-water': 'Eddy, own waters',
+    'artificial_peaks-x4': 'Peaks, Lorentzian', 'artificial_peaks-voigt-phase-x4':
+    'Peaks, Voigt + phase', 'residual_water-turco-x2': 'Water, Turco',
+    'residual_water-lobes-x2': 'Water, three lobes'})
+#: the grid's headline networks: (condition, label, colour, marker)
+GRID_NETS = (('none', 'No augmentation', NONE_COLOR, 'o'),
+             ('sampling-best', 'Coils + transients', BEST_SINGLE_COLOR, 's'),
+             ('all-one-third', 'All, one third', '#A5D9D2', 'v'),
+             ('all-two-thirds', 'All, two thirds', '#5DBFB3', '^'),
+             ('all-full', 'All augmentations', AUGMENTRUM, 'o'))
+NET_STYLE = {c: (color, marker) for c, _, color, marker in GRID_NETS}
+NS = tuple(range(1, 9))
+
+
+def fold_scores(R, cond, n, key):
+    """A grid condition's test *key* (at --weights) at *n* subjects, over the folds that finished."""
+    out = []
+    for fold in S.GRID_FOLDS:
+        path = os.path.join(R.run_dir(cond, n, fold), 'result.json')
+        if os.path.isfile(path):
+            with open(path) as f:
+                out.append(json.load(f)['test'][R.args.weights][key])
+    return np.asarray(out, float)
+
+
+def fold_band(ax, x, values, color, marker=None, ms=3.4, lw=1.2):
+    """Fold means (one array of folds per x) with a +-SE band; returns the last mean."""
+    stats = np.array([mean_se(v) if len(v) else (np.nan, np.nan) for v in values])
+    m, se = stats[:, 0], stats[:, 1]
+    ax.fill_between(x, m - se, m + se, color=color, alpha=0.18, lw=0, zorder=2)
+    ax.plot(x, m, '-', marker=marker, color=color, ms=ms, lw=lw, mec='white', mew=0.4, zorder=3)
+    return m[~np.isnan(m)][-1] if np.any(~np.isnan(m)) else np.nan
+
+
+def grid_accuracy(R, metric, ylabel, name):
+    """The grid's headline networks against the training subjects, mean over the folds with a
+    +-SE band, the tools dashed."""
+    plt = paper_style()
+    fig, ax = plt.subplots(figsize=(COL2 + 0.75, 3.4))
+    fig.subplots_adjust(right=0.78)
+    items = []
+    for m, text, color, _ in PAPER_TOOLS:
+        y = tool_score(R, m, metric)
+        ax.axhline(y, xmax=0.96, color=color, lw=1.2, ls=DASH, zorder=1)
+        items.append((y, text, color))
+    for cond, text, color, marker in GRID_NETS:
+        end = fold_band(ax, NS, [fold_scores(R, cond, n, metric) for n in NS], color, marker)
+        items.append((end, text, color))
+    lo, hi = ax.get_ylim()
+    side_labels(ax, [i for i in items if np.isfinite(i[0])], 8.75, 0.05 * (hi - lo), x_from=8.15)
+    ax.set_xlim(0.7, 8.3)
+    ax.set_xticks(NS)
+    ax.set_xlabel('In-vivo training subjects')
+    ax.set_ylabel(ylabel)
+    ax.text(0.0, 1.02, 'Mean over the folds; band: ± standard error', transform=ax.transAxes,
+            ha='left', va='bottom', color=REF_TEXT)
+    grid(ax, 'y')
+    save(fig, R.args.out, name)
+    plt.close(fig)
+
+
+def grid_groups():
+    """[(family, [(condition, label, colour, marker)])] of the grid, as svs_ablation groups it."""
+    return [(family, [(c, GRID_TERSE[c], *NET_STYLE.get(c, st))
+                      for c, st in zip(members, VARIANT_STYLE)])
+            for family, members in S.GRID_FAMILIES.items()]
+
+
+def grid_families(R, metric, ylabel, name):
+    """Every grid condition against the training subjects, one panel per family, mean over the
+    folds with a +-SE band, no augmentation in every panel."""
+    def draw(ax, c, color, marker):
+        return fold_band(ax, NS, [fold_scores(R, c, n, metric) for n in NS], color, marker,
+                         ms=3, lw=1.1)
+    tools = [tool_score(R, m, metric) for m, *_ in PAPER_TOOLS]
+    family_panels(R, draw, 'In-vivo training subjects', ylabel, name, 8.5,
+                  band=(min(tools), max(tools)), xticks=NS, groups=grid_groups(),
+                  note='Mean over the folds; band: ± standard error')
+
+
+def grid_gain(R, name):
+    """
+    What each grid condition gains over no augmentation, fold by fold (the same held-out subjects):
+    MOSAE in percent (left, lower is better) and mean CCC (right, higher is better); mean over
+    the folds +- SE, open at 1 subject, filled at 8.
+    """
+    from matplotlib.lines import Line2D
+    plt = paper_style()
+    rows, y, ypos = [], 0.0, {}
+    for family, members in grid_groups():
+        rows.append((y, family))
+        y += 1
+        for c, text, color, _ in members:
+            ypos[c] = (y, text, color)
+            y += 1
+        y += 0.35
+    fig, axes = plt.subplots(1, 2, figsize=(COL2, min(0.16 * y + 0.75, 9.0)), sharey=True)
+    for ax, metric, xlabel, change in (
+            (axes[0], 'mosae', 'MOSAE against no augmentation [%]',
+             lambda v, b: 100 * (v - b) / b),
+            (axes[1], 'ccc_mean', 'Mean CCC against no augmentation', lambda v, b: v - b)):
+        for c, (yy, _, color) in ypos.items():
+            for n, filled, dy in ((1, False, -0.15), (8, True, 0.15)):
+                v, b = fold_scores(R, c, n, metric), fold_scores(R, 'none', n, metric)
+                k = min(len(v), len(b))
+                if not k:
+                    continue
+                m, se = mean_se(change(v[:k], b[:k]))
+                ax.errorbar(m, yy + dy, xerr=se, fmt='o', color=color, ms=3.6,
+                            mfc=color if filled else 'white', mec=color if filled else color,
+                            mew=1.0, elinewidth=0.9, capsize=0, zorder=3)
+        ax.axvline(0, color=NONE_COLOR, lw=0.9, zorder=1)
+        ax.set_xlabel(xlabel)
+        grid(ax, 'x')
+    for yy, family in rows:
+        axes[0].text(0.0, yy, family, transform=axes[0].get_yaxis_transform(), ha='left',
+                     va='center', fontweight='bold')
+    axes[0].set_yticks([v[0] for v in ypos.values()])
+    axes[0].set_yticklabels([v[1] for v in ypos.values()])
+    for tick, (_, _, color) in zip(axes[0].get_yticklabels(), ypos.values()):
+        tick.set_color(color)
+    axes[0].set_ylim(y - 0.2, -0.7)
+    for ax in axes:
+        ax.tick_params(axis='y', length=0)
+        ax.spines['left'].set_visible(False)
+    axes[0].legend(handles=[
+        Line2D([], [], ls='none', marker='o', mfc='white', color=INK, mew=1.0, ms=3.6,
+               label=subjects(1)),
+        Line2D([], [], ls='none', marker='o', color=INK, ms=3.6, label=subjects(8)),
+        Line2D([], [], color=INK, lw=0.9, label='± standard error over the folds')],
+        loc='lower left', ncol=3, bbox_to_anchor=(0.0, 1.0), handletextpad=0.2,
+        columnspacing=1.0)
+    fig.tight_layout(w_pad=1.5)
+    save(fig, R.args.out, name)
+    plt.close(fig)
+
+
+def grid_convergence(R, n, name, bins=60):
+    """Selection-set MOSAE over training at *n* subjects (median per log-spaced bin, then the mean
+    over the folds with a +-SE band), every grid condition, one panel per family."""
+    import pandas as pd
+    curves = {}
+
+    def curve(c):
+        if c not in curves:
+            folds = []
+            for fold in S.GRID_FOLDS:
+                path = os.path.join(R.run_dir(c, n, fold), 'curve.csv')
+                if os.path.isfile(path):
+                    d = pd.read_csv(path).dropna(subset=['sel_mosae'])
+                    folds.append(d.set_index('step')['sel_mosae'])
+            if not folds:
+                curves[c] = None
+                return None
+            d = pd.concat(folds, axis=1).dropna()
+            b = np.digitize(d.index, np.geomspace(d.index.min(), d.index.max() + 1, bins))
+            g = d.groupby(b).median()
+            curves[c] = (d.index.to_series().groupby(b).median().values, g.values)
+        return curves[c]
+
+    def draw(ax, c, color, marker):
+        cv = curve(c)
+        if cv is None:
+            return np.nan
+        steps, per_fold = cv
+        return fold_band(ax, steps, list(per_fold), color, lw=1.1, ms=0)
+    shown = [cv for cv in (curve(c) for c in S.GRID) if cv is not None]
+    late = np.concatenate([v[s >= 1e4].mean(1) for s, v in shown if np.any(s >= 1e4)] or
+                          [v.mean(1) for _, v in shown])
+    lo, hi = late.min(), late.max()
+    family_panels(R, draw, 'Training steps', 'Selection MOSAE', name, 3e6, xlog=True,
+                  xlim=(1e3, 2.2e6), ylim=(lo - 0.05 * (hi - lo), hi + 0.05 * (hi - lo)),
+                  note=f'Networks trained on {subjects(n)}; mean over the folds, band: ± SE',
+                  groups=grid_groups())
+
+
+def grid_table(R, name):
+    """Every grid condition at every number of subjects: folds finished, MOSAE and mean CCC as
+    mean +- SE over the folds (CSV)."""
+    rows = []
+    for family, members in [('Reference', [('none', GRID_TERSE['none'])])] + [
+            (f, [(c, t) for c, t, *_ in m]) for f, m in grid_groups()]:
+        for c, text in members:
+            for n in NS:
+                mo, cc = fold_scores(R, c, n, 'mosae'), fold_scores(R, c, n, 'ccc_mean')
+                row = dict(family=family, condition=c, label=text, subjects=n, folds=len(mo))
+                for key, v in (('mosae', mo), ('ccc_mean', cc)):
+                    row[key], row[f'{key}_se'] = mean_se(v) if len(v) else (np.nan, np.nan)
+                rows.append(row)
+    os.makedirs(R.args.out, exist_ok=True)
+    path = os.path.join(R.args.out, f'{name}.csv')
+    with open(path, 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    print(path)
+
+
+def fig_grid(R):
+    """The cross-validated grid's figures and table (svs_ablation.py grid; --exp its folder)."""
+    grid_accuracy(R, 'mosae', 'MOSAE', 'grid_accuracy_mosae')
+    grid_accuracy(R, 'ccc_mean', "Lin's CCC, mean over metabolites", 'grid_accuracy_ccc')
+    grid_gain(R, 'grid_gain')
+    grid_families(R, 'mosae', 'MOSAE', 'grid_families_mosae')
+    grid_families(R, 'ccc_mean', "Lin's CCC, mean", 'grid_families_ccc')
+    for n in (1, 8):
+        grid_convergence(R, n, f'grid_convergence_n{n}')
+    grid_table(R, 'grid_scores')
+
+
 #******************#
 #   in-vivo fits   #
 #******************#
@@ -1573,7 +1795,8 @@ def fig_module_check(args):
 #**********#
 FIGURES = {'scaling': fig_scaling, 'samplers': fig_samplers, 'modules': fig_modules,
            'bias': fig_bias, 'metabolites': fig_metabolites, 'snr': fig_snr,
-           'linewidth': fig_linewidth, 'curves': fig_curves, 'paper': fig_paper}
+           'linewidth': fig_linewidth, 'curves': fig_curves, 'paper': fig_paper,
+           'grid': fig_grid}
 
 
 #: the convergence figures: (source, column, y label, note, file name, log y); source 'curve' is
