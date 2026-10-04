@@ -23,6 +23,7 @@
 #   2. tar xzf cows_grid_bundle.tar.gz (the basis, the test and selection sets, and the header-    #
 #      repaired sub-01 acq-06 scan: OpenNeuro's copy has a broken multi-RAID header)               #
 #   3. python scripts/svs_ablation.py grid (log: results/cows/grid/grid.log)                       #
+#      (later, e.g. grid --steps 4000000 continues every run from its last.pt to 4M)               #
 #   4. send back results/cows/grid without the checkpoints: tar czf cows_grid_runs.tar.gz          #
 #      --exclude=last.pt --exclude=checkpoints results/cows/grid                                   #
 #                                                                                                  #
@@ -3054,14 +3055,14 @@ def fetch():
 
 
 def grid(args):
-    """GRID x 1-8 subjects x GRID_FOLDS x GRID_SEEDS for GRID_STEPS on every visible GPU."""
+    """GRID x 1-8 subjects x GRID_FOLDS x GRID_SEEDS for --steps on every visible GPU."""
     global LOG
     LOG = os.path.join(OUT_GRID, 'grid.log')
-    specs, gpus = grid_specs(), args.gpus or visible_gpus()
+    specs, gpus, steps = grid_specs(), args.gpus or visible_gpus(), args.steps
     runs = [(sp, n, fold, seed) for sp in specs for fold in GRID_FOLDS for seed in GRID_SEEDS
             for n in B_SUBJECTS]
     print(f'{len(specs)} conditions x {len(B_SUBJECTS)} subject counts x {len(GRID_FOLDS)} folds x '
-          f'{len(GRID_SEEDS)} seeds = {len(runs)} runs of {GRID_STEPS:,} steps, on GPUs {gpus}')
+          f'{len(GRID_SEEDS)} seeds = {len(runs)} runs of {steps:,} steps, on GPUs {gpus}')
     if args.dry_run:
         for sp in specs:
             print(f"  {sp['name']}: {json.dumps({k: sp.get(k) for k in ('samplers', 'modules')})}")
@@ -3079,15 +3080,15 @@ def grid(args):
     bad = [sp['name'] for sp in specs if not os.path.isfile(result_path(out_s, sp['name'], 1))]
     if bad:
         raise SystemExit(f'smoke failed: {bad}; see {out_s}/logs')
-    # --extend: a larger GRID_STEPS later continues the finished runs from last.pt
+    # --extend: a larger --steps later continues the finished runs from last.pt
     keep = ('--keep-last', '--checkpoint-every', str(CKPT_B), '--extend')
     run_queue([(screen_run_id(sp['name'], n, fold, seed),
-                job_cmd(sp, n, OUT_GRID, GRID_STEPS, EVAL_B, keep, fold, seed), OUT_GRID)
+                job_cmd(sp, n, OUT_GRID, steps, EVAL_B, keep, fold, seed), OUT_GRID)
                for sp, n, fold, seed in runs],
-              f'grid {GRID_STEPS:,}', steps=GRID_STEPS, gpus=gpus, per_gpu=args.per_gpu)
+              f'grid {steps:,}', steps=steps, gpus=gpus, per_gpu=args.per_gpu)
     left = [r for r in runs
-            if not finished(result_path(OUT_GRID, r[0]['name'], *r[1:]), GRID_STEPS)]
-    driver_log(f'grid done: {len(runs) - len(left)}/{len(runs)} runs at {GRID_STEPS:,} steps'
+            if not finished(result_path(OUT_GRID, r[0]['name'], *r[1:]), steps)]
+    driver_log(f'grid done: {len(runs) - len(left)}/{len(runs)} runs at {steps:,} steps'
         + (f'; rerun for {len(left)} unfinished' if left else ''))
 
 
@@ -3253,6 +3254,9 @@ def main(argv=None):
     p.add_argument('--gpus', type=int, nargs='+', help='GPU indices (default: all visible)')
     p.add_argument('--per-gpu', type=int, help='runs per GPU (default: one per CPU core, '
                                                f'at most {MAX_PARALLEL})')
+    p.add_argument('--steps', type=int, default=GRID_STEPS,
+                   help='steps per run; a larger budget later continues every run from its '
+                        'last.pt')
     p.add_argument('--dry-run', action='store_true', help='print the plan only')
 
     args = ap.parse_args(argv)
