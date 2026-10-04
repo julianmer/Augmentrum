@@ -20,7 +20,7 @@
 #      conda activate augmentrum                                                                   #
 #      pip install torch --index-url https://download.pytorch.org/whl/cu128                        #
 #      pip install nifti-mrs "nifti-mrs-plus[ops]" shutup wandb && pip install --no-deps -e .      #
-#   2. python scripts/svs_ablation.py grid (log: results/cows/grid/grid.log)                       #
+#   2. python scripts/svs_ablation.py (runs the grid; log: results/cows/grid/grid.log)             #
 #      (later, e.g. grid --steps 4000000 continues every run from its last.pt to 4M)               #
 #   3. send back results/cows/grid without the checkpoints: tar czf cows_grid_runs.tar.gz          #
 #      --exclude=last.pt --exclude=checkpoints results/cows/grid                                   #
@@ -3329,7 +3329,8 @@ def main(argv=None):
                         'last.pt')
     p.add_argument('--dry-run', action='store_true', help='print the plan only')
 
-    args = ap.parse_args(argv)
+    # a bare run is the grid: what another machine runs
+    args = ap.parse_args((sys.argv[1:] if argv is None else argv) or ['grid'])
     if args.cmd == 'rescore':
         for run_dir in args.run_dirs:
             rows = rescore(run_dir, args.testset, args.selection_set, args.device)
