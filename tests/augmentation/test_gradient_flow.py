@@ -118,6 +118,15 @@ def test_gradient_survives_module(spec, seeded_batch, coiled_batch):
 #**********************************#
 #   whole-pipeline gradient flow   #
 #**********************************#
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.parametrize("spec", SPECTRAL_SPECS, ids=lambda s: s.label)
+def test_gradient_survives_module_on_cuda(spec, seeded_batch, coiled_batch):
+    """On CUDA too, where a module's fused Triton kernels, which keep no graph, give way."""
+    batch = coiled_batch if spec.coiled else seeded_batch
+    batch.set_data(batch.get_data(Backend.PYTORCH).cuda(), Backend.PYTORCH)
+    assert _grad_reaches_input(batch, spec.build()), f"{spec.label} severed the graph on CUDA."
+
+
 def test_gradient_survives_a_chained_pipeline(seeded_batch):
     """The point of the exercise: a whole pipeline stays differentiable."""
     from augmentrum.augmentation.line_broadening import LineBroadening

@@ -756,12 +756,12 @@ def on_cuda(like):
 
 
 def device_kernels(like):
-    """The Triton kernels ("augmentrum.core.kernels") where they take *like* - complex64 on CUDA -
-    else None."""
+    """The Triton kernels ("augmentrum.core.kernels") where they take *like* - complex64 on CUDA,
+    with no gradient to carry (they keep no graph) - else None."""
     if not on_cuda(like) or str(like.dtype) != 'torch.complex64':
         return None
-    from augmentrum.processing.torch_engine import triton_kernels
-    return triton_kernels()
+    from augmentrum.processing.torch_engine import applying_kernels
+    return applying_kernels(like)
 
 
 def device_values(values, like):

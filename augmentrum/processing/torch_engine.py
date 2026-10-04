@@ -612,6 +612,15 @@ def triton_kernels():
     return _KERNELS[0]
 
 
+def applying_kernels(x):
+    """The Triton kernels where they may apply a correction to *x*: complex64 on CUDA, with no
+    gradient to carry (they keep no graph; the estimates are detached anyway), else None."""
+    if not (x.is_cuda and x.dtype == torch.complex64) or (torch.is_grad_enabled()
+                                                           and x.requires_grad):
+        return None
+    return triton_kernels()
+
+
 def shift_sums(rows, nu):
     """
     "(rows @ cos(theta), rows @ sin(theta))" with theta_t = 2 pi t nu, (..., R) each, in one
@@ -1118,7 +1127,7 @@ def alignment_phasor(phi, eps, n, sw_hz, dtype):
 def aligned(fids, phi, eps, sw_hz):
     """*fids* (B, D, T) times "alignment_phasor" of *phi*, *eps* (B, D): one pass by Triton on
     complex64 CUDA transients, the same numbers."""
-    kernels = triton_kernels() if fids.is_cuda and fids.dtype == torch.complex64 else None
+    kernels = applying_kernels(fids)
     if kernels is None or fids.dim() != 3:
         return fids * alignment_phasor(phi, eps, fids.shape[-1], sw_hz, fids.dtype)
     n = fids.shape[-1]
@@ -1254,7 +1263,7 @@ def _gaussian_window(width, dtype, device):
 def rotated(data, phase):
     """*data* times e^{-i phase}, the ECC correction: one pass by Triton on complex64 CUDA data
     of the phase's shape, the same numbers."""
-    kernels = triton_kernels() if data.is_cuda and data.dtype == torch.complex64 else None
+    kernels = applying_kernels(data)
     if kernels is None or data.shape != phase.shape:
         return data * torch.polar(torch.ones_like(phase), -phase).to(data.dtype)
     n = data.shape[-1]
@@ -1337,7 +1346,7 @@ def phased(data, sw_hz, spans):
     complex64 CUDA data in two launches around the transform, the same numbers.
     """
     flat = data.reshape(-1, data.shape[-1])
-    kernels = triton_kernels() if data.is_cuda and data.dtype == torch.complex64 else None
+    kernels = applying_kernels(data)
     if kernels is not None:
         return kernels.peak_phased(flat, kernels.padded_spectra(flat), *spans).reshape(data.shape)
     angle = peak_phase(flat, sw_hz, None, None, spans)
@@ -1353,7 +1362,7 @@ def shifted_each(data, sw_hz, spans, reference_ppm, sf_mhz):
     """
     n = data.shape[-1]
     flat = data.reshape(-1, n)
-    kernels = triton_kernels() if data.is_cuda and data.dtype == torch.complex64 else None
+    kernels = applying_kernels(data)
     if kernels is None:
         shift = peak_shift_each(flat, sw_hz, spans, reference_ppm, sf_mhz)
         return data * shift_phasor(shift, n, sw_hz, data.dtype).reshape(data.shape)
