@@ -359,6 +359,373 @@ def shift_sums(rows, nu, cos, sin):
                             R_PAD=max(triton.next_power_of_2(r), 2), BLOCK=SHIFT_POINTS)
 
 
+#*******************#
+#   shift profile   #
+#*******************#
+#: Points each program of the profile rows takes.
+PROFILE_POINTS = 64
+
+#: Points each program of the power takes.
+POWER_POINTS = 1024
+
+
+@triton.jit
+def profile_rows_kernel(x_ptr, window_ptr, plain_ptr, padded_ptr, D, N, SB, SD, ST,
+                        D_PAD: tl.constexpr, BLOCK: tl.constexpr):
+    """
+    One program per (sample b, block of points): its transients x[b, d, t] (at b SB + d SD + t ST)
+    with the first point halved, the rows h = x conj(window[b]) into plain[b, d, 0:2], and x into
+    the first half of its zero-padded row; complex products rounded as torch's.
+    """
+    b = tl.program_id(0)
+    t = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    d = tl.arange(0, D_PAD)
+    inside = (d[:, None] < D) & (t[None, :] < N)
+    at = (b.to(tl.int64) * SB + d[:, None] * SD + t[None, :] * ST) * 2
+    x_re = tl.load(x_ptr + at, mask=inside, other=0.0)
+    x_im = tl.load(x_ptr + at + 1, mask=inside, other=0.0)
+    first = t[None, :] == 0
+    x_re, x_im = (tl.where(first, tl.fma(x_re, 0.5, -(x_im * 0.0)), x_re),
+                  tl.where(first, tl.fma(x_re, 0.0, x_im * 0.5), x_im))
+    w_re = tl.load(window_ptr + (b * N + t) * 2, mask=t < N, other=0.0)[None, :]
+    w_im = -tl.load(window_ptr + (b * N + t) * 2 + 1, mask=t < N, other=0.0)[None, :]
+    rows = (b.to(tl.int64) * D + d[:, None]) * 4 * N + t[None, :]
+    tl.store(plain_ptr + rows, tl.fma(x_re, w_re, -(x_im * w_im)), mask=inside)
+    tl.store(plain_ptr + rows + N, tl.fma(x_re, w_im, x_im * w_re), mask=inside)
+    pad = ((b.to(tl.int64) * D + d[:, None]) * 2 * N + t[None, :]) * 2
+    tl.store(padded_ptr + pad, x_re, mask=inside)
+    tl.store(padded_ptr + pad + 1, x_im, mask=inside)
+    tl.store(padded_ptr + pad + 2 * N, 0.0 * x_re, mask=inside)
+    tl.store(padded_ptr + pad + 2 * N + 1, 0.0 * x_re, mask=inside)
+
+
+@triton.jit
+def power_kernel(z_ptr, out_ptr, M, BLOCK: tl.constexpr):
+    """One program per block: |z|^2 = re^2 + im^2 of complex z, each square and the sum rounded."""
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    re = tl.load(z_ptr + i.to(tl.int64) * 2, mask=i < M, other=0.0)
+    im = tl.load(z_ptr + i.to(tl.int64) * 2 + 1, mask=i < M, other=0.0)
+    tl.store(out_ptr + i, re * re + im * im, mask=i < M)
+
+
+@triton.jit
+def autocorr_rows_kernel(a_ptr, kernel_ptr, plain_ptr, q0_ptr, N, CONJ: tl.constexpr,
+                         BLOCK: tl.constexpr):
+    """
+    One program per (transient m, block of lags): q = a[m, :N] kernel (a complex product rounded
+    as torch's; a conjugated first with CONJ), its lag 0 into q0[m] and zeroed, the rest into
+    plain[m, 2:4].
+    """
+    m = tl.program_id(0)
+    t = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    inside = t < N
+    a = a_ptr + (m.to(tl.int64) * 2 * N + t) * 2
+    a_re = tl.load(a, mask=inside, other=0.0)
+    a_im = tl.load(a + 1, mask=inside, other=0.0)
+    if CONJ:
+        a_im = -a_im
+    k_re = tl.load(kernel_ptr + t * 2, mask=inside, other=0.0)
+    k_im = tl.load(kernel_ptr + t * 2 + 1, mask=inside, other=0.0)
+    q_re = tl.fma(a_re, k_re, -(a_im * k_im))
+    q_im = tl.fma(a_re, k_im, a_im * k_re)
+    tl.store(q0_ptr + m + t * 0, q_re, mask=t == 0)
+    rows = m.to(tl.int64) * 4 * N + 2 * N + t
+    tl.store(plain_ptr + rows, tl.where(t == 0, 0.0, q_re), mask=inside)
+    tl.store(plain_ptr + rows + N, tl.where(t == 0, 0.0, q_im), mask=inside)
+
+
+def shift_profile(x, window, kernel):
+    """
+    "torch_engine.ShiftProfile"'s rows of complex64 transients *x* (B, D, T), read where they lie,
+    against their sample's time-domain *window* (B, T) and the window *kernel* (T,): "(plain
+    (B, D, 4, T) float32, q0 (B, D))", bit for bit; the two transforms are torch's own.
+    """
+    b, d, n = x.shape
+    plain = torch.empty((b, d, 4, n), dtype=torch.float32, device=x.device)
+    padded = torch.empty((b, d, 2 * n), dtype=x.dtype, device=x.device)
+    profile_rows_kernel[(b, triton.cdiv(n, PROFILE_POINTS))](
+        torch.view_as_real(x), torch.view_as_real(window.contiguous()), plain,
+        torch.view_as_real(padded), d, n, *x.stride(), D_PAD=triton.next_power_of_2(d),
+        BLOCK=PROFILE_POINTS, enable_fp_fusion=False)
+    spectrum = torch.fft.fft(padded, dim=-1)
+    power = torch.empty(spectrum.shape, dtype=torch.float32, device=x.device)
+    power_kernel[(triton.cdiv(power.numel(), POWER_POINTS),)](
+        torch.view_as_real(spectrum), power, power.numel(), BLOCK=POWER_POINTS,
+        enable_fp_fusion=False)
+    autocorr = torch.fft.ifft(power, dim=-1)        # of a real input, possibly a conjugate view
+    conj = autocorr.is_conj()
+    q0 = torch.empty((b, d), dtype=torch.float32, device=x.device)
+    autocorr_rows_kernel[(b * d, triton.cdiv(n, POWER_POINTS))](
+        torch.view_as_real(autocorr.conj() if conj else autocorr),
+        torch.view_as_real(kernel.contiguous()), plain, q0, n, CONJ=conj, BLOCK=POWER_POINTS,
+        enable_fp_fusion=False)
+    return plain, q0
+
+
+#***********************#
+#   apply the alignment   #
+#***********************#
+@triton.jit
+def aligned_kernel(x_ptr, phi_ptr, eps_ptr, t_ptr, out_ptr, D, N, SB, SD, ST, OB, OD, OT,
+                   two_pi, D_PAD: tl.constexpr, BLOCK: tl.constexpr):
+    """
+    One program per (sample b, block of points): every transient x[b, d] (at b SB + d SD + t ST)
+    times e^{-i phi - 2 pi i t eps} on the time axis *t*, the angle, its cosine and sine and the
+    complex product rounded as "torch_engine.alignment_phasor" and torch's product round them,
+    into out (at b OB + d OD + t OT).
+    """
+    b = tl.program_id(0)
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    d = tl.arange(0, D_PAD)
+    inside = (d[:, None] < D) & (j[None, :] < N)
+    phi = tl.load(phi_ptr + b * D + d, mask=d < D, other=0.0)
+    eps = tl.load(eps_ptr + b * D + d, mask=d < D, other=0.0)
+    t = tl.load(t_ptr + j, mask=j < N, other=0.0)
+    angle = (-phi)[:, None] - (t * two_pi)[None, :] * eps[:, None]
+    c = libdevice.cos(angle)
+    s = libdevice.sin(angle)
+    at = (b.to(tl.int64) * SB + d[:, None] * SD + j[None, :] * ST) * 2
+    x_re = tl.load(x_ptr + at, mask=inside, other=0.0)
+    x_im = tl.load(x_ptr + at + 1, mask=inside, other=0.0)
+    to = (b.to(tl.int64) * OB + d[:, None] * OD + j[None, :] * OT) * 2
+    tl.store(out_ptr + to, tl.fma(x_re, c, -(x_im * s)), mask=inside)
+    tl.store(out_ptr + to + 1, tl.fma(x_re, s, x_im * c), mask=inside)
+
+
+def aligned(x, phi, eps, t):
+    """
+    Complex64 transients *x* (B, D, T), read where they lie, times "alignment_phasor" of *phi*,
+    *eps* (B, D) on the time axis *t* (T,), in one pass; the result laid out as torch's product
+    lays it out (empty_like).
+    """
+    b, d, n = x.shape
+    out = torch.empty_like(x)
+    aligned_kernel[(b, triton.cdiv(n, PROFILE_POINTS))](
+        torch.view_as_real(x), phi.contiguous(), eps.contiguous(), t, torch.view_as_real(out), d,
+        n, *x.stride(), *out.stride(), 2 * math.pi, D_PAD=triton.next_power_of_2(d),
+        BLOCK=PROFILE_POINTS, enable_fp_fusion=False)
+    return out
+
+
+#***************#
+#   ecc phase   #
+#***************#
+#: Points each program of the ECC kernels takes.
+ECC_POINTS = 512
+
+
+@triton.jit
+def unwrap_steps_kernel(ref_ptr, angle_ptr, correct_ptr, N, pi, two_pi, BLOCK: tl.constexpr):
+    """
+    One program per (row r, block of points): the angle of ref[r] and, for every step into a
+    point, numpy.unwrap's correction ("torch_engine.unwrap"), each operation rounded as its torch
+    kernel rounds it (the remainder as fmod, moved to the divisor's sign).
+    """
+    r = tl.program_id(0)
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    at = (r.to(tl.int64) * N + j) * 2
+    angle = libdevice.atan2(tl.load(ref_ptr + at + 1, mask=j < N, other=0.0),
+                            tl.load(ref_ptr + at, mask=j < N, other=1.0))
+    tl.store(angle_ptr + r.to(tl.int64) * N + j, angle, mask=j < N)
+    step = (j >= 1) & (j < N)
+    before = libdevice.atan2(tl.load(ref_ptr + at - 1, mask=step, other=0.0),
+                             tl.load(ref_ptr + at - 2, mask=step, other=1.0))
+    diff = angle - before
+    wrapped = libdevice.fmod(diff + pi, two_pi)
+    wrapped = tl.where((wrapped != 0) & ((two_pi < 0) != (wrapped < 0)), wrapped + two_pi,
+                       wrapped) - pi
+    wrapped = tl.where((wrapped == -pi) & (diff > 0), pi, wrapped)
+    correct = tl.where(tl.abs(diff) < pi, 0.0, wrapped - diff)
+    tl.store(correct_ptr + r.to(tl.int64) * (N - 1) + j - 1, correct, mask=step)
+
+
+@triton.jit
+def unwrapped_kernel(angle_ptr, cum_ptr, out_ptr, N, ROW, LEFT, BLOCK: tl.constexpr):
+    """
+    One program per (row r, block of points): the unwrapped phase, angle[r, 0] and then
+    angle[r, j] + cum[r, j - 1] ("torch_engine.unwrap"), into out[r, LEFT + j] (rows ROW apart).
+    """
+    r = tl.program_id(0)
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    angle = tl.load(angle_ptr + r.to(tl.int64) * N + j, mask=j < N, other=0.0)
+    cum = tl.load(cum_ptr + r.to(tl.int64) * (N - 1) + j - 1, mask=(j >= 1) & (j < N),
+                  other=0.0)
+    tl.store(out_ptr + r.to(tl.int64) * ROW + LEFT + j, tl.where(j == 0, angle, angle + cum),
+             mask=j < N)
+
+
+@triton.jit
+def rotated_kernel(x_ptr, phase_ptr, out_ptr, N, XR, XT, OR, OT, BLOCK: tl.constexpr):
+    """
+    One program per (row r, block of points): x[r] e^{-i phase[r]} (rows of x and out at r XR,
+    r OR, points XT, OT apart), the polar factor and the product rounded as torch's.
+    """
+    r = tl.program_id(0)
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    p = -tl.load(phase_ptr + r.to(tl.int64) * N + j, mask=j < N, other=0.0)
+    c = libdevice.cos(p)
+    s = libdevice.sin(p)
+    at = (r.to(tl.int64) * XR + j * XT) * 2
+    x_re = tl.load(x_ptr + at, mask=j < N, other=0.0)
+    x_im = tl.load(x_ptr + at + 1, mask=j < N, other=0.0)
+    to = (r.to(tl.int64) * OR + j * OT) * 2
+    tl.store(out_ptr + to, tl.fma(x_re, c, -(x_im * s)), mask=j < N)
+    tl.store(out_ptr + to + 1, tl.fma(x_re, s, x_im * c), mask=j < N)
+
+
+def unwrapped_padded(ref, left, right):
+    """
+    The unwrapped phase of complex64 rows *ref* (R, T) ("torch_engine.unwrap" of their angle)
+    in the middle of rows (R, left + T + right), whose margins are left for the caller.
+    """
+    rows, n = ref.shape
+    ref = ref.contiguous()
+    angle = torch.empty((rows, n), dtype=torch.float32, device=ref.device)
+    correct = torch.empty((rows, n - 1), dtype=torch.float32, device=ref.device)
+    grid = (rows, triton.cdiv(n, ECC_POINTS))
+    unwrap_steps_kernel[grid](torch.view_as_real(ref), angle, correct, n, math.pi, 2 * math.pi,
+                              BLOCK=ECC_POINTS, enable_fp_fusion=False)
+    cum = torch.cumsum(correct, dim=-1)
+    padded = torch.empty((rows, left + n + right), dtype=torch.float32, device=ref.device)
+    unwrapped_kernel[grid](angle, cum, padded, n, padded.shape[1], left, BLOCK=ECC_POINTS)
+    return padded
+
+
+def rotated(x, phase):
+    """Complex64 rows *x* (R, T), any strides, times e^{-i phase} of float32 *phase* (R, T),
+    contiguous, in one pass; the result laid out as x (empty_like)."""
+    rows, n = x.shape
+    out = torch.empty_like(x)
+    rotated_kernel[(rows, triton.cdiv(n, ECC_POINTS))](
+        torch.view_as_real(x), phase, torch.view_as_real(out), n, *x.stride(), *out.stride(),
+        BLOCK=ECC_POINTS, enable_fp_fusion=False)
+    return out
+
+
+#*******************#
+#   peak searches   #
+#*******************#
+@triton.jit
+def halved_padded_kernel(x_ptr, out_ptr, N, M, XR, XT, BLOCK: tl.constexpr):
+    """
+    One program per (row r, block of points): x[r] (at r XR + t XT) with its first point halved
+    as torch's complex product by 0.5 halves it, zero-filled to M points.
+    """
+    r = tl.program_id(0)
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    at = (r.to(tl.int64) * XR + j * XT) * 2
+    re = tl.load(x_ptr + at, mask=j < N, other=0.0)
+    im = tl.load(x_ptr + at + 1, mask=j < N, other=0.0)
+    re, im = (tl.where(j == 0, tl.fma(re, 0.5, -(im * 0.0)), re),
+              tl.where(j == 0, tl.fma(re, 0.0, im * 0.5), im))
+    to = (r.to(tl.int64) * M + j) * 2
+    tl.store(out_ptr + to, re, mask=j < M)
+    tl.store(out_ptr + to + 1, im, mask=j < M)
+
+
+@triton.jit
+def _window_peak(spec_ptr, r, M, FIRST, LAST, W: tl.constexpr):
+    """The first bin of the largest |.| in [FIRST, LAST) of row r's fftshifted spectrum (read
+    unshifted), and that bin's value."""
+    k = FIRST + tl.arange(0, W)
+    valid = k < LAST
+    at = (r.to(tl.int64) * M + (k + M // 2) % M) * 2
+    re = tl.load(spec_ptr + at, mask=valid, other=0.0)
+    im = tl.load(spec_ptr + at + 1, mask=valid, other=0.0)
+    size = tl.where(valid, libdevice.hypot(re, im), -1.0)
+    top = tl.max(size, axis=0)
+    peak = tl.min(tl.where(size == top, k, LAST), axis=0)
+    at = (r.to(tl.int64) * M + (peak + M // 2) % M) * 2
+    return peak, tl.load(spec_ptr + at), tl.load(spec_ptr + at + 1)
+
+
+@triton.jit
+def peak_phased_kernel(spec_ptr, x_ptr, out_ptr, N, M, FIRST, LAST, XR, XT, OR, OT,
+                       W: tl.constexpr, BLOCK: tl.constexpr):
+    """
+    One program per (row r, block of points): x[r] times e^{i phi}, phi minus the angle of the
+    window's peak ("torch_engine.peak_phase", FSL-MRS phaseCorrect), rounded as torch's.
+    """
+    r = tl.program_id(0)
+    _, p_re, p_im = _window_peak(spec_ptr, r, M, FIRST, LAST, W)
+    phi = -libdevice.atan2(p_im, p_re)
+    c = libdevice.cos(phi)
+    s = libdevice.sin(phi)
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    at = (r.to(tl.int64) * XR + j * XT) * 2
+    x_re = tl.load(x_ptr + at, mask=j < N, other=0.0)
+    x_im = tl.load(x_ptr + at + 1, mask=j < N, other=0.0)
+    to = (r.to(tl.int64) * OR + j * OT) * 2
+    tl.store(out_ptr + to, tl.fma(x_re, c, -(x_im * s)), mask=j < N)
+    tl.store(out_ptr + to + 1, tl.fma(x_re, s, x_im * c), mask=j < N)
+
+
+@triton.jit
+def peak_shifted_kernel(spec_ptr, x_ptr, hz_ptr, sf_ptr, consts_ptr, t_ptr, out_ptr, N, M,
+                        FIRST, LAST, XR, XT, OR, OT, minus_two_pi, W: tl.constexpr,
+                        BLOCK: tl.constexpr):
+    """
+    One program per (row r, block of points): x[r] shifted onto the reference - the window's peak
+    in Hz over the row's own frequency sf[r], plus the proton reference less the target ppm
+    (consts), times sf[r] ("torch_engine.peak_shift_each"), then e^{-2 pi i t shift} in float64
+    rounded to complex64 ("shift_phasor"), every operation as torch rounds it.
+    """
+    r = tl.program_id(0)
+    peak, _, _ = _window_peak(spec_ptr, r, M, FIRST, LAST, W)
+    sf = tl.load(sf_ptr + r)
+    shift = (libdevice.div_rn(tl.load(hz_ptr + peak - FIRST), sf) + tl.load(consts_ptr)
+             - tl.load(consts_ptr + 1)) * sf
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    angle = (tl.load(t_ptr + j, mask=j < N, other=0.0) * minus_two_pi).to(tl.float64) * shift
+    c = libdevice.cos(angle).to(tl.float32)
+    s = libdevice.sin(angle).to(tl.float32)
+    at = (r.to(tl.int64) * XR + j * XT) * 2
+    x_re = tl.load(x_ptr + at, mask=j < N, other=0.0)
+    x_im = tl.load(x_ptr + at + 1, mask=j < N, other=0.0)
+    to = (r.to(tl.int64) * OR + j * OT) * 2
+    tl.store(out_ptr + to, tl.fma(x_re, c, -(x_im * s)), mask=j < N)
+    tl.store(out_ptr + to + 1, tl.fma(x_re, s, x_im * c), mask=j < N)
+
+
+def padded_spectra(x, factor=4):
+    """"torch_engine._padded_window"'s spectra of complex64 rows *x* (R, T), any strides, before
+    the fftshift: first point halved, zero-filled to factor T, the orthonormal transform."""
+    rows, n = x.shape
+    padded = torch.empty((rows, factor * n), dtype=x.dtype, device=x.device)
+    halved_padded_kernel[(rows, triton.cdiv(factor * n, ECC_POINTS))](
+        torch.view_as_real(x), torch.view_as_real(padded), n, factor * n, *x.stride(),
+        BLOCK=ECC_POINTS, enable_fp_fusion=False)
+    return torch.fft.fft(padded, dim=-1, norm='ortho')
+
+
+def peak_phased(x, spectra, first, last):
+    """Complex64 rows *x* (R, T) phased by their window [first, last) of *spectra*
+    ("padded_spectra"), in one pass; laid out as x (empty_like)."""
+    rows, n = x.shape
+    out = torch.empty_like(x)
+    peak_phased_kernel[(rows, triton.cdiv(n, ECC_POINTS))](
+        torch.view_as_real(spectra), torch.view_as_real(x), torch.view_as_real(out), n,
+        spectra.shape[-1], first, last, *x.stride(), *out.stride(),
+        W=triton.next_power_of_2(last - first), BLOCK=ECC_POINTS, enable_fp_fusion=False)
+    return out
+
+
+def peak_shifted(x, spectra, first, last, hz, sf, consts, t):
+    """
+    Complex64 rows *x* (R, T) shifted to the reference by their window [first, last) of *spectra*
+    ("padded_spectra") read against their own frequencies *sf* (R,) float64, in one pass: *hz* the
+    window's bins in Hz, *consts* float64 (proton reference, target ppm), *t* (T,) the time axis.
+    """
+    rows, n = x.shape
+    out = torch.empty_like(x)
+    peak_shifted_kernel[(rows, triton.cdiv(n, ECC_POINTS))](
+        torch.view_as_real(spectra), torch.view_as_real(x), hz, sf.contiguous(), consts, t,
+        torch.view_as_real(out), n, spectra.shape[-1], first, last, *x.stride(), *out.stride(),
+        -2 * math.pi, W=triton.next_power_of_2(last - first), BLOCK=ECC_POINTS,
+        enable_fp_fusion=False)
+    return out
+
+
 #********************************#
 #   the whole alignment search   #
 #********************************#

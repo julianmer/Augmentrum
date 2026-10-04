@@ -668,19 +668,23 @@ class ShiftProfile:
         self.y_energy = (windowed.abs() ** 2).sum(dim=-1)
         self.norm = torch.linalg.vector_norm(target, dim=-1)
         window = math.sqrt(n) * torch.fft.ifft(torch.fft.ifftshift(windowed, dim=-1), dim=-1)
+        kernel = constant(('window kernel', n, first, last),
+                          lambda: _window_kernel(n, first, last), x.device, complex_of(x))
+        self.lag = torch.arange(n, device=x.device, dtype=real_of(x))
+        kernels = triton_kernels() if x.is_cuda and x.dtype == torch.complex64 else None
+        if kernels is not None:
+            # the rows below in three launches around the two transforms ("shift_profile")
+            self.plain, self.q0 = kernels.shift_profile(x, window, kernel)
+            return
         xt = halve_first(x)
         h = xt * window.conj()[:, None, :]
 
         # the autocorrelation is exact from the power on a grid of twice the length
         spectrum = torch.fft.fft(xt, n=2 * n, dim=-1)
         autocorr = torch.fft.ifft(spectrum.real ** 2 + spectrum.imag ** 2, dim=-1)[..., :n]
-        q = autocorr * constant(('window kernel', n, first, last),
-                                lambda: _window_kernel(n, first, last), x.device,
-                                complex_of(x))
+        q = autocorr * kernel
         self.q0 = q[..., 0].real.clone()
         q[..., 0] = 0
-
-        self.lag = torch.arange(n, device=x.device, dtype=real_of(x))
         self.plain = torch.stack([h.real, h.imag, q.real, q.imag], dim=-2)     # (B, D, 4, T)
 
     @functools.cached_property
@@ -1111,6 +1115,17 @@ def alignment_phasor(phi, eps, n, sw_hz, dtype):
     return torch.polar(torch.ones_like(angle), angle).to(dtype)
 
 
+def aligned(fids, phi, eps, sw_hz):
+    """*fids* (B, D, T) times "alignment_phasor" of *phi*, *eps* (B, D): one pass by Triton on
+    complex64 CUDA transients, the same numbers."""
+    kernels = triton_kernels() if fids.is_cuda and fids.dtype == torch.complex64 else None
+    if kernels is None or fids.dim() != 3:
+        return fids * alignment_phasor(phi, eps, fids.shape[-1], sw_hz, fids.dtype)
+    n = fids.shape[-1]
+    t = torch.linspace(1.0 / sw_hz, n / sw_hz, n, dtype=torch.float32, device=fids.device)
+    return kernels.aligned(fids, phi, eps, t)
+
+
 #***********************#
 #   outlier detection   #
 #***********************#
@@ -1203,18 +1218,48 @@ def ecc_phase(refs, width=32):
     suspect's sliding_gaussian as nifti_ecc_smoothed uses it: edge-padded with
     10-point edge means, correlated with a normalised Gaussian window.
     """
-    phase = unwrap(torch.angle(refs.to(complex_of(refs))))
-    lead, n = phase.shape[:-1], phase.shape[-1]
-    flat = phase.reshape(-1, n)
-    window = torch.exp(-torch.linspace(-3, 3, width, dtype=phase.dtype,
-                                       device=phase.device) ** 2)
-    window = window / window.sum()
+    lead, n = refs.shape[:-1], refs.shape[-1]
     offset = (width - 1) // 2
-    left = flat[:, :10].mean(dim=-1, keepdim=True).expand(-1, offset)
-    right = flat[:, -10:].mean(dim=-1, keepdim=True).expand(-1, width - 1 - offset)
-    padded = torch.cat([left, flat, right], dim=-1)
+    kernels = triton_kernels() if refs.is_cuda and refs.dtype == torch.complex64 else None
+    if kernels is not None:
+        # the unwrapped phase straight into the middle of its padded rows
+        # ("augmentrum.core.kernels.unwrapped_padded")
+        padded = kernels.unwrapped_padded(refs.reshape(-1, n), offset, width - 1 - offset)
+        flat = padded[:, offset:offset + n]
+        padded[:, :offset] = flat[:, :10].mean(dim=-1, keepdim=True)
+        padded[:, offset + n:] = flat[:, -10:].mean(dim=-1, keepdim=True)
+    else:
+        phase = unwrap(torch.angle(refs.to(complex_of(refs))))
+        flat = phase.reshape(-1, n)
+        left = flat[:, :10].mean(dim=-1, keepdim=True).expand(-1, offset)
+        right = flat[:, -10:].mean(dim=-1, keepdim=True).expand(-1, width - 1 - offset)
+        padded = torch.cat([left, flat, right], dim=-1)
+    window = _gaussian_window(width, padded.dtype, padded.device)
     smooth = torch.nn.functional.conv1d(padded[:, None, :], window[None, None, :])[:, 0]
     return smooth.reshape(lead + (n,))
+
+
+_WINDOWS = {}
+
+
+def _gaussian_window(width, dtype, device):
+    """ecc_phase's normalised Gaussian window, made once per device by the same operations."""
+    key = (width, dtype, str(device))
+    if key not in _WINDOWS:
+        window = torch.exp(-torch.linspace(-3, 3, width, dtype=dtype, device=device) ** 2)
+        _WINDOWS[key] = window / window.sum()
+    return _WINDOWS[key]
+
+
+def rotated(data, phase):
+    """*data* times e^{-i phase}, the ECC correction: one pass by Triton on complex64 CUDA data
+    of the phase's shape, the same numbers."""
+    kernels = triton_kernels() if data.is_cuda and data.dtype == torch.complex64 else None
+    if kernels is None or data.shape != phase.shape:
+        return data * torch.polar(torch.ones_like(phase), -phase).to(data.dtype)
+    n = data.shape[-1]
+    return kernels.rotated(data.reshape(-1, n),
+                           phase.reshape(-1, n).contiguous()).reshape(data.shape)
 
 
 #*******************#
@@ -1284,6 +1329,42 @@ def peak_shift_each(fids, sw_hz, spans, reference_ppm, sf_mhz):
     hz = constant(('shift axis hz', n, sw_hz, first, last),
                   lambda: np.linspace(-sw_hz / 2, sw_hz / 2, n)[first:last], fids.device)
     return (hz[peak] / sf_mhz + ppm_reference('1H') - reference_ppm) * sf_mhz
+
+
+def phased(data, sw_hz, spans):
+    """
+    *data* (..., T) times e^{i phi}, phi of "peak_phase" in the window *spans*: by Triton on
+    complex64 CUDA data in two launches around the transform, the same numbers.
+    """
+    flat = data.reshape(-1, data.shape[-1])
+    kernels = triton_kernels() if data.is_cuda and data.dtype == torch.complex64 else None
+    if kernels is not None:
+        return kernels.peak_phased(flat, kernels.padded_spectra(flat), *spans).reshape(data.shape)
+    angle = peak_phase(flat, sw_hz, None, None, spans)
+    factor = torch.polar(torch.ones_like(angle), angle)
+    return data * factor.reshape(data.shape[:-1] + (1,)).to(data.dtype)
+
+
+def shifted_each(data, sw_hz, spans, reference_ppm, sf_mhz):
+    """
+    *data* (..., T) shifted to *reference_ppm* by "peak_shift_each" (every FID against its own
+    frequency, *sf_mhz* a (...) tensor) and "shift_phasor": by Triton on complex64 CUDA data in
+    two launches around the transform, the same numbers.
+    """
+    n = data.shape[-1]
+    flat = data.reshape(-1, n)
+    kernels = triton_kernels() if data.is_cuda and data.dtype == torch.complex64 else None
+    if kernels is None:
+        shift = peak_shift_each(flat, sw_hz, spans, reference_ppm, sf_mhz)
+        return data * shift_phasor(shift, n, sw_hz, data.dtype).reshape(data.shape)
+    first, last = spans
+    hz = constant(('shift axis hz', 4 * n, sw_hz, first, last),
+                  lambda: np.linspace(-sw_hz / 2, sw_hz / 2, 4 * n)[first:last], data.device)
+    consts = constant(('shift references', reference_ppm),
+                      lambda: np.array([ppm_reference('1H'), reference_ppm]), data.device)
+    t = torch.linspace(0, n / sw_hz, n, dtype=torch.float32, device=data.device)
+    return kernels.peak_shifted(flat, kernels.padded_spectra(flat), first, last, hz, sf_mhz,
+                                consts, t).reshape(data.shape)
 
 
 def shift_phasor(shift_hz, n, sw_hz, dtype):

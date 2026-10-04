@@ -1806,7 +1806,7 @@ class RawProcessor(BaseModule):
         valid = (torch.ones(b * v, d, dtype=torch.bool, device=x.device) if dyn_mask is None
                  else dyn_mask.repeat_interleave(v, dim=0))
         phi, eps = engine.align(flat, valid, sw_hz, None, None, spans=spans)
-        x = flat * engine.alignment_phasor(phi, eps, n, sw_hz, x.dtype)
+        x = engine.aligned(flat, phi, eps, sw_hz)
         return x.reshape(b, v, 1, d, n), coil_mask, (phi.reshape(b, v, d), eps.reshape(b, v, d))
 
     def _torch_corrections(self, x, w, tags, wtags, sw_hz, spans, sf=None):
@@ -1830,9 +1830,8 @@ class RawProcessor(BaseModule):
                 phase = torch.angle(ref.to(engine.complex_of(ref)))
             else:
                 raise ValueError(f"Unknown ECC method: {self.ecc_method}")
-            phasor = torch.polar(torch.ones_like(phase), -phase)
-            x = x * phasor.to(x.dtype)
-            w = w * phasor.to(w.dtype) if w is not None else None
+            x = engine.rotated(x, phase)
+            w = engine.rotated(w, phase) if w is not None else None
 
         if self.truncate:
             x = x[..., 1:]
@@ -1850,25 +1849,19 @@ class RawProcessor(BaseModule):
             flat = x.reshape(-1, n)
             if sf is None:
                 shift = yield from engine.peak_shift_steps(flat, sw_hz, spans['shift'], 3.027)
+                x = x * engine.shift_phasor(shift, n, sw_hz, x.dtype).reshape(x.shape[:-1] + (n,))
             else:
                 # every FID against its own scan's frequency, inside the graph
                 own = sf[:, None].expand(x.shape[0], flat.shape[0] // x.shape[0]).reshape(-1)
-                shift = engine.peak_shift_each(flat, sw_hz, spans['shift'], 3.027, own)
-            x = x * engine.shift_phasor(shift, n, sw_hz, x.dtype).reshape(x.shape[:-1] + (n,))
+                x = engine.shifted_each(x, sw_hz, spans['shift'], 3.027, own)
 
         if self.phase_correct:
             if self.phase_correct_method != 'fsl-mrs':
                 raise ValueError(f"Unknown tensor phase correction method: "
                                  f"{self.phase_correct_method}")
 
-            def phased(data, window):
-                angle = engine.peak_phase(data.reshape(-1, data.shape[-1]), sw_hz, None, None,
-                                          window)
-                factor = torch.polar(torch.ones_like(angle), angle)
-                return data * factor.reshape(data.shape[:-1] + (1,)).to(data.dtype)
-
-            x = phased(x, spans['shift'])
-            w = phased(w, spans['water_phase']) if w is not None else None
+            x = engine.phased(x, sw_hz, spans['shift'])
+            w = engine.phased(w, sw_hz, spans['water_phase']) if w is not None else None
         return x, w
 
     @staticmethod
