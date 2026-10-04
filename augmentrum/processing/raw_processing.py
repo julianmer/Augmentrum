@@ -1417,12 +1417,12 @@ class RawProcessor(BaseModule):
                       for held, role, group in ((origin, 'data', tags),
                                                 (water_origin, 'water', wtags)))
 
-        # A raw batch is a quarter of a gigabyte of coils and transients, and the coil
-        # combination is all that reads it: where the pool's cached moments cover the rest, it
-        # meets its weights in a step and stays out of the graphs, which then neither copy it
-        # nor keep a second one.
+        # A raw batch is a quarter of a gigabyte of coils and transients, and with a water to
+        # weight them only its noise moments and the coil combination read it: both are steps
+        # (the moments the pool's cache where it applies), and the batch stays out of the
+        # graphs, which then neither copy it nor keep a second one.
         deferred = (self.coil and not self.conj and 'DIM_COIL' in tags and c > 1
-                    and self.coil_method == 'fsl-mrs' and w is not None and pools[0] is not None)
+                    and self.coil_method == 'fsl-mrs' and w is not None)
         if rows is not None and not deferred:
             # values the graphs read: the rows gathered, as the batch would have done
             x = self._to_torch_layout(move_axis(rows.gather(), self.SPECTRAL_AXIS, -1), tags)[0]
@@ -1653,6 +1653,8 @@ class RawProcessor(BaseModule):
                 ('RawProcessor.noise_moments', tuple(tags), n),
                 lambda pool: self._pool_noise_moments(pool.data, tags, tail))
             index = inputs['index']
+        elif x is None:
+            second, first = yield engine.Step(self._tail_moments, tail, late=('met',))
         else:
             second, first = engine.noise_moments(x[..., n - tail:])
         if coil_mask is None and dyn_mask is None and v * d * tail < \
@@ -1689,6 +1691,13 @@ class RawProcessor(BaseModule):
         x = engine.combine_coils(x, weights.to(x.dtype))
         w = engine.combine_coils(w, weights.to(w.dtype))
         return x.unsqueeze(2), w.unsqueeze(2)
+
+    @staticmethod
+    def _tail_moments(tail, met):
+        """The noise moments of a batch that stayed outside the graphs (see "_torch_steps")."""
+        from augmentrum.processing import torch_engine as engine
+
+        return engine.noise_moments(met[..., met.shape[-1] - tail:])
 
     @staticmethod
     def _combine_raw(weights, water, met):
