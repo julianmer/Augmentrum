@@ -421,3 +421,19 @@ class TestGaussianNoiseLevel:
         louder = self._spectrum(result[1][:] - clean).real.std()
         assert np.isclose(peak / loud, 20.0, rtol=0.05)
         assert np.isclose(peak / louder, 5.0, rtol=0.05)
+
+
+#**************************#
+#   the cuda kernel path   #
+#**************************#
+def test_a_level_per_sample_is_added_in_one_pass_on_cuda(monkeypatch):
+    """Independent noise at one level, scaled and added in one Triton pass, has the torch bits."""
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    generator = torch.Generator('cuda').manual_seed(0)
+    x = torch.randn(2, 5, 7, 3, 300, dtype=torch.complex64, device='cuda', generator=generator)
+    run = lambda: Noise(sigma=0.02, seed=0).process_tensor(x)[0]
+    fused = run()
+    monkeypatch.setattr(Noise, '_kernels', staticmethod(lambda *args: None))
+    assert torch.equal(fused, run()) and not torch.equal(fused, x)

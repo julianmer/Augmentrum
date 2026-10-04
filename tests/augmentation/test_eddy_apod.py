@@ -603,3 +603,20 @@ class TestSyntheticTrajectory:
         listed = _phases(EddyCurrent(seed=3)(_ones(3, backend=Backend.NIFTI_LIST))[0])
         assert np.allclose(first, listed, atol=1e-5)
         assert not np.allclose(first[0], first[1], atol=1e-6), "one trajectory per sample"
+
+
+#**************************#
+#   the cuda kernel path   #
+#**************************#
+def test_the_kernel_path_is_the_torch_path_on_cuda(monkeypatch):
+    """A trajectory per sample, turned in the Triton kernels, gives the torch path's bits."""
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    import augmentrum.augmentation.eddy_current as module
+    generator = torch.Generator('cuda').manual_seed(0)
+    x = torch.randn(2, 5, 7, 3, 300, dtype=torch.complex64, device='cuda', generator=generator)
+    run = lambda: EddyCurrent(seed=3).process_tensor(x, sw_hz=4000.0)[0]
+    fused = run()
+    monkeypatch.setattr(module, 'device_kernels', lambda like: None)
+    assert torch.equal(fused, run()) and not torch.equal(fused, x)

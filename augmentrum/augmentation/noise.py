@@ -844,6 +844,13 @@ class Noise(BaseModule):
             return ops.sqrt((data_array + ops.cast_like(real * widened, data_array)) ** 2
                             + ops.cast_like(imag * widened, data_array) ** 2)
 
+        level = ops.shape(widened)
+        kernels = self._kernels(data_array) if coupling is None else None
+        if kernels is not None and len(level) == len(shape) and all(n == 1 for n in level[1:]):
+            # the draws scaled and added in one pass, at one level per sample
+            per_sample = ops.reshape(widened, (-1,)).expand(shape[0]).contiguous()
+            return kernels.scaled_noise(data_array, real, imag, per_sample)
+
         noise = ops.complex_from(real * widened, imag * widened)
         noise = self._correlate(noise, coupling)
         return data_array + ops.cast_like(noise, data_array)

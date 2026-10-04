@@ -1350,6 +1350,45 @@ def white_noise(data, spectrum, real, imag, snr, inv_root_n):
     return out.reshape(data.shape)
 
 
+#: Elements each program of the scaled noise adds to.
+NOISE_POINTS = 1024
+
+
+@triton.jit
+def scaled_noise_kernel(data_ptr, real_ptr, imag_ptr, scale_ptr, out_ptr, M, PER_SAMPLE,
+                        BLOCK: tl.constexpr):
+    """
+    One program per block of elements of the complex64 data (B * PER_SAMPLE): each plus (real +
+    i imag) times its sample's float32 scale, the products rounded before the sums, as
+    "Noise._add" forms them.
+    """
+    i = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    inside = i < M
+    q = tl.arange(0, 2)
+    s = tl.load(scale_ptr + i // PER_SAMPLE, mask=inside, other=0.0)
+    d_re, d_im = tl.split(tl.load(data_ptr + i[:, None] * 2 + q[None, :], mask=inside[:, None],
+                                  other=0.0))
+    n_re = tl.load(real_ptr + i, mask=inside, other=0.0) * s
+    n_im = tl.load(imag_ptr + i, mask=inside, other=0.0) * s
+    tl.store(out_ptr + i[:, None] * 2 + q[None, :], tl.join(d_re + n_re, d_im + n_im),
+             mask=inside[:, None])
+
+
+def scaled_noise(data, real, imag, scale):
+    """
+    "Noise._add" of independent noise at one level per sample, in one pass: complex64 *data*
+    (B, ...) plus *scale* (real + i imag), the draws float32 of its shape, *scale* (B,) float32
+    on the device.
+    """
+    flat = data.contiguous().reshape(-1)
+    out = torch.empty_like(flat)
+    scaled_noise_kernel[(triton.cdiv(flat.numel(), NOISE_POINTS),)](
+        torch.view_as_real(flat), real.contiguous(), imag.contiguous(), scale,
+        torch.view_as_real(out), flat.numel(), flat.numel() // scale.numel(), BLOCK=NOISE_POINTS,
+        enable_fp_fusion=False)
+    return out.reshape(data.shape)
+
+
 #**********************#
 #   artificial peaks   #
 #**********************#
@@ -1810,45 +1849,69 @@ def residual_water(spec, lobes, params):
 #***********#
 #   phase   #
 #***********#
-#: Points each program of the phase kernels turns.
-PHASE_POINTS = 256
+#: Points each program of the phase kernels turns, and at most how many rows of one sample (its
+#: phasors are formed once for all of them).
+PHASE_POINTS, PHASE_ROWS = 256, 64
 
 
 @triton.jit
-def _turned(re, im, angle):
+def _phasor(angle):
+    """e^{i angle} as torch forms it: the float64 phasor (torch.polar) cast to complex64."""
+    return libdevice.cos(angle).to(tl.float32), libdevice.sin(angle).to(tl.float32)
+
+
+@triton.jit
+def _turn_rows(x_ptr, out_ptr, b, first, j, N, PER_SAMPLE, f_re, f_im, c, s, ZERO: tl.constexpr,
+               RAMP: tl.constexpr, ROWS: tl.constexpr):
     """
-    (re + i im) e^{i angle} as torch forms it: the float64 phasor (torch.polar) cast to complex64,
-    then the complex64 product fma(re, c, -im s) + i fma(re, s, im c).
+    Rows first to first + ROWS of sample b of the complex64 *x* (B * PER_SAMPLE, N), at points
+    j: times the complex64 factor f (ZERO), then the complex64 phasors c + i s (RAMP), each the
+    complex64 product fma(re, c, -im s) + i fma(re, s, im c).
     """
-    c = libdevice.cos(angle).to(tl.float32)
-    s = libdevice.sin(angle).to(tl.float32)
-    return tl.fma(re, c, -(im * s)), tl.fma(re, s, im * c)
+    q = tl.arange(0, 2)
+    for i in range(ROWS):
+        row = first + i
+        live = (j < N) & (row < PER_SAMPLE)
+        at = ((b.to(tl.int64) * PER_SAMPLE + row) * N + j)[:, None] * 2 + q[None, :]
+        re, im = tl.split(tl.load(x_ptr + at, mask=live[:, None], other=0.0))
+        if ZERO:
+            re, im = tl.fma(re, f_re, -(im * f_im)), tl.fma(re, f_im, im * f_re)
+        if RAMP:
+            re, im = tl.fma(re, c, -(im * s)), tl.fma(re, s, im * c)
+        tl.store(out_ptr + at, tl.join(re, im), mask=live[:, None])
 
 
 @triton.jit
 def phase_kernel(x_ptr, params_ptr, axis_ptr, consts_ptr, out_ptr, N, B, PER_SAMPLE,
-                 ZERO: tl.constexpr, RAMP: tl.constexpr, BLOCK: tl.constexpr):
+                 ZERO: tl.constexpr, RAMP: tl.constexpr, ROWS: tl.constexpr,
+                 BLOCK: tl.constexpr):
     """
-    One program per row of the complex64 *x* (B * PER_SAMPLE, N) and block of points: the row
-    times its sample's factor f cast to complex64 (ZERO), then times e^{i (p axis_j) c} (RAMP),
-    p, f and the angle in float64; consts: c.
+    One program per ROWS rows of one sample of the complex64 *x* (B * PER_SAMPLE, N) and block
+    of points: each row times its sample's factor f cast to complex64 (ZERO), then times
+    e^{i (p axis_j) c} (RAMP), formed once for all the rows; p, f and the angle in float64;
+    consts: c.
     """
-    r = tl.program_id(0)
-    b = r // PER_SAMPLE
+    blocks = tl.cdiv(PER_SAMPLE, ROWS)
+    b = tl.program_id(0) // blocks
     j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    inside = j < N
-    q = tl.arange(0, 2)
-    at = (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :]
-    re, im = tl.split(tl.load(x_ptr + at, mask=inside[:, None], other=0.0))
+    f_re, f_im, c, s = 0.0, 0.0, 0.0, 0.0
     if ZERO:
         f_re = tl.load(params_ptr + B + b).to(tl.float32)
         f_im = tl.load(params_ptr + 2 * B + b).to(tl.float32)
-        re, im = tl.fma(re, f_re, -(im * f_im)), tl.fma(re, f_im, im * f_re)
     if RAMP:
         p = tl.load(params_ptr + b)
-        angle = (p * tl.load(axis_ptr + j, mask=inside, other=0.0)) * tl.load(consts_ptr)
-        re, im = _turned(re, im, angle)
-    tl.store(out_ptr + at, tl.join(re, im), mask=inside[:, None])
+        c, s = _phasor((p * tl.load(axis_ptr + j, mask=j < N, other=0.0)) * tl.load(consts_ptr))
+    _turn_rows(x_ptr, out_ptr, b, (tl.program_id(0) % blocks) * ROWS, j, N, PER_SAMPLE, f_re,
+               f_im, c, s, ZERO, RAMP, ROWS)
+
+
+def _phase_launch(x):
+    """A phase kernel's flat view of *x* (B, ..., N), its output, grid and rows per program."""
+    n, b = x.shape[-1], x.shape[0]
+    flat = x.contiguous().reshape(-1, n)
+    rows = min(PHASE_ROWS, triton.next_power_of_2(flat.shape[0] // b))
+    grid = (b * triton.cdiv(flat.shape[0] // b, rows), triton.cdiv(n, PHASE_POINTS))
+    return flat, torch.empty_like(flat), grid, rows
 
 
 def phase(x, params, axis, consts, zero, ramp):
@@ -1857,31 +1920,28 @@ def phase(x, params, axis, consts, zero, ramp):
     factor f (with *zero*), then times e^{i (p axis_j) c} (with *ramp*). *params* (1 or 3, B)
     float64: p, and f's real and imaginary parts; *axis* (N,) and *consts* (c,) float64.
     """
-    n, b = x.shape[-1], x.shape[0]
-    flat = x.contiguous().reshape(-1, n)
-    out = torch.empty_like(flat)
-    phase_kernel[(flat.shape[0], triton.cdiv(n, PHASE_POINTS))](
-        torch.view_as_real(flat), params, axis, consts, torch.view_as_real(out), n, b,
-        flat.shape[0] // b, ZERO=bool(zero), RAMP=bool(ramp), BLOCK=PHASE_POINTS,
-        enable_fp_fusion=False)
+    flat, out, grid, rows = _phase_launch(x)
+    phase_kernel[grid](
+        torch.view_as_real(flat), params, axis, consts, torch.view_as_real(out), x.shape[-1],
+        x.shape[0], flat.shape[0] // x.shape[0], ZERO=bool(zero), RAMP=bool(ramp), ROWS=rows,
+        BLOCK=PHASE_POINTS, enable_fp_fusion=False)
     return out.reshape(x.shape)
 
 
 @triton.jit
-def eddy_current_kernel(x_ptr, angle_ptr, out_ptr, N, PER_SAMPLE, BLOCK: tl.constexpr):
+def eddy_current_kernel(x_ptr, angle_ptr, out_ptr, N, PER_SAMPLE, ROWS: tl.constexpr,
+                        BLOCK: tl.constexpr):
     """
-    One program per row of the complex64 *x* (B * PER_SAMPLE, N) and block of points: the row
-    times e^{i angle} of its sample's angles (B, N) float64.
+    One program per ROWS rows of one sample of the complex64 *x* (B * PER_SAMPLE, N) and block
+    of points: each row times e^{i angle} of its sample's angles (B, N) float64, formed once for
+    all the rows.
     """
-    r = tl.program_id(0)
+    blocks = tl.cdiv(PER_SAMPLE, ROWS)
+    b = tl.program_id(0) // blocks
     j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    inside = j < N
-    q = tl.arange(0, 2)
-    at = (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :]
-    re, im = tl.split(tl.load(x_ptr + at, mask=inside[:, None], other=0.0))
-    angle = tl.load(angle_ptr + (r // PER_SAMPLE).to(tl.int64) * N + j, mask=inside, other=0.0)
-    re, im = _turned(re, im, angle)
-    tl.store(out_ptr + at, tl.join(re, im), mask=inside[:, None])
+    c, s = _phasor(tl.load(angle_ptr + b.to(tl.int64) * N + j, mask=j < N, other=0.0))
+    _turn_rows(x_ptr, out_ptr, b, (tl.program_id(0) % blocks) * ROWS, j, N, PER_SAMPLE, 0.0, 0.0,
+               c, s, False, True, ROWS)
 
 
 def eddy_current(x, angle):
@@ -1889,12 +1949,10 @@ def eddy_current(x, angle):
     "EddyCurrent.process_tensor" on complex64 *x* (B, ..., N): each row times e^{i angle} of its
     sample's angles *angle* (B, N) float64.
     """
-    n, b = x.shape[-1], x.shape[0]
-    flat = x.contiguous().reshape(-1, n)
-    out = torch.empty_like(flat)
-    eddy_current_kernel[(flat.shape[0], triton.cdiv(n, PHASE_POINTS))](
-        torch.view_as_real(flat), angle, torch.view_as_real(out), n, flat.shape[0] // b,
-        BLOCK=PHASE_POINTS, enable_fp_fusion=False)
+    flat, out, grid, rows = _phase_launch(x)
+    eddy_current_kernel[grid](
+        torch.view_as_real(flat), angle, torch.view_as_real(out), x.shape[-1],
+        flat.shape[0] // x.shape[0], ROWS=rows, BLOCK=PHASE_POINTS, enable_fp_fusion=False)
     return out.reshape(x.shape)
 
 

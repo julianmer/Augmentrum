@@ -363,5 +363,25 @@ class TestFirstOrderPivot:
         assert drawn.shape == (8,) and len(np.unique(drawn)) == 8
 
 
+#**************************#
+#   the cuda kernel path   #
+#**************************#
+def test_the_kernel_path_is_the_torch_path_on_cuda(monkeypatch):
+    """Per-sample phase and frequency shifts in the Triton kernels give the torch path's bits."""
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    import augmentrum.augmentation.phase_frequency as module
+    generator = torch.Generator('cuda').manual_seed(0)
+    x = torch.randn(2, 5, 7, 3, 300, dtype=torch.complex64, device='cuda', generator=generator)
+    run = lambda: (PhaseShift(np.array([30.0, -50.0]), np.array([200.0, -90.0])
+                              ).process_tensor(x, sw_hz=4000.0)[0],
+                   FrequencyShift(np.array([7.5, -3.0])).process_tensor(x, sw_hz=4000.0)[0])
+    fused = run()
+    monkeypatch.setattr(module, 'device_kernels', lambda like: None)
+    for kernel, steps in zip(fused, run()):
+        assert torch.equal(kernel, steps) and not torch.equal(kernel, x)
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

@@ -121,9 +121,9 @@ class ZeroFill(BaseModule):
         """Apply zero-fill natively in whatever backend format the data is in.
 
         Cropping (target_pts < N_PTS) is a slice — free.
-        Padding (target_pts > N_PTS) creates a zeros tensor in the native
-        backend and concatenates along the last axis — no numpy round-trip,
-        gradients preserved.
+        Padding (target_pts > N_PTS) pads in the native backend — torch in one
+        pad, the others by concatenating zeros along the last axis — no numpy
+        round-trip, gradients preserved.
         """
         n_in  = data_array.shape[-1]
         n_out = self.target_pts
@@ -142,8 +142,7 @@ class ZeroFill(BaseModule):
 
         if is_torch(data_array):
             import torch
-            zeros = torch.zeros(pad_shape, dtype=data_array.dtype, device=data_array.device)
-            return torch.cat([data_array, zeros], dim=-1), water_array
+            return torch.nn.functional.pad(data_array, (0, pad_n)), water_array
 
         if is_jax(data_array):
             import jax.numpy as jnp
