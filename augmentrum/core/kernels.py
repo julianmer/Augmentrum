@@ -680,7 +680,7 @@ def align_search(rows, q0, energy, norm, sw_hz, moving):
         float(np.float32(sw_hz / 4 / sw_hz)), float(np.float32(0.5 / sw_hz)),
         float(np.float32(1.0 / n)), 6.283185307179586, -6.283185307179586, 6.283185307179586,
         -6.283185307179586 ** 2, float(probes[1]), float(probes[2]), float(probes[3]),
-        BLOCK=SHIFT_POINTS, enable_fp_fusion=False)
+        BLOCK=SHIFT_POINTS, enable_fp_fusion=False, num_warps=2)
     return phi, nu
 
 
@@ -728,7 +728,7 @@ def median(parts, mask):
     out = torch.empty(flat.shape[0], dtype=parts.dtype, device=parts.device)
     median_kernel[(triton.cdiv(flat.shape[0], MEDIAN_ROWS),)](
         flat, mask.contiguous(), out, flat.shape[0], flat.shape[0] // b, d,
-        D_PAD=triton.next_power_of_2(d), BLOCK_R=MEDIAN_ROWS)
+        D_PAD=triton.next_power_of_2(d), BLOCK_R=MEDIAN_ROWS, num_warps=8)
     return out.reshape(parts.shape[:-1])
 
 
@@ -897,5 +897,5 @@ def mixed_noise(data, real, imag, scale, root, axis, index=None):
         torch.view_as_real(data.contiguous()), index if index is not None else scale,
         real.contiguous(), imag.contiguous(), scale, torch.view_as_real(root),
         torch.view_as_real(out), m, c, k, C_PAD=max(16, triton.next_power_of_2(c)),
-        K_PAD=max(16, triton.next_power_of_2(k)), ROWS=index is not None, num_warps=8)
+        K_PAD=max(16, triton.next_power_of_2(k)), ROWS=index is not None, num_warps=4)
     return out
