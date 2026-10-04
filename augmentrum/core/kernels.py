@@ -848,13 +848,15 @@ def spectrum_peak(x, axis):
 
 
 @triton.jit
-def mixed_noise_kernel(data_ptr, index_ptr, real_ptr, imag_ptr, scale_ptr, root_ptr, out_ptr, M,
-                       C, K, C_PAD: tl.constexpr, K_PAD: tl.constexpr, ROWS: tl.constexpr):
+def mixed_noise_kernel(data_ptr, index_ptr, scale_ptr, root_ptr, out_ptr, seed, M, C, K,
+                       C_PAD: tl.constexpr, K_PAD: tl.constexpr, ROWS: tl.constexpr):
     """
     One program per (point m, sample b): out[b, m] = data[b, m] + root[b] s_b (real + i
-    imag)[b, m], each (C, K) with the coils as rows - the white draws at the sample's level,
-    coupled by a root of its channels' covariance, on the data; with ROWS, sample b's data is
-    row index[b] of the data.
+    imag)[b, m], each (C, K) with the coils as rows - white draws at the sample's level, coupled
+    by a root of its channels' covariance, on the data; with ROWS, sample b's data is row
+    index[b] of the data. The real and imaginary draws of element e (its place in the output)
+    are one Box-Muller pair of Philox's words for *seed* at e, in libdevice's functions: the same
+    wherever and however the kernel runs.
     """
     m = tl.program_id(0)
     b = tl.program_id(1)
@@ -868,8 +870,11 @@ def mixed_noise_kernel(data_ptr, index_ptr, real_ptr, imag_ptr, scale_ptr, root_
     s = tl.load(scale_ptr + b)
     offset = ((b.to(tl.int64) * M + m) * C + i[:, None]) * K + k[None, :]
     inside = (i[:, None] < C) & (k[None, :] < K)
-    n_re = tl.load(real_ptr + offset, mask=inside, other=0.0) * s
-    n_im = tl.load(imag_ptr + offset, mask=inside, other=0.0) * s
+    w1, w2, _, _ = tl.randint4x(seed, offset.to(tl.uint32))
+    radius = tl.sqrt_rn(-2.0 * libdevice.log(tl.maximum(1.0e-7, tl.uint_to_uniform_float(w1))))
+    angle = 6.283185307179586 * tl.uint_to_uniform_float(w2)
+    n_re = tl.where(inside, radius * libdevice.cos(angle), 0.0) * s
+    n_im = tl.where(inside, radius * libdevice.sin(angle), 0.0) * s
     re = (tl.dot(r_re, n_re, input_precision='ieee')
           - tl.dot(r_im, n_im, input_precision='ieee'))
     im = (tl.dot(r_re, n_im, input_precision='ieee')
@@ -883,23 +888,23 @@ def mixed_noise_kernel(data_ptr, index_ptr, real_ptr, imag_ptr, scale_ptr, root_
              mask=inside[:, :, None])
 
 
-def mixed_noise(data, real, imag, scale, root, axis, index=None):
+def mixed_noise(data, seed, scale, root, axis, index=None):
     """
     "Noise._add" with its channels coupled, in one pass: complex64 *data* (B, ...) with its coils
-    at *axis*, the white draws *real* and *imag* (float32, its shape), the level *scale* (one per
-    sample, or one for all) and the root *root* (B, C, C) or (C, C). Returns data + root
+    at *axis*, white draws for *seed* (an integer below 2^63) at the level *scale* (one per
+    sample, or one for all), mixed by the root *root* (B, C, C) or (C, C). Returns data + root
     (scale (real + i imag)) along the coil axis. With *index* (B,), *data* is a pool (S, ...)
     and sample b its row index[b], read where it lies.
     """
-    shape = real.shape
+    shape = (len(index),) + tuple(data.shape[1:]) if index is not None else tuple(data.shape)
     b, c = shape[0], shape[axis]
     m, k = math.prod(shape[1:axis]), math.prod(shape[axis + 1:])
     root = root.to(data.dtype).expand(b, c, c).contiguous()
     scale = scale.to(torch.float32).reshape(-1).expand(b).contiguous()
     out = torch.empty(shape, dtype=data.dtype, device=data.device)
     mixed_noise_kernel[(m, b)](
-        torch.view_as_real(data.contiguous()), index if index is not None else scale,
-        real.contiguous(), imag.contiguous(), scale, torch.view_as_real(root),
-        torch.view_as_real(out), m, c, k, C_PAD=max(16, triton.next_power_of_2(c)),
-        K_PAD=max(16, triton.next_power_of_2(k)), ROWS=index is not None, num_warps=4)
+        torch.view_as_real(data.contiguous()), index if index is not None else scale, scale,
+        torch.view_as_real(root), torch.view_as_real(out), int(seed), m, c, k,
+        C_PAD=max(16, triton.next_power_of_2(c)), K_PAD=max(16, triton.next_power_of_2(k)),
+        ROWS=index is not None, num_warps=4)
     return out

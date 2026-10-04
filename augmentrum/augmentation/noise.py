@@ -816,10 +816,21 @@ class Noise(BaseModule):
             The data with its noise.
         """
         shape = ops.shape(data_array)
+        coupling = (self._coupling(shape, dim_tags, data_array, rows)
+                    if ops.is_complex(data_array) else None)
+        kernels = self._kernels(data_array) if coupling is not None else None
+        if kernels is not None and int(np.prod(ops.shape(scale))) in (1, shape[0]):
+            # the draws made, scaled, coupled and added in one pass over the data, or over the
+            # rows where they lie: Philox's for one seed of the stream, the same on any device
+            seed = int(self.rng.numpy_rng().integers(2 ** 63))
+            if rows is not None:
+                return kernels.mixed_noise(rows.tensor, seed, scale, *coupling,
+                                           index=rows.indices)
+            return kernels.mixed_noise(data_array, seed, scale, *coupling)
+
         real = self.rng.normal(shape, like=data_array, dtype=prec.real_name(data_array))
         imag = self.rng.normal(shape, like=data_array, dtype=prec.real_name(data_array))
         widened = ops.cast_like(scale, real)
-
         if not ops.is_complex(data_array):
             # Real data is a magnitude, and the magnitude of a complex signal in
             # complex Gaussian noise is Rice-distributed - non-central chi once
@@ -828,15 +839,6 @@ class Noise(BaseModule):
             return ops.sqrt((data_array + ops.cast_like(real * widened, data_array)) ** 2
                             + ops.cast_like(imag * widened, data_array) ** 2)
 
-        coupling = self._coupling(shape, dim_tags, data_array, rows)
-        kernels = self._kernels(data_array) if coupling is not None else None
-        if kernels is not None and widened.numel() in (1, shape[0]):
-            # the draws scaled, coupled and added in one pass over the data, or over the rows
-            # where they lie
-            if rows is not None:
-                return kernels.mixed_noise(rows.tensor, real, imag, widened, *coupling,
-                                           index=rows.indices)
-            return kernels.mixed_noise(data_array, real, imag, widened, *coupling)
         noise = ops.complex_from(real * widened, imag * widened)
         noise = self._correlate(noise, coupling)
         return data_array + ops.cast_like(noise, data_array)
@@ -895,7 +897,7 @@ class Noise(BaseModule):
 
         Independent draws are mixed by a square root of psi - its Cholesky factor
         where psi is one matrix, the standard way to turn white noise into noise
-        with a given covariance; any root of each sample's own where the
+        with a given covariance; the principal root of each sample's own where the
         covariance is measured per sample ("FromData"). Data without a coil axis
         has nothing to correlate.
 
@@ -919,8 +921,7 @@ class Noise(BaseModule):
 
         n_coils = int(shape[axis])
         if isinstance(self.covariance, FromData):
-            # of pooled rows every scan's, decomposed once for the whole pool (in one batch, as
-            # the samples' are, so that each gets the root its batch gives it)
+            # of pooled rows every scan's, taken once for the whole pool
             root = (self._pooled(rows, ('root', axis, self.covariance.fraction),
                                  lambda t: self._root(t, axis))
                     if rows is not None else self._root(data, axis))
@@ -931,11 +932,15 @@ class Noise(BaseModule):
         return ops.cast_like(root, data), axis
 
     def _root(self, data, axis):
-        """A root of every sample's measured psi, A A^H = psi: its eigenvectors times
-        sqrt(eigenvalues), (B, C, C)."""
+        """
+        The principal root of every sample's measured psi, (B, C, C): A = V sqrt(L) V^H, the one
+        Hermitian A with A A^H = psi. Unlike V sqrt(L) alone it does not depend on the phases
+        the decomposition gives its eigenvectors, which differ from library to library.
+        """
         values, vectors = ops.eigh(self.covariance.matrices(data, axis))
         values = ops.where(values > 0, values, values * 0)
-        return vectors * ops.cast_like(ops.sqrt(values), vectors)[:, None, :]
+        scaled = vectors * ops.cast_like(ops.sqrt(values), vectors)[:, None, :]
+        return ops.matmul(scaled, ops.conj(ops.transpose(vectors, (0, 2, 1))))
 
     def _correlate(self, noise, coupling):
         """

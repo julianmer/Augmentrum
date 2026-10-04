@@ -145,19 +145,28 @@ def test_one_covariance_mixes_by_its_cholesky_factor():
     assert np.allclose(np.asarray(mixed), white @ factor.T.astype(np.complex64), atol=1e-5)
 
 
-def test_coupled_noise_in_one_pass_is_the_steps(monkeypatch):
-    """On CUDA the draws are scaled, coupled and added by one kernel: the noise of the steps."""
+def test_coupled_noise_in_one_pass_has_the_steps_statistics(monkeypatch):
+    """
+    On CUDA the draws are made, scaled, coupled and added by one kernel: the same draws for the
+    same seed, and the noise of the steps in distribution - each sample's coupling and level.
+    """
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
-    data = np.concatenate([_coupled(0.8), _coupled(0.3, seed=1)]).astype(np.complex64)
+    data = np.concatenate([_coupled(0.8), _coupled(0.0, seed=1)]).astype(np.complex64)
     data = torch.as_tensor(data, device='cuda')
-    fused, _ = Noise(covariance='data', snr=[5.0, 20.0], seed=0).process_tensor(
-        data, dim_tags=COILS)
+    added = lambda seed: Noise(covariance='data', snr=[5.0, 20.0], seed=seed).process_tensor(
+        data, dim_tags=COILS)[0] - data
+    fused = added(0)
+    assert torch.equal(fused, added(0)) and not torch.equal(fused, added(1))
     monkeypatch.setattr(Noise, '_kernels', staticmethod(lambda *args: None))
-    steps, _ = Noise(covariance='data', snr=[5.0, 20.0], seed=0).process_tensor(
-        data, dim_tags=COILS)
-    assert ((fused - steps).abs().max() / (steps - data).abs().max()).item() < 1e-5
+    steps = added(0)
+    for noise in (fused, steps):
+        noise = noise.reshape(2, -1, 3).cpu().numpy()
+        assert abs(np.corrcoef(noise[0].T.real)[0, 1] - 0.8) < 0.1
+        assert abs(np.corrcoef(noise[1].T.real)[0, 1]) < 0.1
+    sd = lambda noise: noise.reshape(2, -1).real.std(dim=1)
+    torch.testing.assert_close(sd(fused), sd(steps), rtol=0.05, atol=0)
 
 
 def test_a_covariance_must_match_the_array():
