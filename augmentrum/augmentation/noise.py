@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 
 from augmentrum.core.base_module import BaseModule
 from augmentrum.core import precision as prec
-from augmentrum.processing.utils import device_kernels, to_backend
+from augmentrum.processing.utils import device_kernels, device_values, to_backend
 from nifti_mrs_plus import Backend, ops
 
 
@@ -578,6 +578,11 @@ class Noise(BaseModule):
                 and state.sampling == 'undersampled'):
             return self._via_kspace(data_array, sigma, snr, state, dim_tags), water_array
 
+        kernels = self._kernels(data_array) if self._per_trace(data_array, snr, state) else None
+        if kernels is not None:
+            # each trace's peak, its level, and the draws scaled and added, in one pass
+            return self._white(kernels, data_array, snr, state), water_array
+
         scale = self._shaped(self._scale(data_array, sigma, snr, state, rows=rows),
                              ops.shape(data_array), state)
         return self._add(data_array, scale, dim_tags, rows), water_array
@@ -842,6 +847,29 @@ class Noise(BaseModule):
         noise = ops.complex_from(real * widened, imag * widened)
         noise = self._correlate(noise, coupling)
         return data_array + ops.cast_like(noise, data_array)
+
+    def _per_trace(self, data, snr, state):
+        """Whether "_white" adds the noise: an SNR, independent and flat, its reference each
+        trace's own along the last axis, outside k-space."""
+        shape = ops.shape(data)
+        return (snr is not None and isinstance(self.covariance, Independent)
+                and isinstance(self.profile, Flat) and 1 < len(shape) <= self.SPECTRAL_AXIS + 1
+                and not self._global(shape, len(shape) - 1)
+                and (state is None or state.spatial != 'kspace'))
+
+    def _white(self, kernels, data_array, snr, state):
+        """
+        "_scale" and "_add" where "_per_trace" holds, in one launch after the transform "_peak"
+        takes and the draws "_add" makes: "augmentrum.core.kernels.white_noise".
+        """
+        shape = ops.shape(data_array)
+        in_frequency = state is not None and state.spectral == 'frequency'
+        spectrum = data_array if in_frequency else ops.fft(data_array)
+        real = self.rng.normal(shape, like=data_array, dtype=prec.real_name(data_array))
+        imag = self.rng.normal(shape, like=data_array, dtype=prec.real_name(data_array))
+        inv_root_n = 1.0 if in_frequency else np.float32(1.0) / np.float32(np.sqrt(shape[-1]))
+        snr = device_values(np.broadcast_to(snr, shape[:1]).copy(), data_array)
+        return kernels.white_noise(data_array, spectrum, real, imag, snr, float(inv_root_n))
 
     @staticmethod
     def _kernels(data):

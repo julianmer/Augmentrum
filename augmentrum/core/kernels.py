@@ -77,6 +77,15 @@ def _hypot(re, im):
     return tl.where(small == 0.0, v, tl.where(small == float('inf'), small, r))
 
 
+@triton.jit
+def _cmul(a_re, a_im, b_re, b_im):
+    """
+    The complex product a b as torch rounds it: fma(a_re, b_re, -a_im b_im) + i fma(a_re, b_im,
+    a_im b_re), the minus a product by -1.0 (Triton's -x is 0 - x, which drops a zero's sign).
+    """
+    return tl.fma(a_re, b_re, a_im * b_im * -1.0), tl.fma(a_re, b_im, a_im * b_re)
+
+
 #******************#
 #   wsvd weights   #
 #******************#
@@ -1296,6 +1305,51 @@ def mixed_noise(data, seed, scale, root, axis, index=None):
     return out
 
 
+@triton.jit
+def white_noise_kernel(data_ptr, spectrum_ptr, real_ptr, imag_ptr, snr_ptr, out_ptr, N,
+                       PER_SAMPLE, inv_root_n, BLOCK: tl.constexpr):
+    """
+    One program per row of the complex64 data (B * PER_SAMPLE, N): the row plus (real + i imag)
+    times its level - the largest |.| of its spectrum's row times inv_root_n (1 where that is not
+    positive) over its sample's SNR, rounded to float32 - as "Noise._scale" and "Noise._add"
+    round it.
+    """
+    r = tl.program_id(0)
+    j = tl.arange(0, BLOCK)
+    inside = j < N
+    q = tl.arange(0, 2)
+    at = r.to(tl.int64) * N + j
+    s_re, s_im = tl.split(tl.load(spectrum_ptr + at[:, None] * 2 + q[None, :],
+                                  mask=inside[:, None], other=0.0))
+    peak = tl.max(tl.where(inside, _hypot(s_re, s_im), 0.0), axis=0) * inv_root_n
+    peak = tl.where(peak > 0, peak, 1.0)
+    scale = libdevice.div_rn(peak, tl.load(snr_ptr + r // PER_SAMPLE).to(tl.float32))
+    d_re, d_im = tl.split(tl.load(data_ptr + at[:, None] * 2 + q[None, :], mask=inside[:, None],
+                                  other=0.0))
+    n_re = tl.load(real_ptr + at, mask=inside, other=0.0) * scale
+    n_im = tl.load(imag_ptr + at, mask=inside, other=0.0) * scale
+    tl.store(out_ptr + at[:, None] * 2 + q[None, :], tl.join(d_re + n_re, d_im + n_im),
+             mask=inside[:, None])
+
+
+def white_noise(data, spectrum, real, imag, snr, inv_root_n):
+    """
+    "Noise._add" of independent noise at a peak SNR per trace, in one pass: complex64 *data*
+    (B, ..., N) plus scale (real + i imag), the draws float32 of its shape, scale each trace's
+    largest |spectrum| (complex64, data's shape) times *inv_root_n* (a float32 value), over its
+    sample's *snr* (B,) float64 on the device.
+    """
+    n = data.shape[-1]
+    flat = data.contiguous().reshape(-1, n)
+    out = torch.empty_like(flat)
+    white_noise_kernel[(flat.shape[0],)](
+        torch.view_as_real(flat), torch.view_as_real(spectrum.contiguous().reshape(-1, n)),
+        real.contiguous(), imag.contiguous(), snr, torch.view_as_real(out), n,
+        flat.shape[0] // len(snr), inv_root_n, BLOCK=triton.next_power_of_2(n),
+        enable_fp_fusion=False, num_warps=8)
+    return out.reshape(data.shape)
+
+
 #**********************#
 #   artificial peaks   #
 #**********************#
@@ -1598,15 +1652,6 @@ ECHO_PARAMS = ('delay_s', 'shift', 't_echo', 'T2', 'gaussian', 'omega', 'phase',
 
 
 @triton.jit
-def _cmul(a_re, a_im, b_re, b_im):
-    """
-    The complex product a b as torch rounds it, fma(a_re, b_re, -a_im b_im) + i fma(a_re, b_im,
-    a_im b_re); a real factor x is x + 0i.
-    """
-    return tl.fma(a_re, b_re, -(a_im * b_im)), tl.fma(a_re, b_im, a_im * b_re)
-
-
-@triton.jit
 def _localized(t, at, B):
     """The localized envelope at times *t* of the echo whose parameters start at *at*."""
     d = t - tl.load(at + 2 * B)
@@ -1904,3 +1949,60 @@ def add_baseline(spec, unit, params, divide, rotate):
         ROTATE=bool(rotate), BLOCK=triton.next_power_of_2(n), enable_fp_fusion=False,
         num_warps=8)
     return out.reshape(spec.shape)
+
+
+#*********************#
+#   line broadening   #
+#*********************#
+#: Points each program of the line broadening multiplies.
+BROADENING_POINTS = 1024
+
+
+@triton.jit
+def broadening_kernel(data_ptr, params_ptr, out_ptr, N, PER_SAMPLE, STRIDE, inv_sw, cap,
+                      inv_four_ln2, BROADEN: tl.constexpr, KERNEL: tl.constexpr,
+                      BLOCK: tl.constexpr):
+    """
+    One program per row of the complex64 FIDs (B * PER_SAMPLE, N) and block of points: with
+    BROADEN, the row times its sample's envelope in float32 as "LineBroadening" forms it,
+    exp(a t) exp(r min(t, cap)) exp(-(c t)^2 / (4 ln 2)) with t = j / sw, for the coefficients
+    a, r, c of the sample's row of *params* (B, STRIDE); with KERNEL, then times the
+    characteristic function the rest of that row holds (complex64).
+    """
+    r = tl.program_id(0)
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    inside = j < N
+    q = tl.arange(0, 2)
+    at = params_ptr + (r // PER_SAMPLE) * STRIDE
+    re, im = tl.split(tl.load(data_ptr + (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :],
+                              mask=inside[:, None], other=0.0))
+    if BROADEN:
+        t = j.to(tl.float32) * inv_sw
+        g = tl.load(at + 2) * t
+        envelope = (libdevice.exp(tl.load(at) * t)
+                    * libdevice.exp(tl.load(at + 1) * tl.minimum(t, cap))
+                    * libdevice.exp(-(g * g) * inv_four_ln2))
+        re, im = _cmul(re, im, envelope, 0.0)
+    if KERNEL:
+        k_re, k_im = tl.split(tl.load(at + 3 + j[:, None] * 2 + q[None, :], mask=inside[:, None],
+                                      other=0.0))
+        re, im = _cmul(re, im, k_re, k_im)
+    tl.store(out_ptr + (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :], tl.join(re, im),
+             mask=inside[:, None])
+
+
+def line_broadening(fid, params, inv_sw, cap, inv_four_ln2, broaden):
+    """
+    "LineBroadening.process_tensor" on complex64 FIDs *fid* (B, ..., N): *params* (B, 3) float32
+    on the device, each sample's coefficients a, r, c of "broadening_kernel", followed by its
+    kernel's characteristic function (N complex values) where it has one; *broaden* applies the
+    envelope; *inv_sw*, *cap* and *inv_four_ln2* float32 values.
+    """
+    n, (b, stride) = fid.shape[-1], params.shape
+    flat = fid.contiguous().reshape(-1, n)
+    out = torch.empty_like(flat)
+    broadening_kernel[(flat.shape[0], triton.cdiv(n, BROADENING_POINTS))](
+        torch.view_as_real(flat), params, torch.view_as_real(out), n, flat.shape[0] // b, stride,
+        inv_sw, cap, inv_four_ln2, BROADEN=bool(broaden), KERNEL=stride > 3,
+        BLOCK=BROADENING_POINTS, enable_fp_fusion=False)
+    return out.reshape(fid.shape)

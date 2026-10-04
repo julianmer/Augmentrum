@@ -23,7 +23,7 @@ from typing import Optional, List
 from augmentrum.core.base_module import BaseModule
 from augmentrum.core import precision as prec
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import to_backend
+from augmentrum.processing.utils import device_kernels, to_backend
 from nifti_mrs_plus import Backend, ops
 
 
@@ -255,6 +255,12 @@ class LineBroadening(BaseModule):
             raise ValueError("LineBroadening.process_tensor requires 'sw_hz' in kwargs")
 
         self._check_widths(self.lb_hz, self.gb_hz)
+        kernels = device_kernels(data_array) if len(data_array.shape) > 1 else None
+        if kernels is not None:
+            # the envelope, the kernel's characteristic function and both products in one launch
+            inputs = self._kernel_inputs(data_array, sw_hz)
+            return (kernels.line_broadening(data_array, *inputs) if inputs is not None
+                    else data_array), water_array
         cap = self.narrow_cap_s
         if self.mode == 'lorentzian':
             result = self._apply_lorentzian(data_array, sw_hz, self.lb_hz, cap)
@@ -348,15 +354,20 @@ class LineBroadening(BaseModule):
             if self._nifti_draw is None or self._nifti_draw[0] != batch:
                 self._nifti_draw = (batch, self._draw_kernels(batch))
             offsets, fwhm, w = (a[index:index + 1] for a in self._nifti_draw[1])
-        t = np.arange(n_pts) / float(sw_hz)
-        env = np.einsum('bk,bkt->bt', w, np.exp(
-            2j * np.pi * offsets[:, :, None] * t
-            - ((np.pi * fwhm[:, :, None] * t) ** 2) / (4 * np.log(2))))
+        env = self._characteristic(offsets, fwhm, w, n_pts, sw_hz)
         if index is not None or ndim == 1:
             env = env.reshape((1,) * (ndim - 1) + (n_pts,))
         else:
             env = env.reshape((env.shape[0],) + (1,) * (ndim - 2) + (n_pts,))
         return ops.cast_like(to_backend(env, fid), fid)
+
+    @staticmethod
+    def _characteristic(offsets, fwhm, w, n_pts, sw_hz):
+        """The kernels' characteristic functions K(t) on *n_pts* points, (batch, n_pts) complex."""
+        t = np.arange(n_pts) / float(sw_hz)
+        return np.einsum('bk,bkt->bt', w, np.exp(
+            2j * np.pi * offsets[:, :, None] * t
+            - ((np.pi * fwhm[:, :, None] * t) ** 2) / (4 * np.log(2))))
 
     #**********************#
     #   envelope helpers   #
@@ -409,6 +420,45 @@ class LineBroadening(BaseModule):
             gauss = ops.exp(-((math.pi * gb * t) ** 2) / (4 * math.log(2)))
             env = gauss if env is None else env * gauss
         return env
+
+    def _kernel_inputs(self, fid, sw_hz):
+        """
+        The inputs of "augmentrum.core.kernels.line_broadening" after *fid*, or None where the
+        module leaves the FIDs as they are: per sample the coefficients "_make_time_envelope"
+        multiplies t by and the kernel's characteristic function, each rounded to float32 as torch
+        rounds it, in one (B, 3 [+ 2 N]) upload; t's step, the cap and 1 / (4 ln 2) likewise.
+        """
+        lb_hz = 0.0 if self.mode == 'gaussian' else self.lb_hz
+        gb_hz = 0.0 if self.mode == 'lorentzian' else self.gb_hz
+        lb_all = np.asarray(lb_hz, dtype=np.float64)
+        broaden = bool(np.any(lb_all != 0) or np.any(np.asarray(gb_hz) > 0))
+        if not broaden and self.kernel is None:
+            return None
+        batch, n_pts = int(fid.shape[0]), int(fid.shape[-1])
+        narrowing = np.any(lb_all < 0)
+        params = np.zeros((batch, 3 if self.kernel is None else 3 + 2 * n_pts), np.float32)
+        if np.any(lb_all > 0):
+            params[:, 0] = self._coefficient(-math.pi, np.maximum(lb_all, 0.0) if narrowing
+                                             else lb_hz, batch)
+        if narrowing:
+            params[:, 1] = self._coefficient(-math.pi, np.minimum(lb_all, 0.0), batch)
+        if np.any(np.asarray(gb_hz) > 0):
+            params[:, 2] = self._coefficient(math.pi, gb_hz, batch)
+        if self.kernel is not None:
+            params[:, 3:] = self._characteristic(*self._draw_kernels(batch), n_pts,
+                                                 sw_hz).astype(np.complex64).view(np.float32)
+        cap = np.inf if self.narrow_cap_s is None else np.float32(self.narrow_cap_s)
+        return (to_backend(params, fid, 'float32'), float(np.float32(1.0) / np.float32(sw_hz)),
+                float(cap), float(np.float32(1.0) / np.float32(4 * math.log(2))), broaden)
+
+    @staticmethod
+    def _coefficient(scale, value, batch):
+        """*scale* times a width as "_make_time_envelope" forms it: in float32 for a per-sample
+        vector, the float64 product rounded to float32 for a scalar ("_width")."""
+        arr = np.asarray(value, dtype=np.float64)
+        if arr.ndim == 0:
+            return np.full(batch, np.float32(scale * float(arr)))
+        return np.broadcast_to(np.float32(scale) * arr.astype(np.float32), (batch,))
 
     @staticmethod
     def _apply_lorentzian(fid, sw_hz, lb_hz, narrow_cap_s=None):
