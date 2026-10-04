@@ -1136,7 +1136,7 @@ def unlike_mask(fids, mask, sdlimit=1.96, niter=2):
         Boolean keep mask, (B, D): valid and alike.
     """
     b, d, n = fids.shape
-    parts = torch.view_as_real(fids).permute(0, 2, 3, 1).contiguous()    # (B, T, 2, D)
+    parts = torch.view_as_real(fids).permute(0, 2, 3, 1)                 # (B, T, 2, D)
     kernels = triton_kernels() if fids.is_cuda and fids.dtype == torch.complex64 else None
     if kernels is not None:
         # each step's distances and statistics in two launches
@@ -1153,6 +1153,7 @@ def unlike_mask(fids, mask, sdlimit=1.96, niter=2):
     count = weights.sum(dim=-1, keepdim=True)
 
     keep = mask
+    parts = parts.contiguous()
     target = _real_median(parts, mask)
     for step in range(niter):
         target[:, 0] *= 0.5                                         # its spectrum's first point
