@@ -698,22 +698,20 @@ BEYOND = tl.constexpr(3.0e38)
 
 
 @triton.jit
-def median_kernel(parts_ptr, mask_ptr, out_ptr, R, T, D, SB, ST, SP, SD,
+def median_kernel(parts_ptr, mask_ptr, out_ptr, R, ROWS_PER_SAMPLE, D,
                   D_PAD: tl.constexpr, BLOCK_R: tl.constexpr):
     """
-    One program per block of rows (b, t, part): each row's median over the entries its sample
-    keeps, the mean of the two middle values for an even count, the others sorted behind every
-    kept one (as BEYOND, never picked: the middle positions count the kept entries only). Entry
-    (b, t, part, d) at b SB + t ST + part SP + d SD.
+    One program per block of rows: each row's median over the entries its sample keeps, the mean
+    of the two middle values for an even count, the others sorted behind every kept one (as
+    BEYOND, never picked: the middle positions count the kept entries only).
     """
     r = tl.program_id(0) * BLOCK_R + tl.arange(0, BLOCK_R)
     d = tl.arange(0, D_PAD)
-    sample = r // (2 * T)
+    sample = r // ROWS_PER_SAMPLE
     rows = r < R
     keep = tl.load(mask_ptr + sample[:, None] * D + d[None, :],
                    mask=rows[:, None] & (d[None, :] < D), other=0) != 0
-    at = sample.to(tl.int64) * SB + ((r // 2) % T) * ST + (r % 2) * SP
-    values = tl.load(parts_ptr + at[:, None] + d[None, :] * SD,
+    values = tl.load(parts_ptr + r[:, None].to(tl.int64) * D + d[None, :],
                      mask=rows[:, None] & keep, other=BEYOND)
     ordered = tl.sort(tl.where(keep, values, BEYOND), dim=1)
     count = tl.sum(keep.to(tl.int32), axis=1)
@@ -724,15 +722,16 @@ def median_kernel(parts_ptr, mask_ptr, out_ptr, R, T, D, SB, ST, SP, SD,
 
 def median(parts, mask):
     """
-    "torch_engine._real_median": *parts* (B, T, 2, D) float32, read where they lie, *mask*
-    (B, D) bool, at least one kept entry per sample. Returns (B, T, 2).
+    "torch_engine._real_median": *parts* (B, ..., D) float32, *mask* (B, D) bool, at least one
+    kept entry per sample. Returns (B, ...).
     """
-    b, t, _, d = parts.shape
-    out = torch.empty((b, t, 2), dtype=parts.dtype, device=parts.device)
-    median_kernel[(triton.cdiv(out.numel(), MEDIAN_ROWS),)](
-        parts, mask.contiguous(), out, out.numel(), t, d, *parts.stride(),
+    b, d = mask.shape
+    flat = parts.contiguous().reshape(-1, d)
+    out = torch.empty(flat.shape[0], dtype=parts.dtype, device=parts.device)
+    median_kernel[(triton.cdiv(flat.shape[0], MEDIAN_ROWS),)](
+        flat, mask.contiguous(), out, flat.shape[0], flat.shape[0] // b, d,
         D_PAD=triton.next_power_of_2(d), BLOCK_R=MEDIAN_ROWS, num_warps=8)
-    return out
+    return out.reshape(parts.shape[:-1])
 
 
 #*************#
