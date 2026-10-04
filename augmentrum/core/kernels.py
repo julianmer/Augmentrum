@@ -908,3 +908,124 @@ def mixed_noise(data, seed, scale, root, axis, index=None):
         C_PAD=max(16, triton.next_power_of_2(c)), K_PAD=max(16, triton.next_power_of_2(k)),
         ROWS=index is not None, num_warps=4)
     return out
+
+
+#**********************#
+#   artificial peaks   #
+#**********************#
+#: Points each program of the peak FIDs fills.
+PEAK_FID_POINTS = 1024
+
+#: Rows of the peak parameters, each (P, B) - one value per peak and sample.
+PEAK_PARAMS = ('winding_re', 'winding_im', 'lorentz_ppm', 'gauss_ppm', 'amp', 'phase_re',
+               'phase_im', 'keep')
+
+
+@triton.jit
+def peak_fids_kernel(params_ptr, consts_ptr, out_ptr, N, B, BLOCK: tl.constexpr):
+    """
+    One program per (peak p, sample b) row and block of points: "causal_lineshapes"' FID of the
+    row in float64, rounded as its torch operations round - e^{w t} for its winding w (no real
+    part), damped where its Lorentzian and Gaussian widths are positive. consts: pi, 1 / |step|,
+    1 / N and 1 / (4 ln 2), the reciprocals torch multiplies by where it divides by a number.
+    """
+    row = tl.program_id(0)
+    j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    t = j.to(tl.float64)
+    at = params_ptr + (row // B) * 8 * B + row % B
+    w_re = tl.load(at)
+    w_im = tl.load(at + B)
+    lorentz = tl.load(at + 2 * B)
+    gauss = tl.load(at + 3 * B)
+    pi = tl.load(consts_ptr)
+    inv_step = tl.load(consts_ptr + 1)
+    inv_n = tl.load(consts_ptr + 2)
+    inv_four_ln2 = tl.load(consts_ptr + 3)
+    # w t as a complex product (its real part a signed zero), and exp of an imaginary argument
+    angle = tl.fma(w_re, 0.0, w_im * t)
+    re = libdevice.cos(angle)
+    im = libdevice.sin(angle)
+    if lorentz > 0:
+        e = libdevice.exp(((-pi) * (lorentz * inv_step)) * t * inv_n)
+        re, im = tl.fma(re, e, -(im * 0.0)), tl.fma(re, 0.0, im * e)
+    if gauss > 0:
+        g = (pi * (gauss * inv_step)) * t * inv_n
+        e = libdevice.exp(-(g * g) * inv_four_ln2)
+        re, im = tl.fma(re, e, -(im * 0.0)), tl.fma(re, 0.0, im * e)
+    q = tl.arange(0, 2)
+    tl.store(out_ptr + (row.to(tl.int64) * N + j[:, None]) * 2 + q[None, :],
+             tl.join(re, im), mask=(j < N)[:, None])
+
+
+@triton.jit
+def add_peaks_kernel(spec_ptr, spectra_ptr, params_ptr, out_ptr, N, B, P, PER_SAMPLE,
+                     REAL: tl.constexpr, BLOCK: tl.constexpr):
+    """
+    One program per row of the complex64 spectra *spec* (B * PER_SAMPLE, N): the row plus its
+    sample's peaks - each peak's spectrum (the FIDs' ifft, fftshifted here by indexing) over its
+    real maximum, times amp and the phase where the sample keeps the peak, summed over the peaks
+    in complex128, cast to complex64 and scaled by the row's own peak (|.|, or |real| with REAL).
+    Every product and quotient rounds as torch's: complex products fma(a_re, b_re, -a_im b_im) +
+    i fma(a_re, b_im, a_im b_re), a quotient by a real number its reciprocal times.
+    """
+    r = tl.program_id(0)
+    b = r // PER_SAMPLE
+    j = tl.arange(0, BLOCK)
+    inside = j < N
+    q = tl.arange(0, 2)
+    s = tl.load(spec_ptr + (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :],
+                mask=inside[:, None], other=0.0)
+    s_re, s_im = tl.split(s)
+    level = tl.abs(s_re) if REAL else libdevice.hypot(s_re, s_im)
+    ref = tl.max(tl.where(inside, level, 0.0), axis=0)
+    ref = tl.where(ref > 0, ref, 1.0)
+
+    c_re = tl.zeros([BLOCK], dtype=tl.float64)
+    c_im = tl.zeros([BLOCK], dtype=tl.float64)
+    shifted = (j + N - N // 2) % N
+    for p in range(P):
+        at = params_ptr + p * 8 * B + b
+        amp = tl.load(at + 4 * B)
+        ph_re = tl.load(at + 5 * B)
+        ph_im = tl.load(at + 6 * B)
+        keep = tl.load(at + 7 * B) > 0
+        row = spectra_ptr + (p * B + b).to(tl.int64) * N * 2
+        top = tl.max(tl.load(row + j * 2, mask=inside, other=-float('inf')), axis=0)
+        scale = 1.0 / top
+        x = tl.load(row + shifted[:, None] * 2 + q[None, :], mask=inside[:, None], other=0.0)
+        x_re, x_im = tl.split(x)
+        x_re = x_re * scale
+        x_im = x_im * scale
+        a_re = tl.fma(amp, x_re, -(0.0 * x_im))
+        a_im = tl.fma(amp, x_im, 0.0 * x_re)
+        t_re = tl.fma(a_re, ph_re, -(a_im * ph_im))
+        t_im = tl.fma(a_re, ph_im, a_im * ph_re)
+        c_re = tl.where(keep, c_re + t_re, c_re)
+        c_im = tl.where(keep, c_im + t_im, c_im)
+    c_re = c_re.to(tl.float32)
+    c_im = c_im.to(tl.float32)
+    o_re = s_re + tl.fma(c_re, ref, -(c_im * 0.0))
+    o_im = s_im + tl.fma(c_re, 0.0, c_im * ref)
+    tl.store(out_ptr + (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :],
+             tl.join(o_re, o_im), mask=inside[:, None])
+
+
+def artificial_peaks(spec, params, consts, real):
+    """
+    "ArtificialPeaks.process_tensor" on complex64 spectra *spec* (B, ..., N): *params* (P, 8, B)
+    float64 on the device, one row per name in PEAK_PARAMS (keep 1.0 or 0.0), *consts* float64:
+    pi, 1 / |ppm step|, 1 / N, 1 / (4 ln 2); *real* takes each row's peak from |real|.
+    """
+    n, (p, _, b) = spec.shape[-1], params.shape
+    fids = torch.empty((p * b, n), dtype=torch.complex128, device=spec.device)
+    peak_fids_kernel[(p * b, triton.cdiv(n, PEAK_FID_POINTS))](
+        params, consts, torch.view_as_real(fids), n, b, BLOCK=PEAK_FID_POINTS,
+        enable_fp_fusion=False)
+    spectra = torch.fft.ifft(fids, dim=-1)
+    flat = spec.contiguous().reshape(-1, n)
+    out = torch.empty_like(flat)
+    add_peaks_kernel[(flat.shape[0],)](
+        torch.view_as_real(flat), torch.view_as_real(spectra), params, torch.view_as_real(out),
+        n, b, p, flat.shape[0] // b, REAL=bool(real), BLOCK=triton.next_power_of_2(n),
+        enable_fp_fusion=False, num_warps=8)
+    return out.reshape(spec.shape)

@@ -666,14 +666,8 @@ def causal_lineshapes(ppm, center_ppm, lorentz_ppm=0.0, gauss_ppm=0.0, like=None
     lorentz = np.broadcast_to(np.asarray(lorentz_ppm, dtype=np.float64), (batch,))[:, None]
     gauss = np.broadcast_to(np.asarray(gauss_ppm, dtype=np.float64), (batch,))[:, None]
 
-    step = float(np.median(np.diff(ppm)))
+    winding, step = lineshape_windings(ppm, centers)
     t = np.arange(n, dtype=np.float64)
-
-    # The winding factor goes through Python complex arithmetic as in the scalar
-    # version (which divides where NumPy's complex division would multiply by
-    # the reciprocal), so every row starts from the same complex number.
-    winding = np.array([2j * np.pi * (n // 2 - (n // 2 + (float(c) - ppm[n // 2]) / step)) / n
-                        for c in centers])
     if like is not None and on_cuda(like):
         return _causal_lineshapes_device(winding, lorentz, gauss, step, n, like)
     fid = np.exp(winding[:, None] * t)
@@ -686,6 +680,23 @@ def causal_lineshapes(ppm, center_ppm, lorentz_ppm=0.0, gauss_ppm=0.0, like=None
 
     spectrum = np.fft.fftshift(np.fft.ifft(fid, axis=-1), axes=-1)
     return spectrum / np.max(np.real(spectrum), axis=-1, keepdims=True)
+
+
+def lineshape_windings(ppm, center_ppm):
+    """
+    "(winding, step)" of "causal_lineshapes": row b's FID turns as exp(winding[b] t), and step is
+    the axis' median step in ppm.
+
+    The winding factor goes through Python complex arithmetic as in the scalar version (which
+    divides where NumPy's complex division would multiply by the reciprocal), so every row
+    starts from the same complex number.
+    """
+    ppm = np.asarray(ppm, dtype=np.float64)
+    n = ppm.size
+    step = float(np.median(np.diff(ppm)))
+    winding = np.array([2j * np.pi * (n // 2 - (n // 2 + (float(c) - ppm[n // 2]) / step)) / n
+                        for c in np.asarray(center_ppm, dtype=np.float64).reshape(-1)])
+    return winding, step
 
 
 #***********************#
@@ -742,6 +753,15 @@ def on_cuda(like):
     float64 rounding, far below the precision the profile is applied in.
     """
     return ops.is_torch(like) and like.device.type == 'cuda'
+
+
+def device_kernels(like):
+    """The Triton kernels ("augmentrum.core.kernels") where they take *like* - complex64 on CUDA -
+    else None."""
+    if not on_cuda(like) or str(like.dtype) != 'torch.complex64':
+        return None
+    from augmentrum.processing.torch_engine import triton_kernels
+    return triton_kernels()
 
 
 def device_values(values, like):

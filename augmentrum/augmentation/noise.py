@@ -22,7 +22,7 @@ from abc import ABC, abstractmethod
 
 from augmentrum.core.base_module import BaseModule
 from augmentrum.core import precision as prec
-from augmentrum.processing.utils import to_backend
+from augmentrum.processing.utils import device_kernels, to_backend
 from nifti_mrs_plus import Backend, ops
 
 
@@ -846,10 +846,7 @@ class Noise(BaseModule):
     @staticmethod
     def _kernels(data):
         """The Triton kernels where they take *data* - complex64 on CUDA - else None."""
-        if not ops.is_torch(data) or not data.is_cuda or str(data.dtype) != 'torch.complex64':
-            return None
-        from augmentrum.processing.torch_engine import triton_kernels
-        return triton_kernels()
+        return device_kernels(data)
 
     def _via_kspace(self, data_array, sigma, snr, state, dim_tags):
         """

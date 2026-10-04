@@ -19,7 +19,8 @@ from typing import Optional, List, Dict
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
 from augmentrum.processing.utils import (ppm_axis, ppm_reference, batch_profile,
-                                         causal_lineshape, causal_lineshapes, device_values,
+                                         causal_lineshape, causal_lineshapes, device_axis,
+                                         device_kernels, device_values, lineshape_windings,
                                          on_cuda, to_backend)
 from nifti_mrs_plus import Backend, NIfTI_MRS_Plus
 from nifti_mrs_plus import ops
@@ -211,6 +212,27 @@ class ArtificialPeaks(BaseModule):
                        where=keep[:, None])
         return contam
 
+    def _kernel_inputs(self, batch: int, ppm: np.ndarray, table: List[Dict], sf_mhz: float,
+                       like):
+        """
+        The peaks' parameters for "augmentrum.core.kernels.artificial_peaks", (P, 8, B) float64
+        on *like*'s device in one upload, and its constants (kept on the device): each value as
+        "_profiles" forms it on the host.
+        """
+        winding, step = lineshape_windings(ppm, np.concatenate([d['ppm'][:batch] for d in table]))
+        params = np.empty((len(table), 8, batch))
+        for p, drawn in enumerate(table):
+            lb_hz, gb_hz = drawn['lb_hz'][:batch], drawn['gb_hz'][:batch]
+            phase = np.exp(1j * np.deg2rad(drawn['phase_deg'][:batch]))
+            params[p] = (winding[p * batch:(p + 1) * batch].real,
+                         winding[p * batch:(p + 1) * batch].imag, lb_hz / sf_mhz, gb_hz / sf_mhz,
+                         drawn['amp'][:batch], phase.real, phase.imag, (lb_hz > 0) | (gb_hz > 0))
+        n = ppm.size
+        consts = device_axis(('artificial peaks', n, step),
+                             lambda: [np.pi, 1.0 / abs(step), 1.0 / n,
+                                      1.0 / (4.0 * np.log(2.0))], like)
+        return device_values(params, like), consts
+
     def _axis(self, n_points: int, sw_hz: float, sf_mhz: float, nucleus) -> np.ndarray:
         """The ppm axis, on the nucleus' reference unless "ref_ppm" overrides it."""
         ppm = ppm_axis(n_points, sw_hz, sf_mhz, nucleus)
@@ -297,6 +319,13 @@ class ArtificialPeaks(BaseModule):
         # 1. ppm axis and one contamination profile per sample (NumPy)
         ppm = self._axis(n_points, float(sw_hz), float(sf_mhz), nucleus)
         table = self._draw(batch)
+        kernels = device_kernels(spec) if ndim > 1 else None
+        if kernels is not None:
+            # the same arithmetic in three launches: every peak's FID, their transforms, and
+            # their spectra normalised, weighted, summed and added
+            params, consts = self._kernel_inputs(batch, ppm, table, float(sf_mhz), spec)
+            return kernels.artificial_peaks(spec, params, consts, self.amp_mode != 'abs'), \
+                water_array
         if on_cuda(spec) and ndim > 1:
             profiles = self._profiles(batch, ppm, table, float(sf_mhz), like=spec)
             unit_contam = profiles.reshape((batch,) + (1,) * (ndim - 2) + (n_points,))
