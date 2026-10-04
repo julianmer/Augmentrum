@@ -1424,12 +1424,14 @@ def train(cfg):
         t_data, t_model, n_int = clock.drain()
         train_loss = (step_graph.mean_loss() if step_graph is not None
                       else float(torch.stack(running).mean()))
-        if not math.isfinite(train_loss):
-            raise FloatingPointError(f'training loss is {train_loss} at step {step}')
         val_loss = validate(net, model, x_val)
         fit_loss = validate(net, model, x_fit)
         metrics = test.evaluate(net, device)
         sel = selection.evaluate(net, device)['mosae']
+        if not all(map(math.isfinite, (train_loss, val_loss, fit_loss, metrics['mosae'], sel))):
+            raise FloatingPointError(f'non-finite at step {step}: training loss {train_loss}, '
+                                     f'validation {val_loss}, fit {fit_loss}, test MOSAE '
+                                     f'{metrics["mosae"]}, selection MOSAE {sel}')
         if sel < state['best_sel']:
             state['best_sel'], state['sel_step'] = sel, step
             atomic_save(net.state_dict(), paths['selected'])
@@ -2547,6 +2549,7 @@ B_SUBJECTS = tuple(range(1, 9))     # stage B: every training-set size (user, 20
 SMOKE_STEPS, STEPS_A, EVAL_A = 200, 300_000, 5000
 STEPS_B, EVAL_B, CKPT_B = 1_000_000, 1000, 250_000
 MAX_PARALLEL = 16                   # runs per GPU at most (here the GPU and CPUs are shared)
+NONFINITE_EXIT = 3                  # a run's exit code on a non-finite loss: the queue stops
 MIN_FREE_MB = 6000                  # launch only while this much GPU memory is free ...
 MIN_FREE_RAM_GB = 8                 # ... and this much RAM (sampling runs hold raw scans)
 PY = sys.executable
@@ -2829,7 +2832,8 @@ def run_queue(jobs, label, stagger=30, steps=None, gpus=None, per_gpu=None):
     one (runs allocate memory while they set up); finished runs (result.json; with *steps*,
     trained that many steps) are skipped. Jobs already running (an earlier driver's) are adopted:
     waited for, counted against the slots, their result.json read as the exit (0 if present,
-    else 1). Returns {run id: exit code}.
+    else 1). A run that ends on a non-finite loss (NONFINITE_EXIT) stops the queue: no further run
+    starts, the running ones finish. Returns {run id: exit code}.
     """
     gpus = gpus or visible_gpus()
     per_gpu = per_gpu or min(MAX_PARALLEL, max(1, os.cpu_count() // len(gpus)))
@@ -2840,18 +2844,22 @@ def run_queue(jobs, label, stagger=30, steps=None, gpus=None, per_gpu=None):
     todo = [j for j in todo if j[0] not in adopted]
     driver_log(f'{label}: {len(jobs)} jobs, {len(jobs) - len(todo) - len(adopted)} already finished, '
         f'{len(adopted)} already running; GPUs {gpus}, {per_gpu} runs each')
-    running, codes, last = {}, {}, 0.0
+    running, codes, last, halted = {}, {}, 0.0, False
     env = dict(os.environ, WANDB_MODE='offline', OMP_NUM_THREADS='1', MKL_NUM_THREADS='1',
                CUDA_DEVICE_ORDER='PCI_BUS_ID')                  # nvidia-smi's numbering
     status = lambda: (f'({len(codes)}/{len(jobs)} done, {len(running) + len(adopted)} running, '
                       f'{len(todo)} queued)')
-    while todo or running or adopted:
+    while (todo and not halted) or running or adopted:
         for rid, (proc, fh, gpu) in list(running.items()):
             if proc.poll() is not None:
                 fh.close()
                 codes[rid] = proc.returncode
                 del running[rid]
                 driver_log(f'{label}: {rid} exit {proc.returncode} {status()}')
+                if proc.returncode == NONFINITE_EXIT and not halted:
+                    halted = True
+                    driver_log(f'{label}: STOPPED - {rid} ended on a non-finite loss (its log: '
+                               f'{rid}.log); no further run starts, the running ones finish')
         if adopted:
             live = live_cmds()
             for rid, j in list(adopted.items()):
@@ -2859,7 +2867,7 @@ def run_queue(jobs, label, stagger=30, steps=None, gpus=None, per_gpu=None):
                     del adopted[rid]
                     codes[rid] = 0 if done(j) else 1
                     driver_log(f'{label}: {rid} exit {codes[rid]} (adopted) {status()}')
-        if (todo and len(running) + len(adopted) < len(gpus) * per_gpu
+        if (todo and not halted and len(running) + len(adopted) < len(gpus) * per_gpu
                 and time.time() - last > stagger and free_ram_gb() > MIN_FREE_RAM_GB):
             load = {g: sum(r[2] == g for r in running.values()) for g in gpus}
             free = [g for g in sorted(gpus, key=load.get)
@@ -3082,10 +3090,14 @@ def grid(args):
         raise SystemExit(f'smoke failed: {bad}; see {out_s}/logs')
     # --extend: a larger --steps later continues the finished runs from last.pt
     keep = ('--keep-last', '--checkpoint-every', str(CKPT_B), '--extend')
-    run_queue([(screen_run_id(sp['name'], n, fold, seed),
-                job_cmd(sp, n, OUT_GRID, steps, EVAL_B, keep, fold, seed), OUT_GRID)
-               for sp, n, fold, seed in runs],
-              f'grid {steps:,}', steps=steps, gpus=gpus, per_gpu=args.per_gpu)
+    codes = run_queue([(screen_run_id(sp['name'], n, fold, seed),
+                        job_cmd(sp, n, OUT_GRID, steps, EVAL_B, keep, fold, seed), OUT_GRID)
+                       for sp, n, fold, seed in runs],
+                      f'grid {steps:,}', steps=steps, gpus=gpus, per_gpu=args.per_gpu)
+    unstable = [rid for rid, code in codes.items() if code == NONFINITE_EXIT]
+    if unstable:
+        raise SystemExit(f'grid STOPPED on non-finite losses in {unstable}: see '
+                         f'{OUT_GRID}/logs before running it again')
     left = [r for r in runs
             if not finished(result_path(OUT_GRID, r[0]['name'], *r[1:]), steps)]
     driver_log(f'grid done: {len(runs) - len(left)}/{len(runs)} runs at {steps:,} steps'
@@ -3297,7 +3309,11 @@ def main(argv=None):
                 cfg['augment'] = json.load(f)             # kept in the run's config
         elif not cfg['condition']:
             ap.error('train needs --condition or --augment')
-        result = train(cfg)
+        try:
+            result = train(cfg)
+        except FloatingPointError as error:
+            print(f'[non-finite] {error}', flush=True)
+            sys.exit(NONFINITE_EXIT)
         sel = result['test'].get('selected', {})
         print(f"done {result['run_id']}: test MOSAE final {result['test']['final']['mosae']:.3f}"
               + (f", selected {sel['mosae']:.3f} @ {result['selected_step']}" if sel else '')
