@@ -118,6 +118,16 @@ class GriddingNUFFT:
                 f"it, so it cannot run the adjoint. Use a GriddingKernel."
             )
 
+        kernels = self._kernels(kdata)
+        if kernels is not None:
+            plan = self._device_plan(np.asarray(coords), kdata)
+            if 'cells' not in plan:
+                plan['cells'] = kernels.spread_cells(plan['bins'], plan['weights'], self.grid_size)
+            grid = kernels.spread_grid(kdata, plan['cells'], self.grid_size, self._sign)
+            return kernels.cropped_image(ops.ifftn(grid, tuple(range(1, self.ndim + 1)),
+                                                   norm="forward"),
+                                         self._device_deapod(kdata), self.im_size)
+
         grid = self.interpolator.spread(kdata, np.asarray(coords))
         return self._deapodize(self._centered(grid, inverse=True))
 
@@ -138,6 +148,13 @@ class GriddingNUFFT:
         Returns:
             Samples "[C, K]" on image's backend.
         """
+        kernels = self._kernels(image)
+        if kernels is not None:
+            plan = self._device_plan(np.asarray(coords), image)
+            grid = ops.fftn(kernels.padded_grid(image, self._device_deapod(image), self.grid_size),
+                            tuple(range(1, self.ndim + 1)), norm="backward")
+            return kernels.grid_samples(grid, plan['bins'], plan['weights'], self._sign)
+
         grid = self._centered(self._deapodize(image), inverse=False)
         return self.interpolator.sample(grid, self._for_interpolator(coords))
 
@@ -163,7 +180,7 @@ class GriddingNUFFT:
             return self._crop(out) if inverse else out
         if getattr(self, '_boards', None) is None:
             board = (1 - 2 * (np.indices(self.grid_size).sum(axis=0) % 2)).astype(np.float64)
-            sign = -1.0 if sum(n // 2 for n in self.grid_size) % 2 else 1.0
+            sign = self._sign
             starts = [(g - n) // 2 for n, g in zip(self.im_size, self.grid_size)]
             inner = board[tuple(slice(a, a + n) for a, n in zip(starts, self.im_size))]
             # (image-side board, grid-side board), each with its sign placed once
@@ -173,6 +190,51 @@ class GriddingNUFFT:
         if inverse:
             return self._crop(transform(x * grid_board, axes, norm="ortho")) * image_board
         return transform(self._pad(x * image_board), axes, norm="ortho") * grid_board
+
+    @property
+    def _sign(self) -> float:
+        """The grid-side board's sign on an even grid: prod((-1)^(n/2))."""
+        return -1.0 if sum(n // 2 for n in self.grid_size) % 2 else 1.0
+
+    #*****************#
+    #   device path   #
+    #*****************#
+    def _kernels(self, like):
+        """
+        The Triton kernels where they take *like* (complex64 on CUDA, no gradient) and this
+        NUFFT (Kaiser-Bessel on an even grid, where the shifts are a sign pattern); else None.
+        """
+        if (not isinstance(self.interpolator, KaiserBesselInterpolator)
+                or any(n % 2 for n in self.grid_size)):
+            return None
+        from augmentrum.processing.utils import device_kernels
+        return device_kernels(like)
+
+    def _device_deapod(self, like):
+        """The deapodization in float32 on *like*'s device, uploaded once per geometry."""
+        from augmentrum.processing.utils import device_axis
+        kernel = self.interpolator
+        key = ('gridding deapodization', self.im_size, kernel.grid_size, kernel.osf, kernel.width)
+        return device_axis(key, lambda: self._deapod, like).float()
+
+    def _device_plan(self, coords: np.ndarray, like) -> dict:
+        """
+        The kernels' view of *coords* on *like*'s device: per axis the bins "[K, T]" (int32)
+        and float64 weights, a 2-D grid with a z axis of one bin of weight 1; and, once built,
+        the spread's CSR over the cells. The last one is kept: forward and adjoint of one
+        acquisition share the coordinates.
+        """
+        key = (coords.shape, hash(coords.tobytes()), str(like.device))
+        if getattr(self, '_plan', None) is None or self._plan[0] != key:
+            from augmentrum.processing.torch_engine import upload
+            idx, weight = self.interpolator.axis_neighbors(coords)
+            if self.ndim == 2:
+                idx = idx + [np.zeros((len(coords), 1), np.int64)]
+                weight = weight + [np.ones((len(coords), 1))]
+            self._plan = (key, {'bins': [upload(i.astype(np.int32), like.device) for i in idx],
+                                'weights': [upload(w.astype(np.float64), like.device)
+                                            for w in weight]})
+        return self._plan[1]
 
     def _for_interpolator(self, coords: np.ndarray) -> np.ndarray:
         """

@@ -2006,3 +2006,269 @@ def line_broadening(fid, params, inv_sw, cap, inv_four_ln2, broaden):
         inv_sw, cap, inv_four_ln2, BROADEN=bool(broaden), KERNEL=stride > 3,
         BLOCK=BROADENING_POINTS, enable_fp_fusion=False)
     return out.reshape(fid.shape)
+
+
+#**************#
+#   gridding   #
+#**************#
+#: Grid cells each program of the pad and crop kernels writes.
+GRID_CELLS = 512
+#: Channels and grid cells of each program of the channels-last transpose.
+LAST_CHANNELS, LAST_CELLS = 32, 32
+#: Samples and channels of each program of the gather.
+GATHER_SAMPLES, GATHER_CHANNELS = 16, 64
+#: Grid cells, channels and samples per float32 run of each program of the spread.
+SPREAD_CELLS, SPREAD_CHANNELS, SPREAD_RUN = 128, 32, 16
+
+
+@triton.jit
+def _board(x, y, z):
+    """(-1)^(x + y + z): the shifts of a centred FFT on an even grid, as a sign per cell."""
+    return 1.0 - 2.0 * ((x + y + z) % 2).to(tl.float32)
+
+
+@triton.jit
+def _deapodized(re, im, d):
+    """(re + i im) / d for a real d, as torch divides complex numbers (Smith's ratio is 0)."""
+    scale = libdevice.div_rn(1.0, d)
+    return (re + im * 0.0) * scale, (im - re * 0.0) * scale
+
+
+@triton.jit
+def pad_kernel(image_ptr, deapod_ptr, out_ptr, SC, SX, SY, SZ, nx, ny, nz, NX, NY, NZ, bx, by,
+               bz, BLOCK: tl.constexpr):
+    """
+    One program per block of cells of the oversampled grid (C, NX, NY, NZ) and channel: the cells
+    of the image box starting at (bx, by, bz) hold the complex64 image (C, nx, ny, nz) (strides
+    SC, SX, SY, SZ in complex elements) divided by the float32 deapodization (nx, ny, nz) and
+    times the image-side board, the other cells zero.
+    """
+    c = tl.program_id(1).to(tl.int64)
+    cell = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    q = tl.arange(0, 2)
+    x, y, z = cell // (NY * NZ), cell // NZ % NY, cell % NZ
+    i, j, k = x - bx, y - by, z - bz
+    inside = (i >= 0) & (i < nx) & (j >= 0) & (j < ny) & (k >= 0) & (k < nz)
+    at = c * SC + i * SX + j * SY + k * SZ
+    re, im = tl.split(tl.load(image_ptr + at[:, None] * 2 + q[None, :], mask=inside[:, None],
+                              other=0.0))
+    re, im = _deapodized(re, im, tl.load(deapod_ptr + (i * ny + j) * nz + k, mask=inside,
+                                         other=1.0))
+    re, im = _cmul(re, im, _board(x, y, z), 0.0)
+    re, im = tl.where(inside, re, 0.0), tl.where(inside, im, 0.0)
+    tl.store(out_ptr + (c * NX * NY * NZ + cell)[:, None] * 2 + q[None, :], tl.join(re, im),
+             mask=(cell < NX * NY * NZ)[:, None])
+
+
+@triton.jit
+def channels_last_kernel(grid_ptr, out_ptr, C, CELLS, NY, NZ, scale, sign, BC: tl.constexpr,
+                         BCELL: tl.constexpr):
+    """
+    One program per block of cells and channels: the unnormalized transform of the grid (C,
+    CELLS) complex64 times the float32 *scale* (what torch's "ortho" multiplies by), then the
+    grid-side board, *sign* (-1)^(x + y + z), transposed to (CELLS, C).
+    """
+    cell = tl.program_id(0).to(tl.int64) * BCELL + tl.arange(0, BCELL)
+    c = tl.program_id(1).to(tl.int64) * BC + tl.arange(0, BC)
+    q = tl.arange(0, 2)
+    live = (c < C)[:, None] & (cell < CELLS)[None, :]
+    re, im = tl.split(tl.load(grid_ptr + (c[:, None] * CELLS + cell[None, :])[:, :, None] * 2
+                              + q[None, None, :], mask=live[:, :, None], other=0.0))
+    s = sign * _board(cell // (NY * NZ), cell // NZ % NY, cell % NZ)
+    re, im = _cmul(re * scale, im * scale, s[None, :], 0.0)
+    tl.store(out_ptr + (cell[:, None] * C + c[None, :])[:, :, None] * 2 + q[None, None, :],
+             tl.join(tl.trans(re), tl.trans(im)),
+             mask=((cell < CELLS)[:, None] & (c < C)[None, :])[:, :, None])
+
+
+@triton.jit
+def gather_kernel(grid_ptr, ix_ptr, iy_ptr, iz_ptr, wx_ptr, wy_ptr, wz_ptr, out_ptr, K, C, NY, NZ,
+                  TX: tl.constexpr, TY: tl.constexpr, TZ: tl.constexpr, BK: tl.constexpr,
+                  BC: tl.constexpr):
+    """
+    One program per block of samples and channels: each sample (K, C) complex64 the sum over the
+    bins of its kernel, accumulated in float64 in tap order, of float32((wx wy) wz) times the bin
+    of the channels-last grid (cells, C): the bins (K, T) int32 and float64 weights of each axis.
+    """
+    k = tl.program_id(0).to(tl.int64) * BK + tl.arange(0, BK)
+    c = tl.program_id(1) * BC + tl.arange(0, BC)
+    q = tl.arange(0, 2)
+    live = (k < K)[:, None] & (c < C)[None, :]
+    acc_re = tl.zeros((BK, BC), tl.float64)
+    acc_im = tl.zeros((BK, BC), tl.float64)
+    for tx in range(TX):
+        ix = tl.load(ix_ptr + k * TX + tx, mask=k < K, other=0).to(tl.int64)
+        wx = tl.load(wx_ptr + k * TX + tx, mask=k < K, other=0.0)
+        for ty in range(TY):
+            iy = tl.load(iy_ptr + k * TY + ty, mask=k < K, other=0)
+            wxy = wx * tl.load(wy_ptr + k * TY + ty, mask=k < K, other=0.0)
+            for tz in range(TZ):
+                iz = tl.load(iz_ptr + k * TZ + tz, mask=k < K, other=0)
+                w = (wxy * tl.load(wz_ptr + k * TZ + tz, mask=k < K, other=0.0)).to(tl.float32)
+                w = w.to(tl.float64)[:, None]
+                cell = (ix * NY + iy) * NZ + iz
+                re, im = tl.split(tl.load(grid_ptr + (cell[:, None] * C + c[None, :])[:, :, None]
+                                          * 2 + q[None, None, :], mask=live[:, :, None],
+                                          other=0.0))
+                acc_re = tl.fma(w, re.to(tl.float64), acc_re)
+                acc_im = tl.fma(w, im.to(tl.float64), acc_im)
+    tl.store(out_ptr + (k[:, None] * C + c[None, :])[:, :, None] * 2 + q[None, None, :],
+             tl.join(acc_re.to(tl.float32), acc_im.to(tl.float32)), mask=live[:, :, None])
+
+
+@triton.jit
+def spread_kernel(data_ptr, crow_ptr, kidx_ptr, weight_ptr, out_ptr, CELLS, C, SC, SK, NY, NZ, sign,
+                  BCELL: tl.constexpr, BC: tl.constexpr, RUN: tl.constexpr):
+    """
+    One program per block of grid cells and channels: each cell of the grid (C, CELLS) complex64
+    the sum, in sample order, of the float32 weight times each sample of the complex64 samples
+    (C, K) (strides SC, SK) its kernel reaches (CSR over the cells: crow, kidx, weight), in float32
+    runs of RUN samples with fma added up in float64 (a cell can gather thousands), times the
+    grid-side board, *sign* (-1)^(x + y + z).
+    """
+    cell = tl.program_id(0).to(tl.int64) * BCELL + tl.arange(0, BCELL)
+    c = tl.program_id(1).to(tl.int64) * BC + tl.arange(0, BC)
+    q = tl.arange(0, 2)
+    start = tl.load(crow_ptr + cell, mask=cell < CELLS, other=0)
+    n = tl.load(crow_ptr + cell + 1, mask=cell < CELLS, other=0) - start
+    acc_re = tl.zeros((BC, BCELL), tl.float64)
+    acc_im = tl.zeros((BC, BCELL), tl.float64)
+    for first in range(0, tl.max(n), RUN):
+        run_re = tl.zeros((BC, BCELL), tl.float32)
+        run_im = tl.zeros((BC, BCELL), tl.float32)
+        for j in range(first, first + RUN):
+            live = j < n
+            k = tl.load(kidx_ptr + start + j, mask=live, other=0).to(tl.int64)
+            w = tl.load(weight_ptr + start + j, mask=live, other=0.0)
+            re, im = tl.split(tl.load(data_ptr + (c[:, None] * SC + k[None, :] * SK)[:, :, None] * 2
+                                      + q[None, None, :], mask=(c < C)[:, None, None], other=0.0))
+            run_re = tl.fma(w[None, :], re, run_re)
+            run_im = tl.fma(w[None, :], im, run_im)
+        acc_re += run_re.to(tl.float64)
+        acc_im += run_im.to(tl.float64)
+    s = sign * _board(cell // (NY * NZ), cell // NZ % NY, cell % NZ)
+    re, im = _cmul(acc_re.to(tl.float32), acc_im.to(tl.float32), s[None, :], 0.0)
+    tl.store(out_ptr + (c[:, None] * CELLS + cell[None, :])[:, :, None] * 2 + q[None, None, :],
+             tl.join(re, im), mask=((c < C)[:, None] & (cell < CELLS)[None, :])[:, :, None])
+
+
+@triton.jit
+def crop_kernel(grid_ptr, deapod_ptr, out_ptr, NX, NY, NZ, nx, ny, nz, bx, by, bz, scale,
+                BLOCK: tl.constexpr):
+    """
+    One program per block of image cells and channel: the image box starting at (bx, by, bz) of
+    the unnormalized transform of the grid (C, NX, NY, NZ) complex64, times the float32 *scale*
+    (what torch's "ortho" multiplies by), then the image-side board, divided by the float32
+    deapodization (nx, ny, nz); image (C, nx, ny, nz).
+    """
+    c = tl.program_id(1).to(tl.int64)
+    p = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    q = tl.arange(0, 2)
+    inside = p < nx * ny * nz
+    x, y, z = p // (ny * nz) + bx, p // nz % ny + by, p % nz + bz
+    re, im = tl.split(tl.load(grid_ptr + (c * NX * NY * NZ + (x * NY + y) * NZ + z)[:, None] * 2
+                              + q[None, :], mask=inside[:, None], other=0.0))
+    re, im = _cmul(re * scale, im * scale, _board(x, y, z), 0.0)
+    re, im = _deapodized(re, im, tl.load(deapod_ptr + p, mask=inside, other=1.0))
+    tl.store(out_ptr + (c * nx * ny * nz + p)[:, None] * 2 + q[None, :], tl.join(re, im),
+             mask=inside[:, None])
+
+
+def _cube(shape):
+    """A 2-D or 3-D shape as three axes, a 2-D one with a last axis of 1."""
+    return tuple(int(n) for n in shape) + (1,) * (3 - len(shape))
+
+
+def padded_grid(image, deapod, grid_size):
+    """
+    "GriddingNUFFT.forward" up to its transform: the complex64 image (C, *im_size), any strides,
+    divided by the float32 *deapod* (*im_size*) and times the image-side board, centred in the
+    zero grid (C, *grid_size).
+    """
+    im, grid = _cube(image.shape[1:]), _cube(grid_size)
+    view = image.reshape(image.shape[:1] + im) if image.dim() == 3 else image
+    out = torch.empty(image.shape[:1] + tuple(grid_size), dtype=image.dtype, device=image.device)
+    pad_kernel[(triton.cdiv(math.prod(grid), GRID_CELLS), image.shape[0])](
+        torch.view_as_real(view), deapod, torch.view_as_real(out), *view.stride(), *im, *grid,
+        *((g - n) // 2 for n, g in zip(im, grid)), BLOCK=GRID_CELLS, enable_fp_fusion=False)
+    return out
+
+
+def _ortho(shape):
+    """The float32 factor torch's "ortho" FFT over *shape* multiplies the raw transform by."""
+    return float(np.float32(1.0 / math.sqrt(math.prod(shape))))
+
+
+def grid_samples(grid, bins, weights, sign):
+    """
+    "GriddingNUFFT.forward" past its transform: the samples (C, K) complex64 of the unnormalized
+    transform *grid* (C, *grid_size), scaled as "ortho" scales and times the grid-side board
+    (*sign* (-1)^(x + y + z)), each the sum over the bins of its kernel of float32((wx wy) wz)
+    times the bin, in tap order; *bins* and *weights* the (K, T) int32 bins and float64 weights
+    of each of three axes.
+    """
+    n_chan, (_, ny, nz) = grid.shape[0], _cube(grid.shape[1:])
+    cells = grid[0].numel()
+    last = torch.empty((cells, n_chan), dtype=grid.dtype, device=grid.device)
+    channels_last_kernel[(triton.cdiv(cells, LAST_CELLS), triton.cdiv(n_chan, LAST_CHANNELS))](
+        torch.view_as_real(grid.contiguous()), torch.view_as_real(last), n_chan, cells, ny, nz,
+        _ortho(grid.shape[1:]), sign, BC=LAST_CHANNELS, BCELL=LAST_CELLS, enable_fp_fusion=False)
+    k = bins[0].shape[0]
+    out = torch.empty((k, n_chan), dtype=grid.dtype, device=grid.device)
+    gather_kernel[(triton.cdiv(k, GATHER_SAMPLES), triton.cdiv(n_chan, GATHER_CHANNELS))](
+        torch.view_as_real(last), *bins, *weights, torch.view_as_real(out), k, n_chan, ny, nz,
+        TX=bins[0].shape[1], TY=bins[1].shape[1], TZ=bins[2].shape[1], BK=GATHER_SAMPLES,
+        BC=GATHER_CHANNELS, enable_fp_fusion=False)
+    return out.t()
+
+
+def spread_cells(bins, weights, grid_size):
+    """
+    The samples each cell of the grid *grid_size* gathers from, for "spread_grid": a CSR over the
+    cells (rows (cells + 1,) int64, sample (nnz,) int32, float32((wx wy) wz) weight), samples in
+    ascending order within a cell; *bins* and *weights* as "grid_samples" takes them.
+    """
+    (ix, iy, iz), (wx, wy, wz) = bins, weights
+    _, ny, nz = _cube(grid_size)
+    cells = ((ix.long()[:, :, None, None] * ny + iy[:, None, :, None]) * nz
+             + iz[:, None, None, :]).reshape(-1).int()
+    weight = ((wx[:, :, None, None] * wy[:, None, :, None])
+              * wz[:, None, None, :]).reshape(-1).to(torch.float32)
+    order = torch.sort(cells, stable=True).indices
+    rows = torch.zeros(math.prod(grid_size) + 1, dtype=torch.int64, device=cells.device)
+    rows[1:] = torch.cumsum(torch.bincount(cells, minlength=math.prod(grid_size)), 0)
+    taps = ix.shape[1] * iy.shape[1] * iz.shape[1]
+    return rows, torch.div(order, taps, rounding_mode='floor').int(), weight[order]
+
+
+def spread_grid(kdata, cells, grid_size, sign):
+    """
+    "GriddingNUFFT.adjoint" up to its transform: the grid (C, *grid_size) complex64 the samples
+    *kdata* (C, K) complex64, any strides, spread onto, each cell the sum in sample order (float32
+    runs added in float64) of its weight times the samples its kernel reaches (*cells*, from
+    "spread_cells"), times the grid-side board (*sign* (-1)^(x + y + z)).
+    """
+    (_, ny, nz), n_chan = _cube(grid_size), kdata.shape[0]
+    total = math.prod(grid_size)
+    out = torch.empty((n_chan,) + tuple(grid_size), dtype=kdata.dtype, device=kdata.device)
+    spread_kernel[(triton.cdiv(total, SPREAD_CELLS), triton.cdiv(n_chan, SPREAD_CHANNELS))](
+        torch.view_as_real(kdata), *cells, torch.view_as_real(out), total, n_chan,
+        *kdata.stride(), ny, nz, sign, BCELL=SPREAD_CELLS, BC=SPREAD_CHANNELS, RUN=SPREAD_RUN,
+        enable_fp_fusion=False)
+    return out
+
+
+def cropped_image(grid, deapod, im_size):
+    """
+    "GriddingNUFFT.adjoint" past its transform: the centred image box (C, *im_size) of the
+    unnormalized inverse transform *grid* (C, *grid_size) complex64, scaled as "ortho" scales,
+    times the image-side board, divided by the float32 *deapod* (*im_size*).
+    """
+    im, full = _cube(im_size), _cube(grid.shape[1:])
+    out = torch.empty(grid.shape[:1] + tuple(im_size), dtype=grid.dtype, device=grid.device)
+    crop_kernel[(triton.cdiv(math.prod(im), GRID_CELLS), grid.shape[0])](
+        torch.view_as_real(grid.contiguous()), deapod, torch.view_as_real(out), *full, *im,
+        *((g - n) // 2 for n, g in zip(im, full)), _ortho(grid.shape[1:]), BLOCK=GRID_CELLS,
+        enable_fp_fusion=False)
+    return out
+

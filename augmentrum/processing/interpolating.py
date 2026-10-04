@@ -218,8 +218,9 @@ class KaiserBesselInterpolator(GriddingKernel):
 
         r = 2.0 * offsets / self.width
         inside = np.abs(r) <= 1.0
-        arg = self.beta * np.sqrt(np.clip(1.0 - r ** 2, 0.0, None))
-        return np.where(inside, i0(arg) / self.width, 0.0)
+        out = np.zeros(np.shape(r))
+        out[inside] = i0(self.beta * np.sqrt(np.clip(1.0 - r[inside] ** 2, 0.0, None))) / self.width
+        return out
 
     def deapodization(self, im_size: Sequence[int]) -> np.ndarray:
         """
@@ -252,8 +253,11 @@ class KaiserBesselInterpolator(GriddingKernel):
     #**************#
     #   sampling   #
     #**************#
-    def neighbors(self, coords: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """The bins within half a kernel width of each sample, and their weights."""
+    def axis_neighbors(self, coords: np.ndarray) -> Tuple[list, list]:
+        """
+        Per axis, the bins within half a kernel width of each sample ("[K, T]",
+        wrapped onto the grid) and their weights: the factors "neighbors" multiplies out.
+        """
         half = int(math.ceil(self.width / 2.0))
         taps = np.arange(-half, half + 1)
 
@@ -264,6 +268,11 @@ class KaiserBesselInterpolator(GriddingKernel):
             idx = base[:, None] + taps[None, :]                    # [K, T]
             per_axis_w.append(self.kernel(center[:, None] - idx))
             per_axis_idx.append(np.mod(idx, self.grid_size[d]).astype(np.int64))
+        return per_axis_idx, per_axis_w
+
+    def neighbors(self, coords: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """The bins within half a kernel width of each sample, and their weights."""
+        per_axis_idx, per_axis_w = self.axis_neighbors(coords)
 
         # Outer product over axes, flattened to [K, T**ndim]
         flat_idx, flat_w = None, None

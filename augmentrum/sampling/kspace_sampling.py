@@ -3934,8 +3934,7 @@ class KspaceUndersampling(BaseModule):
 
         recon, noise = [], None
         for b in range(n_batch):
-            plane = ops.reshape(ops.take(stack, np.array([b]), axis=0),
-                                (-1,) + im_size)
+            plane = ops.reshape(stack[b], (-1,) + im_size)
             # Measure with the chosen interpolator, always reconstruct with
             # Kaiser-Bessel: the point is to study the forward approximation.
             kdata = nufft.forward(plane, coords)
@@ -4236,7 +4235,8 @@ class KspaceUndersampling(BaseModule):
             parts = []
             for lo in range(0, n_coils, per_pass):
                 hi = min(lo + per_pass, n_coils)
-                part = ops.take(data_array, np.arange(lo, hi), axis=5)
+                part = (data_array if hi - lo == n_coils else
+                        ops.take(data_array, np.arange(lo, hi), axis=5))
                 folded = ops.reshape(ops.transpose(part, (0, 1, 2, 3, 5, 4)),
                                      (n_batch, nx, ny, nz, (hi - lo) * n_t))
                 rng = np.random.default_rng(kwargs['acquisition_seed'])

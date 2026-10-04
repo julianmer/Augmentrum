@@ -261,3 +261,32 @@ class TestForwardPair:
 
         assert image.grad is not None
         assert float(image.grad.abs().sum()) > 0
+
+
+#**************************************************************************************************#
+#                                     Class TestDeviceKernels                                      #
+#**************************************************************************************************#
+#                                                                                                  #
+# The Triton path on CUDA against the torch path it stands in for.                                 #
+#                                                                                                  #
+#**************************************************************************************************#
+@pytest.mark.skipif(not (TORCH_AVAILABLE and torch.cuda.is_available()), reason="needs CUDA")
+class TestDeviceKernels:
+    """The Triton path on CUDA against the torch path it stands in for."""
+
+    @pytest.mark.parametrize('im_size, n_samples', [((24, 20, 16), 3001), ((32, 24), 1200)])
+    def test_matches_the_torch_path_and_repeats(self, im_size, n_samples):
+        coords = np.random.default_rng(1).uniform(-0.5, 0.5, (n_samples, len(im_size)))
+        generator = torch.Generator('cuda').manual_seed(0)
+        image = torch.randn((5,) + im_size, dtype=torch.complex64, device='cuda',
+                            generator=generator)
+        fused, plain = GriddingNUFFT(im_size), GriddingNUFFT(im_size)
+        if fused._kernels(image) is None:
+            pytest.skip("Triton not installed")
+        plain._kernels = lambda like: None
+        kdata = plain.forward(image, coords)
+        for kernel, steps in ((fused.forward(image, coords), kdata),
+                              (fused.adjoint(kdata, coords), plain.adjoint(kdata, coords))):
+            assert float((kernel - steps).abs().max() / steps.abs().max()) < 2e-6
+        trip = lambda: fused.adjoint(fused.forward(image, coords), coords)
+        assert torch.equal(trip(), trip())
