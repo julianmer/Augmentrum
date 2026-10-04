@@ -22,7 +22,8 @@ from scipy.signal import convolve, hilbert
 
 from augmentrum.core.base_module import BaseModule
 from augmentrum.processing.domain import Domain
-from augmentrum.processing.utils import ppm_axis, ppm_reference, to_backend
+from augmentrum.processing.utils import (ppm_axis, ppm_reference, device_kernels,
+                                         device_values, to_backend)
 from nifti_mrs_plus import Backend, ops
 
 
@@ -272,18 +273,26 @@ class BaselineAugmentation(BaseModule):
         batch, n_pts = shape[0], shape[-1]
         flat = ops.reshape(spec, (-1, n_pts))
         traces = ops.shape(flat)[0]
-        magnitude = ops.abs(ops.real(flat))
+        real = ops.real(flat)
 
         if self.mode == 'polynomial':
-            unit = self._analytic(self._polynomial(magnitude, ppm), flat)
+            unit = self._analytic(self._polynomial(real, ppm), flat)
         elif self.mode == 'bspline':
-            unit = self._analytic(self._bspline(magnitude, ppm), flat)
+            unit = self._analytic(self._bspline(real, ppm), flat)
         else:
             unit = self._random_walk(flat)
+
+        kernels = device_kernels(flat)
+        if kernels is not None:
+            # the peaks, the scale, the rotation and the sum in one launch
+            params = self._kernel_inputs(baseline_frac, phase_deg, batch, flat)
+            return kernels.add_baseline(spec, unit, params, self.mode != 'random_walk',
+                                        np.any(np.asarray(phase_deg) != 0))
 
         # Amplitude relative to each trace's own real peak. The peak is detached:
         # how large a nuisance is belongs to the perturbation, and a loss must
         # not be able to shrink it by way of the data.
+        magnitude = ops.abs(real)
         peak = ops.detach(self._peak(magnitude))
         if self.mode == 'random_walk':
             scale = peak                              # the walk is bounded already
@@ -298,6 +307,17 @@ class BaselineAugmentation(BaseModule):
             baseline = baseline * self._column(rotation, batch, traces, baseline)
 
         return ops.reshape(flat + baseline, shape)
+
+    @staticmethod
+    def _kernel_inputs(baseline_frac, phase_deg, batch, like):
+        """
+        The per-sample values for "augmentrum.core.kernels.add_baseline", (3, B) float64 on
+        *like*'s device in one upload: each sample's fraction and phase factor (re, im), read as
+        "_column" reads them.
+        """
+        rotation = np.exp(1j * np.deg2rad(np.asarray(phase_deg, dtype=np.float64)))
+        values = [np.asarray(v).reshape(-1) for v in (baseline_frac, rotation.real, rotation.imag)]
+        return device_values([v[np.arange(batch) % v.size] for v in values], like)
 
     #*****************#
     #   the modes     #
@@ -445,7 +465,7 @@ class BaselineAugmentation(BaseModule):
             # A constant of the length: uploaded once per device, not with every batch
             from augmentrum.processing.torch_engine import constant
             weights = constant(('analytic one-sided', n_pts), lambda: one_sided,
-                               transform.device).to(transform.dtype)
+                               transform.device, transform.dtype)
         else:
             weights = ops.match_backend(one_sided, transform)
         return ops.ifft(transform * weights)

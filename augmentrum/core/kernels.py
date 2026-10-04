@@ -1851,3 +1851,56 @@ def eddy_current(x, angle):
         torch.view_as_real(flat), angle, torch.view_as_real(out), n, flat.shape[0] // b,
         BLOCK=PHASE_POINTS, enable_fp_fusion=False)
     return out.reshape(x.shape)
+
+
+#**************#
+#   baseline   #
+#**************#
+@triton.jit
+def add_baseline_kernel(spec_ptr, unit_ptr, params_ptr, out_ptr, N, B, PER_SAMPLE,
+                        DIVIDE: tl.constexpr, ROTATE: tl.constexpr, BLOCK: tl.constexpr):
+    """
+    One program per row of the complex64 spectra *spec* (B * PER_SAMPLE, N): the row plus its
+    curve *unit* scaled by the row's real peak - over the curve's real peak with DIVIDE (an IEEE
+    quotient), either peak 1 where it is zero - and by its sample's fraction in float32, then
+    with ROTATE turned by its sample's phase factor in complex64. Every product rounds as
+    torch's: fma(a_re, b_re, -a_im b_im) + i fma(a_re, b_im, a_im b_re).
+    """
+    r = tl.program_id(0)
+    b = r // PER_SAMPLE
+    j = tl.arange(0, BLOCK)
+    inside = (j < N)[:, None]
+    at = (r.to(tl.int64) * N + j[:, None]) * 2 + tl.arange(0, 2)[None, :]
+    s_re, s_im = tl.split(tl.load(spec_ptr + at, mask=inside, other=0.0))
+    u_re, u_im = tl.split(tl.load(unit_ptr + at, mask=inside, other=0.0))
+    peak = tl.max(tl.abs(s_re), axis=0)
+    scale = tl.where(peak > 0, peak, 1.0)
+    if DIVIDE:
+        top = tl.max(tl.abs(u_re), axis=0)
+        scale = libdevice.div_rn(scale, tl.where(top > 0, top, 1.0))
+    scale = scale * tl.load(params_ptr + b).to(tl.float32)
+    c_re = tl.fma(u_re, scale, -(u_im * 0.0))
+    c_im = tl.fma(u_re, 0.0, u_im * scale)
+    if ROTATE:
+        ph_re = tl.load(params_ptr + B + b).to(tl.float32)
+        ph_im = tl.load(params_ptr + 2 * B + b).to(tl.float32)
+        c_re, c_im = tl.fma(c_re, ph_re, -(c_im * ph_im)), tl.fma(c_re, ph_im, c_im * ph_re)
+    tl.store(out_ptr + at, tl.join(s_re + c_re, s_im + c_im), mask=inside)
+
+
+def add_baseline(spec, unit, params, divide, rotate):
+    """
+    "BaselineAugmentation._add_baseline" past its curves, on complex64 spectra *spec* (B, ..., N)
+    and the complex64 curves *unit* (one row per trace): *params* (3, B) float64 on the device,
+    each sample's fraction and phase factor (re, im); *divide* scales each curve to unit real
+    peak first, *rotate* applies the phase factors.
+    """
+    n, b = spec.shape[-1], params.shape[1]
+    flat = spec.contiguous().reshape(-1, n)
+    out = torch.empty_like(flat)
+    add_baseline_kernel[(flat.shape[0],)](
+        torch.view_as_real(flat), torch.view_as_real(unit.contiguous()), params,
+        torch.view_as_real(out), n, b, flat.shape[0] // b, DIVIDE=bool(divide),
+        ROTATE=bool(rotate), BLOCK=triton.next_power_of_2(n), enable_fp_fusion=False,
+        num_warps=8)
+    return out.reshape(spec.shape)
