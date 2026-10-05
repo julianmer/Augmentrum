@@ -1490,6 +1490,60 @@ def figure_conditions(runs: dict, out: Path, name: str):
     plt.close(fig)
 
 
+def figure_gain(runs: dict, out: Path, name: str):
+    """
+    What each spatial condition gains over no spatial augmentation within its arm: test NRMSE
+    in percent (left, lower is better) and SSIM (right, higher is better); open marker the lowest
+    test acceleration, filled the highest, the bar the range over all of them.
+    """
+    from matplotlib.lines import Line2D
+    plt = figure_style()
+    accs = EVALUATION['test_acc']
+    conds = [c for c in CONDITION_NAMES if c != ('none', False)]
+    fig, axes = plt.subplots(1, 2, figsize=(COL2, 0.3 * len(conds) + 0.9), sharey=True)
+    for ax, metric, xlabel, change in (
+            (axes[0], 'nrmse', 'Test NRMSE against no spatial augmentation [%]',
+             lambda v, b: 100 * (v - b) / b),
+            (axes[1], 'ssim', 'Test SSIM against no spatial augmentation', lambda v, b: v - b)):
+        for i in range(0, len(conds), 2):
+            ax.axhspan(i - 0.5, i + 0.5, color='#F2F2F2', lw=0, zorder=0)
+        for (arm, (_, color, marker)), dy in zip(ARM_STYLE.items(), (-0.22, 0.0, 0.22)):
+            if (arm, 'none', False) not in runs:
+                continue
+            base = np.array([test_mean(runs[(arm, 'none', False)], metric, acc=a) for a in accs])
+            for i, cond in enumerate(conds):
+                if (arm, *cond) not in runs:
+                    continue
+                d = change(np.array([test_mean(runs[(arm, *cond)], metric, acc=a) for a in accs]),
+                           base)
+                ax.plot([d.min(), d.max()], [i + dy] * 2, color=color, lw=3.2, alpha=0.25,
+                        solid_capstyle='round', zorder=2)
+                ax.plot(d[0], i + dy, marker, color=color, mfc='white', mew=1.1, ms=4.2, zorder=3)
+                ax.plot(d[-1], i + dy, marker, color=color, ms=4.2, mec='white', mew=0.4, zorder=4)
+        ax.axvline(0, color=INK, lw=0.9, zorder=1)
+        ax.set_xlabel(xlabel)
+        ax.grid(True, axis='x', alpha=0.25, lw=0.6)
+        ax.set_axisbelow(True)
+        ax.tick_params(axis='y', length=0)
+        ax.spines['left'].set_visible(False)
+    axes[0].set_yticks(range(len(conds)))
+    axes[0].set_yticklabels([CONDITION_NAMES[c] for c in conds])
+    axes[0].set_ylim(len(conds) - 0.5, -0.5)
+    handles = [Line2D([], [], ls='none', marker=m, color=c, ms=4.5, label=t)
+               for t, c, m in ARM_STYLE.values()]
+    handles += [Line2D([], [], ls='none', marker='o', mfc='white', color=INK, mew=1.1, ms=4.2,
+                       label=f'Acceleration {accs[0]:g}'),
+                Line2D([], [], ls='none', marker='o', color=INK, ms=4.2,
+                       label=f'Acceleration {accs[-1]:g}'),
+                Line2D([], [], color=INK, lw=3.2, alpha=0.25,
+                       label=f'Range over {accs[0]:g}–{accs[-1]:g}')]
+    fig.legend(handles=handles, loc='upper center', ncol=6, bbox_to_anchor=(0.55, 1.02),
+               handletextpad=0.2, columnspacing=1.0)
+    fig.tight_layout(rect=(0, 0, 1, 0.93), w_pad=1.5)
+    save_figure(fig, out, name)
+    plt.close(fig)
+
+
 def figure_acceleration(runs: dict, metric: str, ylabel: str, out: Path, name: str):
     """The test score against the acceleration, every run: one panel per spatial condition,
     one line per spectral arm."""
@@ -1798,6 +1852,7 @@ def figures(args):
     main_dir = Path(args.out_dir) / 'figures' / 'main'
     appendix = Path(args.out_dir) / 'figures' / 'appendix'
     figure_conditions(runs, main_dir, 'fig_deep_er_conditions')
+    figure_gain(runs, main_dir, 'fig_deep_er_gain')
     figure_acceleration(runs, 'nrmse', 'Test NRMSE', main_dir, 'fig_deep_er_acceleration')
     figure_acceleration(runs, 'ssim', 'Test SSIM', appendix, 'fig_deep_er_acceleration_ssim')
     figure_curves(runs, appendix, 'fig_deep_er_curves')
