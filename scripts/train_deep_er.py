@@ -19,7 +19,7 @@
 # by learnable mixing and coil-sensitivity-aware domain transfer, trained per FID timepoint        #
 # with an MSE + (1 - SSIM) image loss. No upstream code is used or required.                       #
 #                                                                                                  #
-# The whole ablation, from the repository root — the default, no arguments needed:               #
+# The whole ablation, from the repository root — the default, no arguments needed:                 #
 #     python scripts/train_deep_er.py                                                              #
 # It downloads the data once (~170 GB), trains all 30 conditions on every visible GPU, one run     #
 # per GPU at a time, resumes interrupted runs, skips finished ones, and collects every test        #
@@ -32,7 +32,7 @@
 #     python scripts/train_deep_er.py --dry-run                                                    #
 #     python scripts/train_deep_er.py --bench 50          (or --tune: compare the speed options)   #
 #     python scripts/train_deep_er.py --figures           (the paper's figures from the runs)      #
-# Needs torchmetrics (the SSIM loss) and wandb for --wandb, beside augmentrum's torch extra.       #
+# Needs wandb for --wandb, beside augmentrum's torch extra.                                        #
 #                                                                                                  #
 ####################################################################################################
 
@@ -358,15 +358,23 @@ class CachedBirdcage(Birdcage):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._unturned = {}
+        self._on_device = {}
+        self.last_key_, self.last_turn_ = None, 1.0
 
     def build(self, matrix, n_coils, rng):
         key = (tuple(matrix), n_coils)
         if key not in self._unturned:
             self._unturned[key] = super().build(matrix, n_coils, None)
-        maps = self._unturned[key]
-        if rng is None:
-            return maps
-        return maps * np.complex64(np.exp(1j * rng.uniform(0.0, 2.0 * np.pi)))
+        self.last_key_ = key
+        self.last_turn_ = 1.0 if rng is None else np.exp(1j * rng.uniform(0.0, 2.0 * np.pi))
+        return self._unturned[key] * np.complex64(self.last_turn_)
+
+    def last_maps(self, device):
+        """The maps of the last build on *device*: uploaded once, turned there."""
+        key = self.last_key_ + (device,)
+        if key not in self._on_device:
+            self._on_device[key] = torch.as_tensor(self._unturned[self.last_key_], device=device)
+        return self._on_device[key] * complex(self.last_turn_)
 
 
 #*************************#
@@ -398,29 +406,36 @@ def checkerboard(shape, device, signed: bool = False):
 
 def coil_first(sense):
     """
-    "(X, Y, Z, C)" maps to the layout the transfers use: "(C, X, Y, Z)",
-    with the checkerboard folded in, so each transfer does one sign multiply.
+    "(X, Y, Z, C)" maps to the layout the transfers use: "(C, X, Y, Z, 2)",
+    real and imaginary parts last, with the checkerboard folded in, so each
+    transfer does one sign multiply.
     """
-    sense = sense.permute(3, 0, 1, 2)
-    return (sense * checkerboard(sense.shape[1:], sense.device)).contiguous()
-
+    sense = sense.permute(3, 0, 1, 2) * checkerboard(sense.shape[:3], sense.device)
+    return torch.view_as_real(sense.contiguous())
 
 
 def img_to_k(img, sense):
     """
     Coil-combined image channels to multi-coil k-space channels, batched.
 
+    Both transfers do their arithmetic on real tensors and go complex only
+    for the FFT itself: torch.compile generates nothing for complex tensors,
+    but fuses everything on either side of the FFT into one kernel, in
+    whatever layout the convolutions want.
+
     Args:
         img: "(B, 2, X, Y, Z)" real/imag channels.
-        sense: "(C, X, Y, Z)" maps from "coil_first", shared over the batch.
+        sense: "(C, X, Y, Z, 2)" maps from "coil_first", shared over the batch.
 
     Returns:
         "(B, 2C, X, Y, Z)" — real coils then imaginary coils, centered k-space.
     """
-    cc = torch.complex(img[:, 0], img[:, 1])                       # (B, X, Y, Z)
-    k = torch.fft.fftn(cc.unsqueeze(1) * sense, dim=(-3, -2, -1))  # (B, C, X, Y, Z)
-    k = k * checkerboard(k.shape[-3:], k.device, signed=True)
-    return torch.cat((k.real, k.imag), dim=1)
+    re, im = img[:, 0, None], img[:, 1, None]                      # (B, 1, X, Y, Z)
+    sr, si = sense[..., 0], sense[..., 1]                           # (C, X, Y, Z)
+    coils = torch.stack((re * sr - im * si, re * si + im * sr), dim=-1)
+    k = torch.fft.fftn(torch.view_as_complex(coils), dim=(-3, -2, -1))
+    k = torch.view_as_real(k) * checkerboard(k.shape[-3:], k.device, signed=True)[..., None]
+    return k.permute(0, 5, 1, 2, 3, 4).reshape(k.shape[0], -1, *k.shape[2:5])
 
 
 def k_to_img(k, sense):
@@ -431,11 +446,13 @@ def k_to_img(k, sense):
     conjugate-sensitivity combination.
     """
     n_coils = k.shape[1] // 2
-    kc = torch.complex(k[:, :n_coils], k[:, n_coils:])             # (B, C, X, Y, Z)
-    coils = torch.fft.ifftn(kc * checkerboard(kc.shape[-3:], kc.device, signed=True),
-                            dim=(-3, -2, -1))
-    cc = torch.sum(torch.conj(sense) * coils, dim=1)               # (B, X, Y, Z)
-    return torch.stack((cc.real, cc.imag), dim=1)
+    kr = k.reshape(k.shape[0], 2, n_coils, *k.shape[2:]).permute(0, 2, 3, 4, 5, 1)
+    kr = kr * checkerboard(k.shape[-3:], k.device, signed=True)[..., None]
+    coils = torch.fft.ifftn(torch.view_as_complex(kr.contiguous()), dim=(-3, -2, -1))
+    cr, ci = torch.view_as_real(coils).unbind(-1)                  # (B, C, X, Y, Z)
+    sr, si = sense[..., 0], sense[..., 1]
+    return torch.stack(((cr * sr + ci * si).sum(dim=1),
+                        (ci * sr - cr * si).sum(dim=1)), dim=1)    # (B, 2, X, Y, Z)
 
 
 def piecewise_k_activation(x):
@@ -556,7 +573,41 @@ class DeepER(nn.Module):
 #**********#
 #   loss   #
 #**********#
-def make_loss(device, use_ssim: bool = True):
+#: SSIM as torchmetrics defines it: a gaussian window of 11 points, sigma 1.5,
+#: k1 0.01 and k2 0.03 on a data range of 1.
+SSIM_WINDOW, SSIM_SIGMA, SSIM_C1, SSIM_C2 = 11, 1.5, 0.01 ** 2, 0.03 ** 2
+
+
+def ssim(reco, target):
+    """
+    Per item, the mean SSIM over the volume (torchmetrics' definition,
+    reflect-padded). The 3-D gaussian window is the product of three 1-D
+    ones, so it is applied as three 11-tap convolutions: the 1331-tap one
+    ran through a depthwise kernel whose backward alone took a tenth of the
+    training step.
+    """
+    pad = SSIM_WINDOW // 2
+    x = torch.cat((reco, target, reco * reco, target * target, reco * target))
+    x = nn.functional.pad(x, (pad,) * 6, mode='reflect')
+    taps = torch.arange(SSIM_WINDOW, device=x.device, dtype=x.dtype) - pad
+    window = torch.exp(-(taps / SSIM_SIGMA) ** 2 / 2)
+    window = window / window.sum()
+    n_ch = x.shape[1]
+    for axis in range(3):
+        shape = [1, 1, 1]
+        shape[axis] = SSIM_WINDOW
+        x = nn.functional.conv3d(x, window.view(1, 1, *shape).expand(n_ch, 1, *shape),
+                                 groups=n_ch)
+    mu_r, mu_t, rr, tt, rt = x.split(reco.shape[0])
+    var_r = (rr - mu_r ** 2).clamp(min=0.0)
+    var_t = (tt - mu_t ** 2).clamp(min=0.0)
+    cov = rt - mu_r * mu_t
+    index = (((2 * mu_r * mu_t + SSIM_C1) * (2 * cov + SSIM_C2))
+             / ((mu_r ** 2 + mu_t ** 2 + SSIM_C1) * (var_r + var_t + SSIM_C2)))
+    return index.flatten(1).mean(dim=1)
+
+
+def make_loss(use_ssim: bool = True):
     """
     The paper's image loss, MSE + (1 - SSIM), on brain-masked volumes.
 
@@ -565,18 +616,12 @@ def make_loss(device, use_ssim: bool = True):
     a small fraction of the noise, and dividing by it blew single timepoints
     up to losses of ~1e5.
     """
-    ssim = None
-    if use_ssim:
-        # a missing package must not quietly turn the loss into plain MSE
-        from torchmetrics.image import StructuralSimilarityIndexMeasure  # pip install torchmetrics
-        ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
-
     def loss_func(reco, target, mask):
         reco = reco * mask[:, None]
         target = target * mask[:, None]
         loss = nn.functional.mse_loss(reco, target)
-        if ssim is not None:
-            loss = loss + (1 - ssim(reco, target))
+        if use_ssim:
+            loss = loss + (1 - ssim(reco, target).mean())
         return loss
 
     return loss_func
@@ -591,12 +636,10 @@ def metrics(reco, target, mask):
     is nearly zero, so a per-timepoint ratio runs into the thousands and
     would decide the mean on its own.
     """
-    from torchmetrics.functional.image import structural_similarity_index_measure as ssim
     m = mask[:, None]
     err = (((reco - target) * m) ** 2).sum(dim=(1, 2, 3, 4))
     energy = ((target * m) ** 2).sum(dim=(1, 2, 3, 4))
-    s = ssim(reco * m, target * m, data_range=1.0, reduction='none')
-    return err, energy, s
+    return err, energy, ssim(reco * m, target * m)
 
 
 #**********#
@@ -643,7 +686,7 @@ def pulls(aug, split: str, device):
     coil = next(s for s in pipe.steps if isinstance(s, CoilSampler))
     sampler = next(s for s in pipe.steps if isinstance(s, TimepointSampler))
     for x, y in aug.dataloader(split=split, framework='pytorch'):
-        sense = torch.as_tensor(coil.last_maps_, dtype=torch.cfloat, device=device)
+        sense = coil.source.last_maps(device)
         x = x[0].to(device, torch.cfloat)                          # (X, Y, Z, n, C)
         y = y[0].to(device, torch.cfloat)
         yield make_batch(x, y, sense), sampler.last_timepoints_
@@ -651,6 +694,7 @@ def pulls(aug, split: str, device):
 
 def build_train_data(args, device):
     """The training subjects wrapped in Augmentrum, one volume per pull."""
+    args.pool_on_gpu = pool_on_gpu(args, device)       # decided once, before the pool is loaded
     return MRSIChallengeData(
         args.data_dir, signal='clean',
         splits={'train': subjects(args)['train']},
@@ -660,7 +704,7 @@ def build_train_data(args, device):
         modes={'train': 'on-the-fly'},
         backend='pytorch', volatile=True, seed=args.seed,
         # the whole pool on the GPU skips the copy per pull
-        device=device if pool_on_gpu(args, device) else None,
+        device=device if args.pool_on_gpu else None,
     )
 
 
@@ -995,7 +1039,7 @@ def train(args):
                    channels_last=args.channels_last).to(device)
     if args.channels_last:
         model = model.to(memory_format=torch.channels_last_3d)
-    loss_func = make_loss(device)
+    loss_func = make_loss()
     step_model = torch.compile(model) if args.compile else model
 
     if args.dry_run:
@@ -1146,7 +1190,7 @@ def bench(args, aug, model, loss_func, device, amp):
     peak = torch.cuda.max_memory_allocated(device) / 1e9 if device.type == 'cuda' else 0
     print(f"data {data_ms:.0f} ms/pull   model {model_ms:.0f} ms/step   "
           f"prefetched step {full_ms:.0f} ms   peak GPU {peak:.1f} GB   "
-          f"pool on {'GPU' if pool_on_gpu(args, device) else 'CPU'}")
+          f"pool on {'GPU' if args.pool_on_gpu else 'CPU'}")
 
 
 #************#
@@ -1202,11 +1246,11 @@ def fetch_all(args):
 
 #: Speed options --tune compares on the heaviest condition.
 TUNE_VARIANTS = {
-    'fp32':                       ['--no-amp'],
-    'bf16':                       [],
-    'bf16+channels-last':         ['--channels-last'],
-    'bf16+compile':               ['--compile'],
-    'bf16+channels-last+compile': ['--channels-last', '--compile'],
+    'fp32':                       ['--no-amp', '--no-compile'],
+    'bf16':                       ['--no-compile'],
+    'bf16+channels-last':         ['--channels-last', '--no-compile'],
+    'bf16+compile':               [],
+    'bf16+channels-last+compile': ['--channels-last'],
 }
 
 
@@ -1819,7 +1863,9 @@ def main():
     parser.add_argument('--device', default=None)
     parser.add_argument('--amp', action=argparse.BooleanOptionalAction, default=True,
                         help="bfloat16 convolutions; FFTs and the loss stay float32.")
-    parser.add_argument('--compile', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--compile', action=argparse.BooleanOptionalAction, default=True,
+                        help="torch.compile the model: fuses the elementwise work around "
+                             "the FFTs and convolutions.")
     parser.add_argument('--pool-on-gpu', action=argparse.BooleanOptionalAction, default=None,
                         help="Keep the training subjects on the GPU (0.4 GB each). "
                              "Default: when it has room for them and 16 GB more.")
