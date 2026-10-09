@@ -140,6 +140,9 @@ EVALUATION = dict(
     test_acc=(2.0, 4.0, 6.0), test_timepoints=32,
     val_mm_scale=0.15,              # the val subjects ship no MM: add the midpoint
 )
+#: The challenge's own noise per point and coil, real and imaginary each (TestSub1: all - meta -
+#: mm - baseline - nuisance): --target noisy puts it in the coil images.
+ACQUISITION_SIGMA = 1.0e-3
 
 
 #: One subject's metabolite signal as complex64: 64 x 64 x 32 x 384 x 8 bytes.
@@ -163,6 +166,7 @@ def build_pipeline(args, device, keep_all: bool = False) -> AugmentationPipeline
     """
     kinds = SPATIAL_KINDS if args.spatial == 'all' else \
         (() if args.spatial == 'none' else (args.spatial,))
+    target_noise = acquisition_noise(args)
 
     steps = [
         ToDevice(device),                                         # 0. one volume to the GPU
@@ -171,9 +175,10 @@ def build_pipeline(args, device, keep_all: bool = False) -> AugmentationPipeline
         *([SpatialTransforms(kinds, **SPATIAL)] if kinds else []),# 3. augment the object
         CoilSampler(mode='synthesize', n_coils=args.n_coils,      # 4. receive array
                     source=CachedBirdcage(), seed=args.seed),
-        Tap(name='clean'),                                        # 5. TARGET frozen here
-        *([Noise(sigma=RANGES['sigma'][1])] if args.noise else []),  # 6. noise, input only
-        kspace_step(args, (args.acc_low + args.acc_high) / 2.0),  # 7. degrade INPUT only
+        *target_noise,                                            # 5. --target noisy: in both
+        Tap(name='clean'),                                        # 6. TARGET frozen here
+        *([Noise(sigma=RANGES['sigma'][1])] if args.noise else []),  # 7. noise, input only
+        kspace_step(args, (args.acc_low + args.acc_high) / 2.0),  # 8. degrade INPUT only
     ]
     if args.crop_t:                                               # debug: shorter FID
         steps.insert(1, ZeroFill(target_pts=args.crop_t))
@@ -181,7 +186,20 @@ def build_pipeline(args, device, keep_all: bool = False) -> AugmentationPipeline
     ranges = dict(RANGES, acceleration_factor=(args.acc_low, args.acc_high))
     if not args.noise:
         ranges.pop('sigma')
-    return AugmentationPipeline(steps, user_kwargs=ranges)
+    # the acquisition noise keeps its own sigma, not --noise's range
+    pinned = [{'sigma': ACQUISITION_SIGMA} if any(s is n for n in target_noise) else {}
+              for s in steps]
+    return AugmentationPipeline(steps, user_kwargs=ranges, step_kwargs=pinned)
+
+
+def acquisition_noise(args):
+    """
+    --target noisy: the acquisition's own noise in the coil images, before
+    the target is frozen. Deep-ER's target is the fully sampled
+    reconstruction of the same noisy data, so the network undoes the
+    undersampling and leaves the noise; with --target clean it denoises too.
+    """
+    return [Noise(sigma=ACQUISITION_SIGMA)] if args.target == 'noisy' else []
 
 
 def eval_pipeline(args, device, n_timepoints: int, acc: float, add_mm: bool) -> AugmentationPipeline:
@@ -191,7 +209,8 @@ def eval_pipeline(args, device, n_timepoints: int, acc: float, add_mm: bool) -> 
         *([Macromolecules(mm_scale=EVALUATION['val_mm_scale'])] if add_mm else []),
         TimepointSampler(n_timepoints, evenly=True),
         CoilSampler(mode='synthesize', n_coils=args.n_coils, source=CachedBirdcage()),
-        Tap(name='clean'),
+        Tap(name='clean'),                    # scored against the clean signal either way
+        *acquisition_noise(args),
         kspace_step(args, acc, traj_seed=EVALUATION['seed']),
     ]
     return AugmentationPipeline(steps)
@@ -209,7 +228,7 @@ def kspace_step(args, acc: float, traj_seed=None) -> KspaceUndersampling:
     return KspaceUndersampling(
         ksp_mode='cartesian' if 'trajectory' not in trajectory else args.ksp_mode,
         acceleration_factor=acc,
-        noise_sigma_k=args.noise_sigma_k,
+        noise_sigma_k=0.0 if args.target == 'noisy' else args.noise_sigma_k,
         pixdim=MRSIChallengeDataModule.VOXEL_MM,
         **trajectory,
     )
@@ -582,9 +601,10 @@ class DeepER(nn.Module):
     """
 
     def __init__(self, n_coils: int, n_layers: int = 10, features: int = 64,
-                 channels_last: bool = False):
+                 channels_last: bool = False, from_kspace: bool = False):
         super().__init__()
         k_ch = 2 * n_coils
+        self.from_kspace = from_kspace
         self.layers = nn.ModuleList(
             InterlacerLayer(n_coils, features, channels_last) for _ in range(n_layers))
         self.out_img = nn.Conv3d(4, 2, 1)
@@ -598,9 +618,11 @@ class DeepER(nn.Module):
             img_delta, k_delta = layer(img, k, img0, k0, sense)
             img = img + img_delta
             k = k + k_delta
-        img = self.out_img(torch.cat((img, img0), dim=1))
-        k = self.out_k(torch.cat((k, k0), dim=1))
-        return img.float(), k.float()
+        img = self.out_img(torch.cat((img, img0), dim=1)).float()
+        k = self.out_k(torch.cat((k, k0), dim=1)).float()
+        if self.from_kspace:                # the paper's output: k-space, then the image
+            img = k_to_img(k, sense)
+        return img, k
 
 
 #**********#
@@ -1069,7 +1091,8 @@ def train(args):
 
     aug = build_train_data(args, device)
     model = DeepER(n_coils=args.n_coils, n_layers=args.n_layers,
-                   channels_last=args.channels_last).to(device)
+                   channels_last=args.channels_last,
+                   from_kspace=args.output == 'kspace').to(device)
     if args.channels_last:
         model = model.to(memory_format=torch.channels_last_3d)
     loss_func = make_loss()
@@ -1689,11 +1712,14 @@ def reconstruct(runs: dict, subject: str, track: str, acc: float, device, chunk:
     ~40 GB of RAM); the fixed seed gives every slice the same coils and trajectory.
     Returns ({key: FIDs}, spectral width, spectrometer frequency).
     """
-    args = argparse.Namespace(**json.loads((next(iter(runs.values())) / 'config.json')
-                                           .read_text())['args'])
+    # runs from before --target and --output trained with what they now default to
+    args = argparse.Namespace(**{'target': 'clean', 'output': 'image',
+                                 **json.loads((next(iter(runs.values())) / 'config.json')
+                                              .read_text())['args']})
     models = {}
     for key, run in runs.items():
-        models[key] = DeepER(n_coils=args.n_coils, n_layers=args.n_layers).to(device).eval()
+        models[key] = DeepER(n_coils=args.n_coils, n_layers=args.n_layers,
+                             from_kspace=args.output == 'kspace').to(device).eval()
         models[key].load_state_dict(torch.load(run / 'best.pt', map_location=device))
     as_complex = lambda v: torch.complex(v[:, 0].float(), v[:, 1].float())
     out = {k: [] for k in ('truth', 'input', *models)}
@@ -1944,6 +1970,11 @@ def main():
                              "challenge's own noise, SD 1.0e-3 per real and imaginary part "
                              "(TestSub1, all - meta - mm - baseline - nuisance; measured at "
                              "acceleration 1).")
+    parser.add_argument('--target', choices=['clean', 'noisy'], default='clean',
+                        help="clean: the noise-free signal (the network also denoises); noisy: "
+                             "with the acquisition's noise, as Deep-ER trains.")
+    parser.add_argument('--output', choices=['image', 'kspace'], default='image',
+                        help="The branch the reconstruction comes from (paper: kspace).")
     parser.add_argument('--lr', type=float, default=1e-5)
     parser.add_argument('--steps', type=int, default=20_000,
                         help="Training steps per run (one pull of 4 timepoints each).")
