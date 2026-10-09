@@ -274,6 +274,22 @@ class TestKspaceUndersamplingNufft:
         out, _ = us.process_tensor(vol.copy())
         assert np.linalg.norm(out - vol) / np.linalg.norm(vol) < 0.3
 
+    def test_noise_does_not_shrink_the_signal(self):
+        """
+        The output scale is read off the noiseless samples.
+
+        Read off the noisy reconstruction, it shrank the signal to make room
+        for the noise: at this level to 8 % of itself.
+        """
+        from augmentrum.sampling import KspaceUndersampling
+        vol = self._volume()
+        run = lambda sigma: KspaceUndersampling(
+            ksp_mode='nufft', trajectory='stack_of_eccentric', acceleration_factor=1.0,
+            us_seed=0, traj_params={'n_shots': 64, 'seed': 0},
+            noise_sigma_k=sigma).process_tensor(vol.copy())[0]
+        clean, noisy = run(0.0), run(1.0)
+        assert abs(np.vdot(clean, noisy).real / np.vdot(clean, clean).real - 1) < 0.05
+
     def test_works_for_a_3d_trajectory(self):
         """kz is sampled by the trajectory rather than joining the coil slot."""
         out, us = self._run(trajectory='cones_3d')

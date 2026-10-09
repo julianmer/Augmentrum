@@ -3934,12 +3934,12 @@ class KspaceUndersampling(BaseModule):
                                         * shift[None, :]).sum(axis=1)
                 weights = weights * np.exp(1j * phase)
 
-        recon, noise = [], None
+        recon, gauge, noise = [], [], None
         for b in range(n_batch):
             plane = ops.reshape(stack[b], (-1,) + im_size)
             # Measure with the chosen interpolator, always reconstruct with
             # Kaiser-Bessel: the point is to study the forward approximation.
-            kdata = nufft.forward(plane, coords)
+            kdata = clean = nufft.forward(plane, coords)
             if self.noise_sigma_k and coils == 1:
                 kdata = self._add_kspace_noise(kdata)
             elif self.noise_sigma_k:
@@ -3949,8 +3949,10 @@ class KspaceUndersampling(BaseModule):
                 kdata = kdata + noise[b]
 
             if not dual:
-                recon.append(gridder.adjoint(kdata * ops.cast_like(
-                    ops.match_backend(dcf[None, :], kdata), kdata), coords))
+                w = ops.cast_like(ops.match_backend(dcf[None, :], kdata), kdata)
+                recon.append(gridder.adjoint(kdata * w, coords))
+                if self.noise_sigma_k:
+                    gauge.append(gridder.adjoint(clean * w, coords))
                 continue
 
             weighted = kdata * ops.cast_like(
@@ -3967,19 +3969,21 @@ class KspaceUndersampling(BaseModule):
             den = ops.sqrt(ops.sum(ops.abs(rid) ** 2))
             gain = num / ops.where(den > 1e-12, den, den * 0 + 1e-12)
             recon.append(warped * ops.cast_like(gain, warped))
-        out = ops.stack(recon, axis=0)
+        def unfold(planes):
+            out = ops.stack(planes, axis=0)
+            if ndim == 2:
+                return ops.transpose(ops.reshape(out, (n_batch, nz, n_t, nx, ny)),
+                                     (0, 3, 4, 1, 2))
+            return ops.transpose(out, (0, 2, 3, 4, 1))
 
-        if ndim == 2:
-            out = ops.transpose(ops.reshape(out, (n_batch, nz, n_t, nx, ny)),
-                                (0, 3, 4, 1, 2))
-        else:
-            out = ops.transpose(out, (0, 2, 3, 4, 1))
+        out = unfold(recon)
 
         # The dual path is already unit-calibrated against the identity pair;
         # matching the input's global norm again would erase |det A|.
         if not dual:
-            out = (self._match_scale(out, vol, data_array) if coils == 1 else
-                   self._match_scale_per_coil(out, vol, coils))
+            gauge = unfold(gauge) if gauge else out
+            out = (self._match_scale(out, vol, gauge) if coils == 1 else
+                   self._match_scale_per_coil(out, vol, coils, gauge))
 
         # NumPy's FFT computes in double whatever it is handed, so on that
         # backend the reconstruction comes back complex128. A pipeline stage
@@ -4020,36 +4024,39 @@ class KspaceUndersampling(BaseModule):
             grid_size=tuple(int(self.nufft_osf * n) for n in im_size),
             dtype=real,
         )(stack, ktraj)
+        clean = kdata
         if self.noise_sigma_k:
             kdata = self._add_kspace_noise(kdata)
 
         # Density-compensate and regrid, [B, S, C, L]; every retained shot was
         # concatenated into one readout above, so S = 1 and L = K.
         out = recon(batch_coords, kdata[:, None])
+        gauge = recon(batch_coords, clean[:, None]) if self.noise_sigma_k else out
 
         if ndim == 2:
             out = out.reshape(vol.shape[0], nz, vol.shape[4], nx, ny).permute(0, 3, 4, 1, 2)
         else:
             out = out.permute(0, 2, 3, 4, 1)
 
-        out = self._match_scale(out, vol, data_array)
+        out = self._match_scale(out, vol, gauge)
         out = ops.cast_like(out, _torch.zeros((), dtype=dtype))
         return ops.to_numpy(out) if was_numpy else out
 
     @staticmethod
-    def _match_scale_per_coil(out, vol, coils: int):
+    def _match_scale_per_coil(out, vol, coils: int, gauge):
         """"_match_scale" for each element of a folded array, coil-major last axis."""
         shape = tuple(int(n) for n in ops.shape(out))
         split = shape[:4] + (coils, shape[4] // coils)
         out_c, vol_c = ops.reshape(out, split), ops.reshape(vol, split)
         axes = (0, 1, 2, 3, 5)
         num = ops.sqrt(ops.sum(ops.abs(vol_c) ** 2, axis=axes, keepdims=True))
-        den = ops.sqrt(ops.sum(ops.abs(out_c) ** 2, axis=axes, keepdims=True))
+        den = ops.sqrt(ops.sum(ops.abs(ops.reshape(gauge, split)) ** 2, axis=axes,
+                               keepdims=True))
         scale = num / ops.where(den > 1e-12, den, den * 0 + 1e-12)
         return ops.reshape(out_c * ops.cast_like(scale, out_c), shape)
 
     @staticmethod
-    def _match_scale(out, vol, like):
+    def _match_scale(out, vol, gauge):
         """
         Restore the input's overall scale.
 
@@ -4058,9 +4065,13 @@ class KspaceUndersampling(BaseModule):
         acceptable in an operator but not in a pipeline stage, which has to hand
         back data in the units it was given. Only the global factor is touched;
         the relative structure is whatever the reconstruction produced.
+
+        The factor is read off *gauge*, the reconstruction of the noiseless
+        samples: read off the noisy one, it would shrink the signal to make
+        room for the noise.
         """
         num = ops.sqrt(ops.sum(ops.abs(vol) ** 2))
-        den = ops.sqrt(ops.sum(ops.abs(out) ** 2))
+        den = ops.sqrt(ops.sum(ops.abs(gauge) ** 2))
         scale = num / ops.where(den > 1e-12, den, den * 0 + 1e-12)
         return out * ops.cast_like(scale, out)
 
