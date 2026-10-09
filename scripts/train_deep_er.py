@@ -1718,8 +1718,9 @@ def reconstruct(runs: dict, subject: str, track: str, acc: float, device, chunk:
                                               .read_text())['args']})
     models = {}
     for key, run in runs.items():
+        output = json.loads((run / 'config.json').read_text())['args'].get('output', 'image')
         models[key] = DeepER(n_coils=args.n_coils, n_layers=args.n_layers,
-                             from_kspace=args.output == 'kspace').to(device).eval()
+                             from_kspace=output == 'kspace').to(device).eval()
         models[key].load_state_dict(torch.load(run / 'best.pt', map_location=device))
     as_complex = lambda v: torch.complex(v[:, 0].float(), v[:, 1].float())
     out = {k: [] for k in ('truth', 'input', *models)}
