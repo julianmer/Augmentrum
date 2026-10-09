@@ -3918,11 +3918,13 @@ class KspaceUndersampling(BaseModule):
         gridder = (GriddingNUFFT(im_size, self.nufft_osf)
                    if interpolator is not None else nufft)
 
+        # Without the Pipe weights the adjoint weights k-space by how densely
+        # the trajectory visits it, a strong low-pass even when fully sampled
+        dcf = gridder.density_weights(recon_coords, like=vol).astype(np.complex128)
         if dual:
             # The reference trajectory owns the regridding: the Pipe weights
             # and the translation ramp are functions of where the samples are
             # put back, not of where they were read.
-            dcf = gridder.density_weights(recon_coords).astype(np.complex128)
             weights = amplitude * dcf
             if self.traj_shift is not None:
                 shift = np.asarray(self.traj_shift, np.float64)[:ndim]
@@ -3947,7 +3949,8 @@ class KspaceUndersampling(BaseModule):
                 kdata = kdata + noise[b]
 
             if not dual:
-                recon.append(gridder.adjoint(kdata, coords))
+                recon.append(gridder.adjoint(kdata * ops.cast_like(
+                    ops.match_backend(dcf[None, :], kdata), kdata), coords))
                 continue
 
             weighted = kdata * ops.cast_like(
@@ -4020,9 +4023,9 @@ class KspaceUndersampling(BaseModule):
         if self.noise_sigma_k:
             kdata = self._add_kspace_noise(kdata)
 
-        # Adjoint wants [B, S, C, L]; every retained shot was concatenated into
-        # one readout above, so S = 1 and L = K.
-        out = recon.adjoint(kdata[:, None], batch_coords)
+        # Density-compensate and regrid, [B, S, C, L]; every retained shot was
+        # concatenated into one readout above, so S = 1 and L = K.
+        out = recon(batch_coords, kdata[:, None])
 
         if ndim == 2:
             out = out.reshape(vol.shape[0], nz, vol.shape[4], nx, ny).permute(0, 3, 4, 1, 2)

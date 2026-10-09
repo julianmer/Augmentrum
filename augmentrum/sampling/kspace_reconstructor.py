@@ -284,7 +284,8 @@ class GriddingNUFFT:
     #*********************#
     #   density weights   #
     #*********************#
-    def density_weights(self, coords: np.ndarray, iterations: int = 15) -> np.ndarray:
+    def density_weights(self, coords: np.ndarray, iterations: int = 15,
+                        like=None) -> np.ndarray:
         """
         Pipe-style density compensation weights for *coords*.
 
@@ -294,15 +295,21 @@ class GriddingNUFFT:
         followed by de-gridding the identity.
 
         The weights depend only on the trajectory, never on the data, so this is
-        computed in NumPy once and promoted wherever it is applied.
+        computed once and promoted wherever it is applied: in NumPy, or, for
+        data *like* on CUDA, in float64 on its device (deterministic, equal to
+        NumPy's to ~1e-15).
 
         Args:
             coords: Trajectory in [-0.5, 0.5), "[K, ndim]".
             iterations: Pipe iterations; converges quickly, 10-20 is plenty.
+            like: The data the weights will meet, or None.
 
         Returns:
             Weights "[K]".
         """
+        if like is not None and self._kernels(like) is not None:
+            return self._device_density(np.asarray(coords), like, iterations)
+
         kernel = self.interpolator
         if not isinstance(kernel, GriddingKernel):
             # Density is a property of the trajectory and the grid, not of
@@ -322,6 +329,28 @@ class GriddingNUFFT:
             w = w / np.maximum(back, 1e-12)
 
         return w / w.max()
+
+    def _device_density(self, coords: np.ndarray, like, iterations: int) -> np.ndarray:
+        """"density_weights"' iteration on *like*'s device, over the kernels' plan of *coords*."""
+        import torch
+        plan = self._device_plan(coords, like)
+        (ix, iy, iz), (wx, wy, wz) = plan['bins'], plan['weights']
+        _, ny, nz = tuple(self.grid_size) + (1,) * (3 - self.ndim)
+        cells = ((ix.long()[:, :, None, None] * ny + iy.long()[:, None, :, None]) * nz
+                 + iz.long()[:, None, None, :]).reshape(len(coords), -1)
+        weight = ((wx[:, :, None, None] * wy[:, None, :, None])
+                  * wz[:, None, None, :]).reshape(len(coords), -1)
+
+        w = torch.ones(len(coords), dtype=torch.float64, device=like.device)
+        for _ in range(iterations):
+            # accumulate=True sorts the cells, so the sums do not depend on the run
+            grid = torch.zeros(int(np.prod(self.grid_size)), dtype=torch.float64,
+                               device=like.device)
+            grid.index_put_((cells.reshape(-1),), (w[:, None] * weight).reshape(-1),
+                            accumulate=True)
+            w = w / (grid[cells] * weight).sum(dim=1).clamp(min=1e-12)
+
+        return (w / w.max()).cpu().numpy()
 
 
 #**************************************************************************************************#

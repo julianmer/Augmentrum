@@ -257,6 +257,23 @@ class TestKspaceUndersamplingNufft:
             errs.append(float(np.sqrt(np.mean((np.abs(out) - ref) ** 2)) / np.ptp(ref)))
         assert errs == sorted(errs), f"error should grow with acceleration, got {errs}"
 
+    @pytest.mark.parametrize('impl', ['gridding', 'torchkbnufft'])
+    @pytest.mark.parametrize('trajectory', ['stack_of_eccentric', 'radial_2d'])
+    def test_fully_sampled_returns_the_image(self, trajectory, impl):
+        """
+        Fully sampled, the density-compensated adjoint gives the image back.
+
+        Without the Pipe weights the trajectory's dense centre low-passed every
+        reconstruction: at acceleration 1 the disc came back 0.45 (eccentric)
+        and 0.67 (radial) off, with them 0.17 and 0.23.
+        """
+        from augmentrum.sampling import KspaceUndersampling
+        vol = self._volume()
+        us = KspaceUndersampling(ksp_mode='nufft', trajectory=trajectory, acceleration_factor=1.0,
+                                 us_seed=0, traj_params={'n_shots': 64}, nufft_impl=impl)
+        out, _ = us.process_tensor(vol.copy())
+        assert np.linalg.norm(out - vol) / np.linalg.norm(vol) < 0.3
+
     def test_works_for_a_3d_trajectory(self):
         """kz is sampled by the trajectory rather than joining the coil slot."""
         out, us = self._run(trajectory='cones_3d')

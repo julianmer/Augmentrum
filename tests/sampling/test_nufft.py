@@ -290,3 +290,14 @@ class TestDeviceKernels:
             assert float((kernel - steps).abs().max() / steps.abs().max()) < 2e-6
         trip = lambda: fused.adjoint(fused.forward(image, coords), coords)
         assert torch.equal(trip(), trip())
+
+    @pytest.mark.parametrize('im_size, n_samples', [((24, 20, 16), 3001), ((32, 24), 1200)])
+    def test_density_weights_match_numpy_and_repeat(self, im_size, n_samples):
+        coords = np.random.default_rng(2).uniform(-0.5, 0.5, (n_samples, len(im_size)))
+        like = torch.zeros(1, dtype=torch.complex64, device='cuda')
+        nufft = GriddingNUFFT(im_size)
+        if nufft._kernels(like) is None:
+            pytest.skip("Triton not installed")
+        on_device = nufft.density_weights(coords, like=like)
+        np.testing.assert_allclose(on_device, nufft.density_weights(coords), rtol=1e-12)
+        assert np.array_equal(on_device, nufft.density_weights(coords, like=like))
