@@ -478,6 +478,33 @@ class Mix(nn.Module):
 
 
 #**************************************************************************************************#
+#                                        Class InstanceNorm                                        #
+#**************************************************************************************************#
+#                                                                                                  #
+# InstanceNorm3d without affine, as a plain reduction over the spatial axes.                       #
+#                                                                                                  #
+#**************************************************************************************************#
+class InstanceNorm(nn.Module):
+    """
+    InstanceNorm3d without affine, as a plain reduction over the spatial axes.
+
+    torch's instance_norm folds batch and channels into one axis, which
+    copies a channels-last input to the contiguous layout first. Reduced in
+    place, the norms keep the layer channels-last, where cuDNN convolves
+    without transposing around every convolution. Statistics in float32.
+    Only under torch.compile, which fuses the reduction: eager, torch's own
+    kernel is faster.
+    """
+
+    def forward(self, x):
+        if not torch.compiler.is_compiling():
+            return nn.functional.instance_norm(x)
+        x32 = x.to(torch.promote_types(x.dtype, torch.float32))
+        var, mean = torch.var_mean(x32, dim=(2, 3, 4), correction=0, keepdim=True)
+        return ((x32 - mean) * torch.rsqrt(var + 1e-5)).to(x.dtype)
+
+
+#**************************************************************************************************#
 #                                      Class InterlacerLayer                                       #
 #**************************************************************************************************#
 #                                                                                                  #
@@ -508,14 +535,14 @@ class InterlacerLayer(nn.Module):
         self.mix_k = Mix()
 
         self.img_convs = nn.Sequential(
-            nn.Conv3d(4, features, 3, padding='same'), nn.InstanceNorm3d(features),
+            nn.Conv3d(4, features, 3, padding='same'), InstanceNorm(),
             nn.ReLU(),
-            nn.Conv3d(features, features, 3, padding='same'), nn.InstanceNorm3d(features),
+            nn.Conv3d(features, features, 3, padding='same'), InstanceNorm(),
             nn.ReLU(),
             nn.Conv3d(features, 2, 3, padding='same'),
         )
         self.k_conv_in = nn.Conv3d(2 * k_ch, features, 3, padding='same')
-        self.k_norm = nn.InstanceNorm3d(features)
+        self.k_norm = InstanceNorm()
         self.k_conv_out = nn.Conv3d(features, k_ch, 3, padding='same')
 
     def forward(self, img_in, k_in, img0, k0, sense):
@@ -1248,11 +1275,11 @@ def fetch_all(args):
 
 #: Speed options --tune compares on the heaviest condition.
 TUNE_VARIANTS = {
-    'fp32':                       ['--no-amp', '--no-compile'],
-    'bf16':                       ['--no-compile'],
-    'bf16+channels-last':         ['--channels-last', '--no-compile'],
-    'bf16+compile':               [],
-    'bf16+channels-last+compile': ['--channels-last'],
+    'fp32':                       ['--no-amp', '--no-compile', '--no-channels-last'],
+    'bf16':                       ['--no-compile', '--no-channels-last'],
+    'bf16+channels-last':         ['--no-compile'],
+    'bf16+compile':               ['--no-channels-last'],
+    'bf16+channels-last+compile': [],
 }
 
 
@@ -1926,8 +1953,8 @@ def main():
     parser.add_argument('--pool-on-gpu', action=argparse.BooleanOptionalAction, default=None,
                         help="Keep the training subjects on the GPU (0.4 GB each). "
                              "Default: when it has room for them and 16 GB more.")
-    parser.add_argument('--channels-last', action='store_true',
-                        help="Channels-last 3-D layout for the convolutions.")
+    parser.add_argument('--channels-last', action=argparse.BooleanOptionalAction, default=True,
+                        help="Channels-last 3-D layout: cuDNN convolves without transposing.")
     parser.add_argument('--prefetch', type=int, default=2,
                         help="Batches built ahead in a background thread.")
     parser.add_argument('--val-on-cpu', action='store_true',
