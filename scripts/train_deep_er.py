@@ -62,6 +62,7 @@ from augmentrum.core import Backend
 from augmentrum.core.base_module import BaseModule, Tap
 from augmentrum.core.pipeline import AugmentationPipeline
 from augmentrum.dataset.mrsi_challenge import MRSIChallengeData, MRSIChallengeDataModule
+from augmentrum.processing.domain import Domain
 from augmentrum.sampling.coil_sampling import Birdcage, CoilSampler
 from augmentrum.sampling.kspace_sampling import KspaceUndersampling
 
@@ -254,6 +255,9 @@ class TimepointSampler(BaseModule):
     """
 
     SUPPORTED_BACKENDS = (Backend.PYTORCH,)
+    # FID timepoints: without it the planner leaves the spectra Macromolecules
+    # works on in place, and this keeps frequency bins instead
+    DOMAIN = Domain(spectral='time')
 
     def __init__(self, n_timepoints=None, evenly: bool = False, seed=None):
         super().__init__(seed=seed)
