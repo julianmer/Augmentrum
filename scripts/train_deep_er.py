@@ -445,10 +445,12 @@ def k_to_img(k, sense):
     The inverse companion of "img_to_k": inverse FFT per coil, then the
     conjugate-sensitivity combination.
     """
-    n_coils = k.shape[1] // 2
+    n_coils, grid = k.shape[1] // 2, k.shape[-3:]
     kr = k.reshape(k.shape[0], 2, n_coils, *k.shape[2:]).permute(0, 2, 3, 4, 5, 1)
-    kr = kr * checkerboard(k.shape[-3:], k.device, signed=True)[..., None]
-    coils = torch.fft.ifftn(torch.view_as_complex(kr.contiguous()), dim=(-3, -2, -1))
+    # the 1/N of the inverse rides on the sign multiply, not a pass of its own
+    kr = kr * (checkerboard(grid, k.device, signed=True) / grid.numel())[..., None]
+    coils = torch.fft.ifftn(torch.view_as_complex(kr.contiguous()), dim=(-3, -2, -1),
+                            norm='forward')
     cr, ci = torch.view_as_real(coils).unbind(-1)                  # (B, C, X, Y, Z)
     sr, si = sense[..., 0], sense[..., 1]
     return torch.stack(((cr * sr + ci * si).sum(dim=1),
