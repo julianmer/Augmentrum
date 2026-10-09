@@ -1939,10 +1939,11 @@ def main():
                         help="Debug: truncate the FID to this many points first.")
     parser.add_argument('--acc-low', type=float, default=1.0)
     parser.add_argument('--acc-high', type=float, default=6.0)
-    parser.add_argument('--noise-sigma-k', type=float, default=4.4e-3,
-                        help="k-space noise; 4.4e-3 gives the coil-combined input the "
-                             "challenge's own noise, SD 1.0e-3 per point (Sub1, outside "
-                             "the brain, measured at acceleration 1).")
+    parser.add_argument('--noise-sigma-k', type=float, default=5.8e-4,
+                        help="k-space noise; 5.8e-4 gives the coil-combined input the "
+                             "challenge's own noise, SD 1.0e-3 per real and imaginary part "
+                             "(TestSub1, all - meta - mm - baseline - nuisance; measured at "
+                             "acceleration 1).")
     parser.add_argument('--lr', type=float, default=1e-5)
     parser.add_argument('--steps', type=int, default=20_000,
                         help="Training steps per run (one pull of 4 timepoints each).")
