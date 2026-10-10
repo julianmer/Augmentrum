@@ -3889,9 +3889,6 @@ class KspaceUndersampling(BaseModule):
                 coil-major (see "_apply_per_coil"). Noise and the output
                 scale are then per element, as if each went through alone.
         """
-        from augmentrum.processing.interpolating import LinearInterpolator
-        from augmentrum.sampling.kspace_reconstructor import GriddingNUFFT
-
         # Gridding takes the trajectory in [-0.5, 0.5) per axis; host arrays in double, cast to
         # the data's precision where they meet it
         coords = (pts / (2.0 * kmax[None, :])).astype(np.float64)
@@ -3912,11 +3909,7 @@ class KspaceUndersampling(BaseModule):
             im_size = (nx, ny, nz)
             stack = ops.transpose(vol, (0, 4, 1, 2, 3))
 
-        # 'interp' is the same operator read with a cheaper interpolator
-        interpolator = LinearInterpolator() if self.nufft_impl == 'interp' else None
-        nufft = GriddingNUFFT(im_size, self.nufft_osf, interpolator=interpolator)
-        gridder = (GriddingNUFFT(im_size, self.nufft_osf)
-                   if interpolator is not None else nufft)
+        nufft, gridder = self._gridders(im_size)
 
         # Without the Pipe weights the adjoint weights k-space by how densely
         # the trajectory visits it, a strong low-pass even when fully sampled
@@ -3934,12 +3927,12 @@ class KspaceUndersampling(BaseModule):
                                         * shift[None, :]).sum(axis=1)
                 weights = weights * np.exp(1j * phase)
 
-        recon, gauge, noise = [], [], None
+        recon, noise = [], None
         for b in range(n_batch):
             plane = ops.reshape(stack[b], (-1,) + im_size)
             # Measure with the chosen interpolator, always reconstruct with
             # Kaiser-Bessel: the point is to study the forward approximation.
-            kdata = clean = nufft.forward(plane, coords)
+            kdata = nufft.forward(plane, coords)
             if self.noise_sigma_k and coils == 1:
                 kdata = self._add_kspace_noise(kdata)
             elif self.noise_sigma_k:
@@ -3951,8 +3944,6 @@ class KspaceUndersampling(BaseModule):
             if not dual:
                 w = ops.cast_like(ops.match_backend(dcf[None, :], kdata), kdata)
                 recon.append(gridder.adjoint(kdata * w, coords))
-                if self.noise_sigma_k:
-                    gauge.append(gridder.adjoint(clean * w, coords))
                 continue
 
             weighted = kdata * ops.cast_like(
@@ -3978,12 +3969,10 @@ class KspaceUndersampling(BaseModule):
 
         out = unfold(recon)
 
-        # The dual path is already unit-calibrated against the identity pair;
-        # matching the input's global norm again would erase |det A|.
+        # The dual path is already unit-calibrated against the identity pair.
         if not dual:
-            gauge = unfold(gauge) if gauge else out
-            out = (self._match_scale(out, vol, gauge) if coils == 1 else
-                   self._match_scale_per_coil(out, vol, coils, gauge))
+            out = out * ops.cast_like(self._operator_gain(nufft, gridder, dcf, coords, im_size,
+                                                          stack), out)
 
         # NumPy's FFT computes in double whatever it is handed, so on that
         # backend the reconstruction comes back complex128. A pipeline stage
@@ -4042,18 +4031,47 @@ class KspaceUndersampling(BaseModule):
         out = ops.cast_like(out, _torch.zeros((), dtype=dtype))
         return ops.to_numpy(out) if was_numpy else out
 
+    def _gridders(self, im_size):
+        """
+        The gridding operators of this geometry, kept across calls with their plans: a
+        training set revisits its trajectories, and the operators' plans and density weights
+        are theirs to keep. 'interp' is the same operator read with a cheaper interpolator,
+        reconstructing with Kaiser-Bessel as always: the point is to study the forward
+        approximation.
+        """
+        from augmentrum.processing.interpolating import LinearInterpolator
+        from augmentrum.sampling.kspace_reconstructor import GriddingNUFFT
+        key = (tuple(im_size), self.nufft_osf, self.nufft_impl)
+        gridders = self.__dict__.setdefault('_gridders_', {})
+        if key not in gridders:
+            interpolator = LinearInterpolator() if self.nufft_impl == 'interp' else None
+            nufft = GriddingNUFFT(im_size, self.nufft_osf, interpolator=interpolator)
+            gridders[key] = (nufft, GriddingNUFFT(im_size, self.nufft_osf)
+                             if interpolator is not None else nufft)
+        return gridders[key]
+
     @staticmethod
-    def _match_scale_per_coil(out, vol, coils: int, gauge):
-        """"_match_scale" for each element of a folded array, coil-major last axis."""
-        shape = tuple(int(n) for n in ops.shape(out))
-        split = shape[:4] + (coils, shape[4] // coils)
-        out_c, vol_c = ops.reshape(out, split), ops.reshape(vol, split)
-        axes = (0, 1, 2, 3, 5)
-        num = ops.sqrt(ops.sum(ops.abs(vol_c) ** 2, axis=axes, keepdims=True))
-        den = ops.sqrt(ops.sum(ops.abs(ops.reshape(gauge, split)) ** 2, axis=axes,
-                               keepdims=True))
-        scale = num / ops.where(den > 1e-12, den, den * 0 + 1e-12)
-        return ops.reshape(out_c * ops.cast_like(scale, out_c), shape)
+    def _operator_gain(nufft, gridder, dcf, coords, im_size, like):
+        """
+        The factor that returns the density-compensated adjoint to the input's units, read off
+        a smooth reference through the same operator: a Gaussian of a tenth of the field of
+        view, whose k-space sits in the centre every trajectory samples. Read off the data, the
+        norm would re-inflate the k-space the trajectory misses, and noise in the data would
+        shrink the signal to make room for itself.
+        """
+        plan = gridder._device_plan(coords, like) if gridder._kernels(like) is not None else {}
+        if 'gain' in plan:
+            return plan['gain']
+        axes = np.meshgrid(*[np.arange(n) - n / 2.0 for n in im_size], indexing='ij')
+        ref = np.exp(-sum((a / (n / 10.0)) ** 2 for a, n in zip(axes, im_size)) / 2.0)
+        ref = ops.cast_like(ops.match_backend(ref[None], like), like)
+        kref = nufft.forward(ref, coords)
+        back = gridder.adjoint(kref * ops.cast_like(ops.match_backend(dcf[None, :], kref), kref),
+                               coords)
+        num = ops.sqrt(ops.sum(ops.abs(ref) ** 2))
+        den = ops.sqrt(ops.sum(ops.abs(back) ** 2))
+        plan['gain'] = num / ops.where(den > 1e-12, den, den * 0 + 1e-12)
+        return plan['gain']
 
     @staticmethod
     def _match_scale(out, vol, gauge):
