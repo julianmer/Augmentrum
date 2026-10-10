@@ -129,8 +129,10 @@ RANGES = dict(
     lb_hz=(0.0, 4.0),                 # broadening ON TOP of the sim's linewidth
     shift_hz=(-10.0, 10.0),           # B0 drift
     mm_scale=(0.05, 0.25),            # macromolecule amplitude vs signal max
-    sigma=(0.0, 2.0e-3),              # --noise: extra noise per coil, SD per point
 )
+#: --noise: extra noise on the input alone, drawn per pull, as the SD per image component it
+#: gives the coil-combined input (put into k-space by K_PER_IMAGE_SIGMA).
+INPUT_NOISE = (0.0, 2.0e-3)
 
 #: Fixed validation and test inputs: one root seed, one acceleration each and
 #: evenly spaced timepoints, independent of the run's own seed and condition.
@@ -143,6 +145,8 @@ EVALUATION = dict(
 #: The challenge's own noise per point and coil, real and imaginary each (TestSub1: all - meta -
 #: mm - baseline - nuisance): --target noisy puts it in the coil images.
 ACQUISITION_SIGMA = 1.0e-3
+#: k-space noise per image-component noise through the reconstruction: 5.8e-4 gives 1.0e-3.
+K_PER_IMAGE_SIGMA = 0.58
 
 
 #: One subject's metabolite signal as complex64: 64 x 64 x 32 x 384 x 8 bytes.
@@ -166,7 +170,6 @@ def build_pipeline(args, device, keep_all: bool = False) -> AugmentationPipeline
     """
     kinds = SPATIAL_KINDS if args.spatial == 'all' else \
         (() if args.spatial == 'none' else (args.spatial,))
-    target_noise = acquisition_noise(args)
 
     steps = [
         ToDevice(device),                                         # 0. one volume to the GPU
@@ -175,29 +178,21 @@ def build_pipeline(args, device, keep_all: bool = False) -> AugmentationPipeline
         *([SpatialTransforms(kinds, **SPATIAL)] if kinds else []),# 3. augment the object
         CoilSampler(mode='synthesize', n_coils=args.n_coils,      # 4. receive array
                     source=CachedBirdcage(), seed=args.seed),
-        *target_noise,                                            # 5. --target noisy: in both
-        Tap(name='target'),                                       # 6. TARGET frozen here
-        *([Noise(sigma=RANGES['sigma'][1])] if args.noise else []),  # 7. noise, input only
-        kspace_step(args, (args.acc_low + args.acc_high) / 2.0),  # 8. degrade INPUT only
-    ]
+        *acquisition_noise(args),                                 # 5. --target noisy: in both
+        acquisition_step(args, (args.acc_low, args.acc_high)),    # 6. TARGET fully sampled,
+    ]                                                             #    INPUT undersampled
     if args.crop_t:                                               # debug: shorter FID
         steps.insert(1, ZeroFill(target_pts=args.crop_t))
 
-    ranges = dict(RANGES, acceleration_factor=(args.acc_low, args.acc_high))
-    if not args.noise:
-        ranges.pop('sigma')
-    # the acquisition noise keeps its own sigma, not --noise's range
-    pinned = [{'sigma': ACQUISITION_SIGMA} if any(s is n for n in target_noise) else {}
-              for s in steps]
-    return AugmentationPipeline(steps, user_kwargs=ranges, step_kwargs=pinned)
+    return AugmentationPipeline(steps, user_kwargs=dict(RANGES))
 
 
 def acquisition_noise(args):
     """
-    --target noisy: the acquisition's own noise in the coil images, before
-    the target is frozen. Deep-ER's target is the fully sampled
-    reconstruction of the same noisy data, so the network undoes the
-    undersampling and leaves the noise; with --target clean it denoises too.
+    --target noisy: the acquisition's own noise in the coil images, so in
+    the target and in the input alike, as in Deep-ER, whose target is the
+    fully sampled reconstruction of the data the input is undersampled
+    from. --target clean puts it into the input's samples only.
     """
     return [Noise(sigma=ACQUISITION_SIGMA)] if args.target == 'noisy' else []
 
@@ -211,28 +206,82 @@ def eval_pipeline(args, device, n_timepoints: int, acc: float, add_mm: bool) -> 
         CoilSampler(mode='synthesize', n_coils=args.n_coils, source=CachedBirdcage()),
         Tap(name='truth'),                    # the noise-free signal, for the figures
         *acquisition_noise(args),
-        Tap(name='target'),                   # scored against what is trained on
-        kspace_step(args, acc, traj_seed=EVALUATION['seed']),
+        acquisition_step(args, acc, traj_seed=EVALUATION['seed']),
     ]
     return AugmentationPipeline(steps)
 
 
-def kspace_step(args, acc: float, traj_seed=None) -> KspaceUndersampling:
+def acquisition_step(args, accelerations, traj_seed=None) -> 'Acquisition':
     """
-    The undersampling step. us_seed does not reach the trajectory, whose
-    shots are placed anew on every call unless it gets a seed of its own:
-    training leaves it free, the fixed sets pin it.
+    The acquisition. Its trajectory is placed anew on every call unless it
+    gets a seed of its own: training leaves it free, the fixed sets pin it.
     """
     trajectory = dict(TRAJECTORIES[args.trajectory])
     if traj_seed is not None and 'traj_params' in trajectory:
         trajectory['traj_params'] = dict(trajectory['traj_params'], seed=traj_seed)
-    return KspaceUndersampling(
+    return Acquisition(
+        accelerations,
+        extra_sigma_k=(INPUT_NOISE[0] * K_PER_IMAGE_SIGMA, INPUT_NOISE[1] * K_PER_IMAGE_SIGMA)
+        if args.noise else (0.0, 0.0),
+        trajectories=0 if traj_seed is not None else args.trajectories,
         ksp_mode='cartesian' if 'trajectory' not in trajectory else args.ksp_mode,
-        acceleration_factor=acc,
         noise_sigma_k=0.0 if args.target == 'noisy' else args.noise_sigma_k,
         pixdim=MRSIChallengeDataModule.VOXEL_MM,
         **trajectory,
     )
+
+
+#**************************************************************************************************#
+#                                       Class Acquisition                                          #
+#**************************************************************************************************#
+#                                                                                                  #
+# One acquisition, reconstructed fully sampled (the target) and undersampled (the input).          #
+#                                                                                                  #
+#**************************************************************************************************#
+class Acquisition(KspaceUndersampling):
+    """
+    One acquisition, reconstructed fully sampled (the target) and undersampled (the input).
+
+    Deep-ER's target is the fully sampled reconstruction of the data the
+    input is undersampled from: both reconstructions share one trajectory,
+    drawn per call from a bank of *trajectories* seeds (a training set of as
+    many scans; 0 places the circles anew every call) unless the trajectory
+    has a seed of its own. The acceleration is an integer drawn uniformly
+    from *accelerations* (Deep-ER's AF in [1, 6]), or that one value; the
+    dropped shots are drawn anew every call. Noise of the module's own
+    (--target clean, --noise) goes into the input's samples only;
+    *extra_sigma_k* draws --noise's level per call. The target is kept in
+    "last_target_".
+    """
+
+    def __init__(self, accelerations, extra_sigma_k=(0.0, 0.0), trajectories: int = 0,
+                 **kwargs):
+        super().__init__(acceleration_factor=1.0, **kwargs)
+        self.accelerations = accelerations
+        self.extra_sigma_k = extra_sigma_k
+        self.trajectories = trajectories
+        self.last_target_ = None
+
+    def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
+        rng = self.rng.numpy_rng()
+        if self.trajectories:
+            self.traj_params['seed'] = int(rng.integers(self.trajectories))
+        kwargs = dict(kwargs, acquisition_seed=self._acquisition_seed(kwargs))
+        if np.isscalar(self.accelerations):
+            acc = float(self.accelerations)
+        else:
+            lo, hi = (int(round(a)) for a in self.accelerations)
+            acc = float(rng.integers(lo, hi + 1))
+        sigma_k = self.noise_sigma_k
+        self.acceleration_factor, self.noise_sigma_k = 1.0, 0.0
+        try:
+            self.last_target_, _ = super().process_tensor(data_array, water_array, backend,
+                                                          **kwargs)
+            self.acceleration_factor = acc
+            self.noise_sigma_k = sigma_k + float(rng.uniform(*self.extra_sigma_k))
+            return super().process_tensor(data_array, water_array, backend, **kwargs)
+        finally:
+            self.acceleration_factor, self.noise_sigma_k = 1.0, sigma_k
 
 
 #**************************************************************************************************#
@@ -494,7 +543,7 @@ class Mix(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.weight = nn.Parameter(torch.zeros(1))
+        self.weight = nn.Parameter(torch.rand(1))
 
     def forward(self, a, b):
         w = torch.sigmoid(self.weight)
@@ -541,9 +590,11 @@ class InterlacerLayer(nn.Module):
     then convolve.
 
     Per the paper: the image branch runs three 3x3x3 conv blocks (2-64-2
-    features, InstanceNorm, ReLU); the k-space branch one block of 64 filters
-    with the three-piece activation. Each branch also sees the network inputs
-    again, concatenated before the convolutions.
+    features), the k-space branch one block of 64 filters, which are the
+    k-space channels themselves. A block is Deep-ER's: the norm, then the
+    convolution, then the activation (ReLU in image space, three-piece in
+    k-space), on every block, the last included. Each branch also sees the
+    network inputs again, concatenated before the convolutions.
 
     Under autocast the convolutions run in reduced precision; their outputs
     come back in float32, so the domain transfers (FFTs) and the residual
@@ -559,15 +610,12 @@ class InterlacerLayer(nn.Module):
         self.mix_k = Mix()
 
         self.img_convs = nn.Sequential(
-            nn.Conv3d(4, features, 3, padding='same'), InstanceNorm(),
-            nn.ReLU(),
-            nn.Conv3d(features, features, 3, padding='same'), InstanceNorm(),
-            nn.ReLU(),
-            nn.Conv3d(features, 2, 3, padding='same'),
+            InstanceNorm(), nn.Conv3d(4, features, 3, padding='same'), nn.ReLU(),
+            InstanceNorm(), nn.Conv3d(features, features, 3, padding='same'), nn.ReLU(),
+            InstanceNorm(), nn.Conv3d(features, 2, 3, padding='same'), nn.ReLU(),
         )
-        self.k_conv_in = nn.Conv3d(2 * k_ch, features, 3, padding='same')
         self.k_norm = InstanceNorm()
-        self.k_conv_out = nn.Conv3d(features, k_ch, 3, padding='same')
+        self.k_conv = nn.Conv3d(2 * k_ch, k_ch, 3, padding='same')
 
     def forward(self, img_in, k_in, img0, k0, sense):
         img_mixed = self.mix_img(img_in, k_to_img(k_in, sense))
@@ -578,9 +626,8 @@ class InterlacerLayer(nn.Module):
         img_out = self.img_convs(
             torch.cat((img_mixed, img0), dim=1).contiguous(memory_format=layout))
 
-        k_feat = piecewise_k_activation(self.k_norm(self.k_conv_in(
+        k_out = piecewise_k_activation(self.k_conv(self.k_norm(
             torch.cat((k_mixed, k0), dim=1).contiguous(memory_format=layout))))
-        k_out = self.k_conv_out(k_feat)
 
         return img_out.float(), k_out.float()
 
@@ -673,7 +720,7 @@ def make_loss(use_ssim: bool = True):
     late in the FID, and single timepoints then reach losses of ~1e5.
     """
     def loss_func(reco, target, mask):
-        norm = target.norm(dim=1).flatten(1).amax(dim=1).clamp(min=1e-12).view(-1, 1, 1, 1, 1)
+        norm = target.flatten(1).amax(dim=1).clamp(min=1e-12).view(-1, 1, 1, 1, 1)
         reco = reco * mask[:, None] / norm
         target = target * mask[:, None] / norm
         loss = nn.functional.mse_loss(reco, target)
@@ -745,10 +792,11 @@ def pulls(aug, split: str, device):
     pipe = aug.pipelines[split]
     coil = next(s for s in pipe.steps if isinstance(s, CoilSampler))
     sampler = next(s for s in pipe.steps if isinstance(s, TimepointSampler))
-    for x, y, *truth in aug.dataloader(split=split, framework='pytorch'):
+    acquisition = next(s for s in pipe.steps if isinstance(s, Acquisition))
+    for x, *truth in aug.dataloader(split=split, framework='pytorch'):
         sense = coil.source.last_maps(device)
         x = x[0].to(device, torch.cfloat)                          # (X, Y, Z, n, C)
-        y = y[0].to(device, torch.cfloat)
+        y = acquisition.last_target_[0].to(device, torch.cfloat)
         truth = truth[0][0].to(device, torch.cfloat) if truth else None
         yield make_batch(x, y, sense, truth), sampler.last_timepoints_
 
@@ -761,7 +809,7 @@ def build_train_data(args, device):
         splits={'train': subjects(args)['train']},
         batch_size=1,                      # one volume per pull; batching is over timepoints
         pipelines={'train': build_pipeline(args, device)},
-        outputs={'train': ('data', 'target')},
+        outputs={'train': ('data',)},
         modes={'train': 'on-the-fly'},
         backend='pytorch', volatile=True, seed=args.seed,
         # the whole pool on the GPU skips the copy per pull
@@ -798,7 +846,7 @@ def fixed_set(args, device, split: str, names, acc: float, n_timepoints: int):
         splits={split: tuple(names)},
         batch_size=1,
         pipelines={split: eval_pipeline(args, device, n_timepoints, acc, add_mm=not is_test)},
-        outputs={split: ('data', 'target', 'truth')},
+        outputs={split: ('data', 'truth')},
         modes={split: 'fixed'},
         backend='pytorch', volatile=True, seed=EVALUATION['seed'],
     )
@@ -872,7 +920,7 @@ def preview(args):
     aug = MRSIChallengeData(
         args.data_dir, signal='clean', splits={'train': subjects(args)['train'][:1]},
         batch_size=1, pipelines={'train': build_pipeline(args, 'cpu', keep_all=True)},
-        outputs={'train': ('data', 'target')}, modes={'train': 'on-the-fly'},
+        outputs={'train': ('data',)}, modes={'train': 'on-the-fly'},
         backend='pytorch', volatile=True, seed=args.seed,
     )
     data, _ = aug.splits['train']
@@ -893,7 +941,7 @@ def preview(args):
         print(f"  SpatialTransforms {spatial.kinds}: {spatial.aug_specs_[0]}")
 
     x = out.get_data(Backend.PYTORCH)[0].to(torch.cfloat)         # (X, Y, Z, T, C)
-    y = taps['target'][0].get_data(Backend.PYTORCH)[0].to(torch.cfloat)
+    y = next(s for s in pipe.steps if isinstance(s, Acquisition)).last_target_[0].to(torch.cfloat)
     raw = torch.as_tensor(np.asarray(subject[:]), dtype=torch.cfloat)  # (X, Y, Z, T)
 
     coil = next(s for s in pipe.steps if isinstance(s, CoilSampler))
@@ -1738,8 +1786,9 @@ def reconstruct(runs: dict, subject: str, track: str, acc: float, device, chunk:
         nii = aug.splits[split][0].nifti_list[0]
         n_total, sw, sf = nii.shape[3], 1.0 / nii.dwelltime, nii.spectrometer_frequency[0]
         coil = next(s for s in aug.pipelines[split].steps if isinstance(s, CoilSampler))
-        x, y, truth = next(iter(aug.dataloader(split=split, framework='pytorch')))
+        x, truth = next(iter(aug.dataloader(split=split, framework='pytorch')))
         sense = torch.as_tensor(coil.last_maps_, dtype=torch.cfloat, device=device)
+        y = next(s for s in aug.pipelines[split].steps if isinstance(s, Acquisition)).last_target_
         x, y, truth = x[0], y[0], truth[0]
         for c in range(0, x.shape[3], chunk):
             at = lambda v: v[:, :, :, c:c + chunk].to(device, torch.cfloat)
@@ -1952,7 +2001,7 @@ def main():
     parser.add_argument('--spatial', choices=('none',) + SPATIAL_KINDS + ('all',),
                         default=None, help="Spatial transform(s) on top of the arm (default none).")
     parser.add_argument('--noise', action='store_true',
-                        help="Extra noise per coil on the input, level drawn per batch.")
+                        help="Extra noise on the input alone, level drawn per pull (INPUT_NOISE).")
     parser.add_argument('--trajectory', choices=sorted(TRAJECTORIES),
                         default='eccentric-stack')
     parser.add_argument('--ksp-mode', choices=['nufft', 'gridded'], default='nufft',
@@ -1970,8 +2019,12 @@ def main():
                         help="FID timepoints per batch (one volume each pull).")
     parser.add_argument('--crop-t', type=int, default=None,
                         help="Debug: truncate the FID to this many points first.")
-    parser.add_argument('--acc-low', type=float, default=1.0)
-    parser.add_argument('--acc-high', type=float, default=6.0)
+    parser.add_argument('--trajectories', type=int, default=19,
+                        help="Training acquisitions come from a bank of this many trajectories, "
+                             "like scans of as many subjects; 0 places the circles anew every pull.")
+    parser.add_argument('--acc-low', type=int, default=1,
+                        help="Accelerations are integers drawn uniformly in [low, high].")
+    parser.add_argument('--acc-high', type=int, default=6)
     parser.add_argument('--noise-sigma-k', type=float, default=5.8e-4,
                         help="k-space noise; 5.8e-4 gives the coil-combined input the "
                              "challenge's own noise, SD 1.0e-3 per real and imaginary part "
