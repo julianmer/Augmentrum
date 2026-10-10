@@ -1228,6 +1228,9 @@ class Eccentric2D(Trajectory):
             non-overlapping count).
         radius_frac : float
             Circle radius as a fraction of kmax (default: 0.25).
+        disk_frac : float
+            Radius of the disk the circles cover, as a fraction of kmax
+            (default: 1.0); a partition of a spherical stack covers less.
         center_frac : float
             Fraction of circles constrained to pass through the k-space center
             (default: 0.15).
@@ -1244,6 +1247,7 @@ class Eccentric2D(Trajectory):
 
         n_shots = int(params.get("n_shots", 2 * ny))
         radius_frac = float(params.get("radius_frac", 0.25))
+        disk_frac = float(params.get("disk_frac", 1.0))
         center_frac = float(params.get("center_frac", 0.15))
         rng = np.random.default_rng(params.get("seed"))
 
@@ -1259,7 +1263,7 @@ class Eccentric2D(Trajectory):
         angle_c = rng.uniform(0.0, 2.0 * math.pi, n_center)
         centers_c = radius_frac * np.stack([np.cos(angle_c), np.sin(angle_c)], axis=1)
 
-        r_free = (1.0 - radius_frac) * np.sqrt(rng.uniform(0.0, 1.0, n_free))
+        r_free = max(disk_frac - radius_frac, 0.0) * np.sqrt(rng.uniform(0.0, 1.0, n_free))
         angle_f = rng.uniform(0.0, 2.0 * math.pi, n_free)
         centers_f = np.stack([r_free * np.cos(angle_f), r_free * np.sin(angle_f)], axis=1)
 
@@ -2301,6 +2305,11 @@ class StackOfEccentric(StackOf):
     and the meta carries the concatenated "center_crossing" flags, so the
     'center_crossing' undersampling scheme accelerates each partition exactly
     as the prospective ECCENTRIC acquisition does.
+
+    With "spherical" the stack covers a sphere instead of a cylinder: each
+    partition's disk shrinks to sqrt(1 - (kz / kz_max)^2) of kmax and its
+    circle count with the disk's area, "n_shots" being the central
+    partition's (the 3-D ECCENTRIC of Klauser et al.).
     """
 
     NAME = "stack_of_eccentric"
@@ -2323,10 +2332,19 @@ class StackOfEccentric(StackOf):
         kz_seeds = (np.random.default_rng(seed).integers(0, 2 ** 31 - 1, kz_positions.size)
                     if seed is not None else [None] * kz_positions.size)
 
+        spherical = bool(params.get("spherical", False))
+        n_shots = int(params.get("n_shots", 2 * ny))
+        radius_frac = float(params.get("radius_frac", 0.25))
+        kz_extent = max(abs(kz_positions).max(), 1e-12)
+
         all_shots, crossing = [], []
         inplane_meta = None
         for kz_val, kz_seed in zip(kz_positions, kz_seeds):
             kz_params = {**params, "seed": None if kz_seed is None else int(kz_seed)}
+            if spherical:
+                disk = float(np.sqrt(max(1.0 - (kz_val / kz_extent) ** 2, 0.0)))
+                kz_params.update(n_shots=max(1, int(round(n_shots * disk ** 2))),
+                                 disk_frac=max(disk, radius_frac))
             shots2d, inplane_meta = Eccentric2D._build(geom2d, kz_params, like)
             crossing.append(inplane_meta["center_crossing"])
             shots2d = ops.stack(shots2d)
