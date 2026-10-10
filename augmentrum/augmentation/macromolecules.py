@@ -613,6 +613,11 @@ class Macromolecules(BaseModule):
         Pass a (min, max) range to Augmentrum to draw it per sample.
     source_params : dict
         Forwarded to the source's constructor when *mm_source* is a name.
+    match_phase : bool
+        Turn the profile to each trace's own zero-order phase (the angle of
+        its first FID point), so the MM shares the receiver phase with the
+        metabolites, and read the amplitude reference off the spectrum in
+        that phase (default True). False adds it in absorption phase as is.
 
     A randomizable source (jittered, semi-parametrized) is drawn afresh for
     every sample of a batch from this module's seeded generator; a fixed one
@@ -648,11 +653,13 @@ class Macromolecules(BaseModule):
     }
 
     def __init__(self, mm_source='parametrized', mm_scale: float = 0.15,
-                 source_params: Optional[dict] = None, seed: Optional[int] = None):
+                 source_params: Optional[dict] = None, seed: Optional[int] = None,
+                 match_phase: bool = True):
         """Initialize the module; see the class docstring for the parameters."""
         super().__init__()
 
         self.mm_scale = mm_scale
+        self.match_phase = match_phase
         if isinstance(mm_source, MMSource):
             self.source = mm_source
         elif mm_source in self.SOURCES:
@@ -727,15 +734,25 @@ class Macromolecules(BaseModule):
         kernels = device_kernels(spec) if ndim > 1 else None
         if kernels is not None:
             # the same arithmetic in one launch: each row's peak, its amplitude, the profile added
-            return kernels.macromolecules(spec, *self._kernel_inputs(profiles, batch, spec)), \
-                water_array
+            return kernels.macromolecules(spec, *self._kernel_inputs(profiles, batch, spec),
+                                          match_phase=self.match_phase), water_array
         if on_cuda(profiles):
             unit = profiles.reshape((batch,) + (1,) * (ndim - 2) + (n_points,))
         else:
             unit = batch_profile(profiles, ndim)
 
-        amp_ref = ops.amax(ops.abs(ops.real(spec)), axis=-1, keepdims=True)
+        # each trace's zero-order phase as a unit phasor (zero for an empty trace)
+        phasor = None
+        if self.match_phase:
+            total = ops.sum(spec, axis=-1, keepdims=True)
+            size = ops.abs(total)
+            phasor = total / ops.cast_like(ops.where(size > 0, size, size * 0 + 1), total)
+            spec_in_phase = spec * ops.conj(phasor)
+        amp_ref = ops.amax(ops.abs(ops.real(spec if phasor is None else spec_in_phase)),
+                           axis=-1, keepdims=True)
         amp = per_sample_factor(self.mm_scale, ndim, amp_ref) * amp_ref
+        if phasor is not None:
+            amp = ops.cast_like(amp, phasor) * phasor
         mm_add = ops.cast_like(to_backend(unit, spec), spec) * ops.cast_like(amp, spec)
 
         return spec + mm_add, water_array

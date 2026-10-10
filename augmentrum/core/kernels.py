@@ -1635,20 +1635,32 @@ def semi_parametrized(params, taps, consts, batch, n):
 
 @triton.jit
 def add_mm_kernel(spec_ptr, unit_ptr, scale_ptr, out_ptr, N, PER_SAMPLE, UNIT_ROW,
-                  ROW: tl.constexpr, BLOCK: tl.constexpr):
+                  MATCH: tl.constexpr, ROW: tl.constexpr, BLOCK: tl.constexpr):
     """
     One program per (row, block of points) of the complex64 spectra *spec* (B * PER_SAMPLE, N):
     the row plus its sample's unit profile (UNIT_ROW values after the previous sample's, 0 when
     all share one) cast to complex64, times the sample's scale in float32 and the row's peak
     |real|, the product rounded as torch's: fma(a_re, b_re, -a_im b_im) + i fma(a_re, b_im,
-    a_im b_re).
+    a_im b_re). With MATCH the row's zero-order phase (its sum's) turns the profile and the
+    peak is read in that phase.
     """
     r = tl.program_id(0)
     b = r // PER_SAMPLE
     row = spec_ptr + r.to(tl.int64) * N * 2
     i = tl.arange(0, ROW)
-    peak = tl.max(tl.abs(tl.load(row + i * 2, mask=i < N, other=0.0)), axis=0)
+    all_re = tl.load(row + i * 2, mask=i < N, other=0.0)
+    if MATCH:
+        all_im = tl.load(row + i * 2 + 1, mask=i < N, other=0.0)
+        sum_re, sum_im = tl.sum(all_re, axis=0), tl.sum(all_im, axis=0)
+        size = tl.sqrt(sum_re * sum_re + sum_im * sum_im)
+        size = tl.where(size > 0, size, 1.0)
+        c, s = sum_re / size, sum_im / size
+        peak = tl.max(tl.abs(all_re * c + all_im * s), axis=0)
+    else:
+        c, s = 1.0, 0.0
+        peak = tl.max(tl.abs(all_re), axis=0)
     amp = tl.load(scale_ptr + b).to(tl.float32) * peak
+    a_re, a_im = amp * c, amp * s
     j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     inside = (j < N)[:, None]
     q = tl.arange(0, 2)
@@ -1657,16 +1669,17 @@ def add_mm_kernel(spec_ptr, unit_ptr, scale_ptr, out_ptr, N, PER_SAMPLE, UNIT_RO
                 other=0.0)
     u_re, u_im = tl.split(u.to(tl.float32))
     tl.store(out_ptr + (r.to(tl.int64) * N + j[:, None]) * 2 + q[None, :],
-             tl.join(s_re + tl.fma(u_re, amp, -(u_im * 0.0)), s_im + tl.fma(u_re, 0.0, u_im * amp)),
+             tl.join(s_re + tl.fma(u_re, a_re, -(u_im * a_im)),
+                     s_im + tl.fma(u_re, a_im, u_im * a_re)),
              mask=inside)
 
 
-def macromolecules(spec, scale, units):
+def macromolecules(spec, scale, units, match_phase=True):
     """
     "Macromolecules.process_tensor" on complex64 spectra *spec* (B, ..., N): every row plus its
-    sample's unit profile times the sample's *scale* ((B,) float64) and the row's peak |real|.
-    *units*: the profiles, complex128 or float64 (re, im) pairs, a row of N per sample or one
-    for all.
+    sample's unit profile times the sample's *scale* ((B,) float64) and the row's peak |real|,
+    the profile turned to the row's zero-order phase with *match_phase*. *units*: the
+    profiles, complex128 or float64 (re, im) pairs, a row of N per sample or one for all.
     """
     n = spec.shape[-1]
     units = (torch.view_as_real(units) if units.is_complex() else units).reshape(-1, 2 * n)
@@ -1675,7 +1688,8 @@ def macromolecules(spec, scale, units):
     add_mm_kernel[(flat.shape[0], triton.cdiv(n, MM_POINTS))](
         torch.view_as_real(flat), units, scale, torch.view_as_real(out), n,
         flat.shape[0] // scale.shape[0], 2 * n if units.shape[0] > 1 else 0,
-        ROW=triton.next_power_of_2(n), BLOCK=MM_POINTS, enable_fp_fusion=False)
+        MATCH=bool(match_phase), ROW=triton.next_power_of_2(n), BLOCK=MM_POINTS,
+        enable_fp_fusion=False)
     return out.reshape(spec.shape)
 
 

@@ -249,6 +249,22 @@ def test_mm_scale_is_drawn_per_sample_in_a_pipeline():
     assert len(np.unique(np.round(ratio, 6))) == 4
 
 
+@pytest.mark.parametrize('backend', [Backend.NUMPY, Backend.PYTORCH])
+def test_the_added_mm_takes_the_data_phase(backend):
+    """The MM comes in at the trace's zero-order phase with the same amount; match_phase=False
+    adds it in absorption phase."""
+    if backend is Backend.PYTORCH:
+        pytest.importorskip('torch')
+    turn = np.exp(1j * np.radians(130.0))
+    plain = _added(Macromolecules(seed=0), _batch_of(_naa_fid(), 2, backend=backend))
+    turned = _added(Macromolecules(seed=0), _batch_of(_naa_fid() * turn, 2, backend=backend))
+    assert np.allclose(turned, plain * turn, atol=1e-5 * np.abs(plain).max())
+    assert abs(np.degrees(np.angle(turned[0, 0])) - 130.0) < 0.5
+    kept = _added(Macromolecules(seed=0, match_phase=False),
+                  _batch_of(_naa_fid() * turn, 2, backend=backend))
+    assert abs(np.degrees(np.angle(kept[0, 0]))) < 0.5
+
+
 def test_components_land_on_the_fsl_axis():
     """A component at 2.04 ppm shows at 2.04 ppm on an FSL-MRS plot."""
     from fsl_mrs.core import MRS
