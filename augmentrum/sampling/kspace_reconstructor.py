@@ -217,24 +217,34 @@ class GriddingNUFFT:
         key = ('gridding deapodization', self.im_size, kernel.grid_size, kernel.osf, kernel.width)
         return device_axis(key, lambda: self._deapod, like).float()
 
+    #: Plans kept per operator: a training set's bank of trajectories stays while the
+    #: undersampled subsets, each seen once, come and go.
+    PLAN_CACHE = 24
+
     def _device_plan(self, coords: np.ndarray, like) -> dict:
         """
         The kernels' view of *coords* on *like*'s device: per axis the bins "[K, T]" (int32)
         and float64 weights, a 2-D grid with a z axis of one bin of weight 1; and, once built,
-        the spread's CSR over the cells. The last one is kept: forward and adjoint of one
-        acquisition share the coordinates.
+        the spread's CSR over the cells and the density weights. PLAN_CACHE plans are kept,
+        the least used one making room: forward and adjoint of one acquisition share the
+        coordinates, and a training set revisits its trajectories.
         """
         key = (coords.shape, hash(coords.tobytes()), str(like.device))
-        if getattr(self, '_plan', None) is None or self._plan[0] != key:
-            from augmentrum.processing.torch_engine import upload
-            idx, weight = self.interpolator.axis_neighbors(coords)
-            if self.ndim == 2:
-                idx = idx + [np.zeros((len(coords), 1), np.int64)]
-                weight = weight + [np.ones((len(coords), 1))]
-            self._plan = (key, {'bins': [upload(i.astype(np.int32), like.device) for i in idx],
-                                'weights': [upload(w.astype(np.float64), like.device)
-                                            for w in weight]})
-        return self._plan[1]
+        plans = self.__dict__.setdefault('_plans', {})
+        if key in plans:
+            plans[key]['hits'] += 1
+            return plans[key]
+        from augmentrum.processing.torch_engine import upload
+        idx, weight = self.interpolator.axis_neighbors(coords)
+        if self.ndim == 2:
+            idx = idx + [np.zeros((len(coords), 1), np.int64)]
+            weight = weight + [np.ones((len(coords), 1))]
+        if len(plans) >= self.PLAN_CACHE:
+            del plans[min(plans, key=lambda k: plans[k]['hits'])]
+        plans[key] = {'bins': [upload(i.astype(np.int32), like.device) for i in idx],
+                      'weights': [upload(w.astype(np.float64), like.device) for w in weight],
+                      'hits': 0}
+        return plans[key]
 
     def _for_interpolator(self, coords: np.ndarray) -> np.ndarray:
         """
@@ -334,6 +344,8 @@ class GriddingNUFFT:
         """"density_weights"' iteration on *like*'s device, over the kernels' plan of *coords*."""
         import torch
         plan = self._device_plan(coords, like)
+        if ('density', iterations) in plan:
+            return plan[('density', iterations)]
         (ix, iy, iz), (wx, wy, wz) = plan['bins'], plan['weights']
         _, ny, nz = tuple(self.grid_size) + (1,) * (3 - self.ndim)
         cells = ((ix.long()[:, :, None, None] * ny + iy.long()[:, None, :, None]) * nz
@@ -350,7 +362,8 @@ class GriddingNUFFT:
                             accumulate=True)
             w = w / (grid[cells] * weight).sum(dim=1).clamp(min=1e-12)
 
-        return (w / w.max()).cpu().numpy()
+        plan[('density', iterations)] = (w / w.max()).cpu().numpy()
+        return plan[('density', iterations)]
 
 
 #**************************************************************************************************#
