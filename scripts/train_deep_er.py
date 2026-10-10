@@ -90,9 +90,12 @@ from augmentrum.sampling.kspace_sampling import KspaceUndersampling
 TRAJECTORIES = {
     # the published Deep-ER/ECCENTRIC acquisition: 2-D eccentric circles per
     # phase-encoded kz partition, prospective center-crossing acceleration
+    # (Weiser et al. 2025, 2.2: circles of radius kmax/8 on a spherical stack of partitions;
+    # 128 of them, 25 samples each, cover the 64-matrix disk at Nyquist)
     'eccentric-stack': dict(trajectory='stack_of_eccentric',
                             undersampling='center_crossing',
-                            traj_params={'n_shots': 128}),
+                            traj_params={'n_shots': 128, 'radius_frac': 0.125,
+                                         'spherical': True}),
     # true 3-D readouts, undersampled across all three axes
     'cones-3d':  dict(trajectory='cones_3d_rosette', undersampling='shell_based',
                       traj_params={'n_shots': 2048}, undersample_axes=(0, 1, 2)),
@@ -121,6 +124,16 @@ SPATIAL = dict(
     zoom_min=0.9, zoom_max=1.1,
     shear_max=0.05,
 )
+#: Deep-ER's own training augmentation (Weiser et al. 2025, 2.4), the --spatial paul condition:
+#: every pull a rotation of up to 0.3 rad about a random axis, a translation of up to 20 mm per
+#: axis and a scaling of +-20 % per axis.
+PAUL = dict(
+    kinds=('rotation3d', 'translation', 'anisotropic'), prob=1.0,
+    max_random_angle_deg=float(np.degrees(0.3)), translation_mm=20.0,
+    zoom_min=0.8, zoom_max=1.2,
+)
+#: The challenge's matrix, for the translation in millimetres.
+MATRIX = (64, 64, 32)
 
 #: Per-batch sampling ranges — keys match module constructor arguments;
 #: parameters not listed keep their constructor values.
@@ -168,14 +181,18 @@ def build_pipeline(args, device, keep_all: bool = False) -> AugmentationPipeline
     spectral point — so only the drawn ones go through them. keep_all
     passes the whole FID on (the preview).
     """
-    kinds = SPATIAL_KINDS if args.spatial == 'all' else \
-        (() if args.spatial == 'none' else (args.spatial,))
+    if args.spatial == 'paul':
+        spatial = [SpatialTransforms(**PAUL)]
+    else:
+        kinds = SPATIAL_KINDS if args.spatial == 'all' else \
+            (() if args.spatial == 'none' else (args.spatial,))
+        spatial = [SpatialTransforms(kinds, **SPATIAL)] if kinds else []
 
     steps = [
         ToDevice(device),                                         # 0. one volume to the GPU
         *spectral_steps(args.arm, args.seed),                     # 1. augment the spectra
         TimepointSampler(None if keep_all else args.n_timepoints),# 2. keep what is trained on
-        *([SpatialTransforms(kinds, **SPATIAL)] if kinds else []),# 3. augment the object
+        *spatial,                                                 # 3. augment the object
         CoilSampler(mode='synthesize', n_coils=args.n_coils,      # 4. receive array
                     source=CachedBirdcage(), seed=args.seed),
         *acquisition_noise(args),                                 # 5. --target noisy: in both
@@ -369,31 +386,44 @@ class SpatialTransforms(SpatialAugmentations):
     SpatialAugmentations restricted to the chosen transforms.
 
     The draw is the parent's; a transform not chosen is set to identity in
-    each spec, since the affine is built from the values, not the flags. The
-    free 3-D rotation and rot90 are always off (no head turns that way, and
-    the in-plane field of view is not square), and a flip is left-right only.
+    each spec, since the affine is built from the values, not the flags.
+    rot90 is always off (the in-plane field of view is not square), a flip
+    is left-right only, and the free 3-D rotation ('rotation3d', Deep-ER's
+    own) is off unless chosen. A *translation_mm* replaces the parent's
+    fraction of the axis length by millimetres on every axis.
     """
 
     def __init__(self, kinds=SPATIAL_KINDS, prob: float = 0.5,
-                 translation_frac: float = 0.05, max_z_angle_deg: float = 15.0,
+                 translation_frac: float = 0.05, translation_mm: float = None,
+                 max_z_angle_deg: float = 15.0, max_random_angle_deg: float = 0.0,
                  zoom_min: float = 0.9, zoom_max: float = 1.1, shear_max: float = 0.05):
-        super().__init__(dim=3, prob=prob, translation_frac=translation_frac,
-                         max_z_angle_deg=max_z_angle_deg, max_random_angle_deg=0.0,
+        super().__init__(dim=3, prob=prob,
+                         translation_frac=1.0 if translation_mm else translation_frac,
+                         max_z_angle_deg=max_z_angle_deg,
+                         max_random_angle_deg=max_random_angle_deg,
                          zoom_min=zoom_min, zoom_max=zoom_max, shear_max=shear_max,
                          pixdim=MRSIChallengeDataModule.VOXEL_MM, allow_rot90=False)
-        unknown = set(kinds) - set(SPATIAL_KINDS)
+        unknown = set(kinds) - set(SPATIAL_KINDS) - {'rotation3d'}
         if unknown:
             raise ValueError(f"Unknown spatial transforms {sorted(unknown)}.")
         self.kinds = tuple(kinds)
+        self.translation_mm = translation_mm
 
     def sample_augmentations(self, batch_size, pipeline='data', rng=None):
         specs = super().sample_augmentations(batch_size, pipeline=pipeline, rng=rng)
         on = lambda kind, spec, flag: kind in self.kinds and spec[flag]
+        fov = [n * mm for n, mm in zip(MATRIX, MRSIChallengeDataModule.VOXEL_MM)]
         for s in specs:
             if not on('translation', s, 'do_translate'):
                 s.update(do_translate=False, tx=0.0, ty=0.0, tz=0.0)
+            elif self.translation_mm:                 # the parent drew fractions of 1
+                s.update(tx=s['tx'] * self.translation_mm / fov[0],
+                         ty=s['ty'] * self.translation_mm / fov[1],
+                         tz=s['tz'] * self.translation_mm / fov[2])
             if not on('rotation', s, 'do_z_rot'):
                 s.update(do_z_rot=False, z_angle_deg=0.0)
+            if not on('rotation3d', s, 'do_random_csm_rot'):
+                s.update(do_random_csm_rot=False, random_rot_deg=0.0)
             if not on('shear', s, 'do_shear'):
                 s.update(do_shear=False, shear_xy=(0.0, 0.0), shear_z=0.0)
             flip = on('flip', s, 'do_flip')
@@ -406,8 +436,7 @@ class SpatialTransforms(SpatialAugmentations):
                 s['zoom_xyz'] = (s['zoom_xyz'][0],) * 3 if iso else (1.0, 1.0, 1.0)
             s.update(do_anisotropic=aniso, do_zoom=iso and not aniso)
 
-            s.update(do_rot90=False, k_rot90=0, do_random_csm_rot=False,
-                     random_rot_deg=0.0, do_coil_sub=False, coil_keep=None)
+            s.update(do_rot90=False, k_rot90=0, do_coil_sub=False, coil_keep=None)
         return specs
 
 
@@ -1173,7 +1202,7 @@ def train(args):
     out_dir = Path(args.out_dir) / run_name(args)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / 'config.json').write_text(json.dumps(
-        {'args': vars(args), 'spatial': SPATIAL, 'ranges': RANGES,
+        {'args': vars(args), 'spatial': SPATIAL, 'paul': PAUL, 'ranges': RANGES,
          'evaluation': EVALUATION}, indent=2, default=str))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
@@ -1309,7 +1338,7 @@ def bench(args, aug, model, loss_func, device, amp):
 def conditions():
     """(arm, spatial, noise) of every ablation run: each arm alone, with each
     spatial transform, with all of them, with extra noise, with all plus noise."""
-    extras = ([(s, False) for s in ('none',) + SPATIAL_KINDS + ('all',)]
+    extras = ([(s, False) for s in ('none', 'paul') + SPATIAL_KINDS + ('all',)]
               + [('none', True), ('all', True)])
     return [(arm, spatial, noise) for arm in ARMS for spatial, noise in extras]
 
@@ -1998,8 +2027,9 @@ def main():
     parser.add_argument('--out-dir', default='results/deep_er/ablation')
     parser.add_argument('--arm', choices=sorted(ARMS), default=None,
                         help="Train this one condition. Without it, the whole ablation runs.")
-    parser.add_argument('--spatial', choices=('none',) + SPATIAL_KINDS + ('all',),
-                        default=None, help="Spatial transform(s) on top of the arm (default none).")
+    parser.add_argument('--spatial', choices=('none', 'paul') + SPATIAL_KINDS + ('all',),
+                        default=None, help="Spatial transform(s) on top of the arm (default "
+                                           "none); paul: Deep-ER's own (PAUL).")
     parser.add_argument('--noise', action='store_true',
                         help="Extra noise on the input alone, level drawn per pull (INPUT_NOISE).")
     parser.add_argument('--trajectory', choices=sorted(TRAJECTORIES),
