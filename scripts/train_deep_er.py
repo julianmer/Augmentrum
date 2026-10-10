@@ -176,7 +176,7 @@ def build_pipeline(args, device, keep_all: bool = False) -> AugmentationPipeline
         CoilSampler(mode='synthesize', n_coils=args.n_coils,      # 4. receive array
                     source=CachedBirdcage(), seed=args.seed),
         *target_noise,                                            # 5. --target noisy: in both
-        Tap(name='clean'),                                        # 6. TARGET frozen here
+        Tap(name='target'),                                       # 6. TARGET frozen here
         *([Noise(sigma=RANGES['sigma'][1])] if args.noise else []),  # 7. noise, input only
         kspace_step(args, (args.acc_low + args.acc_high) / 2.0),  # 8. degrade INPUT only
     ]
@@ -209,8 +209,9 @@ def eval_pipeline(args, device, n_timepoints: int, acc: float, add_mm: bool) -> 
         *([Macromolecules(mm_scale=EVALUATION['val_mm_scale'])] if add_mm else []),
         TimepointSampler(n_timepoints, evenly=True),
         CoilSampler(mode='synthesize', n_coils=args.n_coils, source=CachedBirdcage()),
-        Tap(name='clean'),                    # scored against the clean signal either way
+        Tap(name='truth'),                    # the noise-free signal, for the figures
         *acquisition_noise(args),
+        Tap(name='target'),                   # scored against what is trained on
         kspace_step(args, acc, traj_seed=EVALUATION['seed']),
     ]
     return AugmentationPipeline(steps)
@@ -666,14 +667,15 @@ def make_loss(use_ssim: bool = True):
     """
     The paper's image loss, MSE + (1 - SSIM), on brain-masked volumes.
 
-    The volumes arrive on each timepoint's input scale (make_batch). They are
-    not renormalized by the target's maximum: late in the FID the target is
-    a small fraction of the noise, and dividing by it blew single timepoints
-    up to losses of ~1e5.
+    The volumes arrive on each timepoint's input scale (make_batch) and are
+    divided by the target's maximum, as Deep-ER does. With the noisy target
+    that maximum never falls below the noise; with --target clean it does,
+    late in the FID, and single timepoints then reach losses of ~1e5.
     """
     def loss_func(reco, target, mask):
-        reco = reco * mask[:, None]
-        target = target * mask[:, None]
+        norm = target.norm(dim=1).flatten(1).amax(dim=1).clamp(min=1e-12).view(-1, 1, 1, 1, 1)
+        reco = reco * mask[:, None] / norm
+        target = target * mask[:, None] / norm
         loss = nn.functional.mse_loss(reco, target)
         if use_ssim:
             loss = loss + (1 - ssim(reco, target).mean())
@@ -700,12 +702,13 @@ def metrics(reco, target, mask):
 #**********#
 #   data   #
 #**********#
-def make_batch(x, y, sense):
+def make_batch(x, y, sense, truth=None):
     """
     One pull, "(X, Y, Z, n, C)" complex input and target over its kept
     timepoints, into a batch of n per-timepoint volumes: the coil-combined
     image, the multi-coil k-space and the target image, each timepoint
-    scaled by the 95th percentile of its input image magnitude.
+    scaled by the maximum of its input image magnitude (Deep-ER's
+    normalisation); the noise-free *truth* of the fixed sets alike.
 
     The simulated metabolite signal is exactly zero outside the head, so the
     brain mask falls out of the (augmented) target itself and stays
@@ -717,15 +720,14 @@ def make_batch(x, y, sense):
     as_channels = lambda c: torch.stack((c.real, c.imag), dim=1)   # (n, 2, X, Y, Z)
 
     img = combine(xs)
-    scale = torch.quantile(img.abs().flatten(1), 0.95, dim=1).clamp(min=1e-12)
-    scale = scale.view(-1, 1, 1, 1, 1)
+    scale = img.abs().flatten(1).amax(dim=1).clamp(min=1e-12).view(-1, 1, 1, 1, 1)
 
     grid, dev = xs.shape[1:4], xs.device                           # centered FFT, see checkerboard
     k = torch.fft.fftn(xs.permute(0, 4, 1, 2, 3) * checkerboard(grid, dev), dim=(-3, -2, -1))
     k = k * checkerboard(grid, dev, signed=True)                   # (n, C, X, Y, Z)
 
     mask = (ys.abs().sum(dim=(0, 4)) > 0).float()                  # (X, Y, Z)
-    return {
+    batch = {
         'inputs_img':    as_channels(img) / scale,
         'inputs_kspace': torch.cat((k.real, k.imag), dim=1) / scale,
         'img_gt':        as_channels(combine(ys)) / scale,
@@ -733,6 +735,9 @@ def make_batch(x, y, sense):
         'sense':         sense,
         'scale':         scale,
     }
+    if truth is not None:
+        batch['img_truth'] = as_channels(combine(truth.permute(3, 0, 1, 2, 4))) / scale
+    return batch
 
 
 def pulls(aug, split: str, device):
@@ -740,11 +745,12 @@ def pulls(aug, split: str, device):
     pipe = aug.pipelines[split]
     coil = next(s for s in pipe.steps if isinstance(s, CoilSampler))
     sampler = next(s for s in pipe.steps if isinstance(s, TimepointSampler))
-    for x, y in aug.dataloader(split=split, framework='pytorch'):
+    for x, y, *truth in aug.dataloader(split=split, framework='pytorch'):
         sense = coil.source.last_maps(device)
         x = x[0].to(device, torch.cfloat)                          # (X, Y, Z, n, C)
         y = y[0].to(device, torch.cfloat)
-        yield make_batch(x, y, sense), sampler.last_timepoints_
+        truth = truth[0][0].to(device, torch.cfloat) if truth else None
+        yield make_batch(x, y, sense, truth), sampler.last_timepoints_
 
 
 def build_train_data(args, device):
@@ -755,7 +761,7 @@ def build_train_data(args, device):
         splits={'train': subjects(args)['train']},
         batch_size=1,                      # one volume per pull; batching is over timepoints
         pipelines={'train': build_pipeline(args, device)},
-        outputs={'train': ('data', 'clean')},
+        outputs={'train': ('data', 'target')},
         modes={'train': 'on-the-fly'},
         backend='pytorch', volatile=True, seed=args.seed,
         # the whole pool on the GPU skips the copy per pull
@@ -792,7 +798,7 @@ def fixed_set(args, device, split: str, names, acc: float, n_timepoints: int):
         splits={split: tuple(names)},
         batch_size=1,
         pipelines={split: eval_pipeline(args, device, n_timepoints, acc, add_mm=not is_test)},
-        outputs={split: ('data', 'clean')},
+        outputs={split: ('data', 'target', 'truth')},
         modes={split: 'fixed'},
         backend='pytorch', volatile=True, seed=EVALUATION['seed'],
     )
@@ -866,7 +872,7 @@ def preview(args):
     aug = MRSIChallengeData(
         args.data_dir, signal='clean', splits={'train': subjects(args)['train'][:1]},
         batch_size=1, pipelines={'train': build_pipeline(args, 'cpu', keep_all=True)},
-        outputs={'train': ('data', 'clean')}, modes={'train': 'on-the-fly'},
+        outputs={'train': ('data', 'target')}, modes={'train': 'on-the-fly'},
         backend='pytorch', volatile=True, seed=args.seed,
     )
     data, _ = aug.splits['train']
@@ -887,7 +893,7 @@ def preview(args):
         print(f"  SpatialTransforms {spatial.kinds}: {spatial.aug_specs_[0]}")
 
     x = out.get_data(Backend.PYTORCH)[0].to(torch.cfloat)         # (X, Y, Z, T, C)
-    y = taps['clean'][0].get_data(Backend.PYTORCH)[0].to(torch.cfloat)
+    y = taps['target'][0].get_data(Backend.PYTORCH)[0].to(torch.cfloat)
     raw = torch.as_tensor(np.asarray(subject[:]), dtype=torch.cfloat)  # (X, Y, Z, T)
 
     coil = next(s for s in pipe.steps if isinstance(s, CoilSampler))
@@ -1732,14 +1738,14 @@ def reconstruct(runs: dict, subject: str, track: str, acc: float, device, chunk:
         nii = aug.splits[split][0].nifti_list[0]
         n_total, sw, sf = nii.shape[3], 1.0 / nii.dwelltime, nii.spectrometer_frequency[0]
         coil = next(s for s in aug.pipelines[split].steps if isinstance(s, CoilSampler))
-        x, y = next(iter(aug.dataloader(split=split, framework='pytorch')))
+        x, y, truth = next(iter(aug.dataloader(split=split, framework='pytorch')))
         sense = torch.as_tensor(coil.last_maps_, dtype=torch.cfloat, device=device)
-        x, y = x[0], y[0]
+        x, y, truth = x[0], y[0], truth[0]
         for c in range(0, x.shape[3], chunk):
-            b = make_batch(x[:, :, :, c:c + chunk].to(device, torch.cfloat),
-                           y[:, :, :, c:c + chunk].to(device, torch.cfloat), sense)
+            at = lambda v: v[:, :, :, c:c + chunk].to(device, torch.cfloat)
+            b = make_batch(at(x), at(y), sense, at(truth))
             scale = b['scale'][:, 0]
-            out['truth'].append((as_complex(b['img_gt']) * scale).cpu())
+            out['truth'].append((as_complex(b['img_truth']) * scale).cpu())
             out['input'].append((as_complex(b['inputs_img']) * scale).cpu())
             for key, model in models.items():
                 with torch.autocast('cuda', dtype=torch.bfloat16,
@@ -1971,11 +1977,12 @@ def main():
                              "challenge's own noise, SD 1.0e-3 per real and imaginary part "
                              "(TestSub1, all - meta - mm - baseline - nuisance; measured at "
                              "acceleration 1).")
-    parser.add_argument('--target', choices=['clean', 'noisy'], default='clean',
-                        help="clean: the noise-free signal (the network also denoises); noisy: "
-                             "with the acquisition's noise, as Deep-ER trains.")
-    parser.add_argument('--output', choices=['image', 'kspace'], default='image',
-                        help="The branch the reconstruction comes from (paper: kspace).")
+    parser.add_argument('--target', choices=['clean', 'noisy'], default='noisy',
+                        help="noisy: the fully sampled coil images with the acquisition's noise, "
+                             "as Deep-ER trains; clean: the noise-free signal (the network "
+                             "also denoises).")
+    parser.add_argument('--output', choices=['image', 'kspace'], default='kspace',
+                        help="The branch the reconstruction comes from (the paper's: kspace).")
     parser.add_argument('--lr', type=float, default=1e-5)
     parser.add_argument('--steps', type=int, default=20_000,
                         help="Training steps per run (one pull of 4 timepoints each).")
