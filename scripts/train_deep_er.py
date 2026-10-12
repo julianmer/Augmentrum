@@ -125,9 +125,9 @@ SPATIAL = dict(
     zoom_min=0.9, zoom_max=1.1,
     shear_max=0.05,
 )
-#: Deep-ER's own training augmentation (Weiser et al. 2025, 2.4), the --spatial paul condition:
-#: every pull a rotation of up to 0.3 rad about a random axis, a translation of up to 20 mm per
-#: axis and a scaling of +-20 % per axis.
+#: Deep-ER's own training augmentation (Weiser et al. 2025, 2.4), --paul: every pull a rotation
+#: of up to 0.3 rad about a random axis, a translation of up to 20 mm per axis and a scaling of
+#: +-20 % per axis, in image space (the reconstructed input and the target alike).
 PAUL = dict(
     kinds=('rotation3d', 'translation', 'anisotropic'), prob=1.0,
     max_random_angle_deg=float(np.degrees(0.3)), translation_mm=20.0,
@@ -135,6 +135,9 @@ PAUL = dict(
 )
 #: The challenge's matrix, for the translation in millimetres.
 MATRIX = (64, 64, 32)
+#: The brain, where the noise-free signal's amplitude over a pull exceeds this fraction of its
+#: 99th percentile (the simulation leaves crumbs below 1e-2 of it over half the volume).
+BRAIN_LEVEL = 0.05
 
 #: Per-batch sampling ranges — keys match module constructor arguments;
 #: parameters not listed keep their constructor values.
@@ -182,23 +185,25 @@ def build_pipeline(args, device, keep_all: bool = False) -> AugmentationPipeline
     spectral point — so only the drawn ones go through them. keep_all
     passes the whole FID on (the preview).
     """
-    if args.spatial == 'paul':
-        spatial = [SpatialTransforms(**PAUL)]
-    else:
-        kinds = SPATIAL_KINDS if args.spatial == 'all' else \
-            (() if args.spatial == 'none' else (args.spatial,))
-        spatial = [SpatialTransforms(kinds, **SPATIAL)] if kinds else []
+    kinds = SPATIAL_KINDS if args.spatial == 'all' else \
+        (() if args.spatial == 'none' else (args.spatial,))
+    spatial = [SpatialTransforms(kinds, **SPATIAL)] if kinds else []
+    coils = CoilSampler(mode='synthesize', n_coils=args.n_coils, source=CachedBirdcage(),
+                        seed=args.seed)
+    acquisition = acquisition_step(args, (args.acc_low, args.acc_high))
 
     steps = [
         ToDevice(device),                                         # 0. one volume to the GPU
         *spectral_steps(args.arm),                                # 1. augment the spectra
         TimepointSampler(None if keep_all else args.n_timepoints),# 2. keep what is trained on
         *spatial,                                                 # 3. augment the object
-        CoilSampler(mode='synthesize', n_coils=args.n_coils,      # 4. receive array
-                    source=CachedBirdcage(), seed=args.seed),
+        coils,                                                    # 4. receive array
         *acquisition_noise(args),                                 # 5. --target noisy: in both
-        acquisition_step(args, (args.acc_low, args.acc_high)),    # 6. TARGET (--target),
-    ]                                                             #    INPUT undersampled
+        acquisition,                                              # 6. TARGET (--target),
+                                                                  #    INPUT undersampled
+        *([ImageSpaceTransforms(acquisition, coils, **PAUL)]      # 7. --paul: both, as
+          if args.paul else []),                                  #    reconstructed
+    ]
     if args.crop_t:                                               # debug: shorter FID
         steps.insert(1, ZeroFill(target_pts=args.crop_t))
 
@@ -311,10 +316,12 @@ class Acquisition(KspaceUndersampling):
         sigma_k = self.noise_sigma_k
         self.acceleration_factor, self.noise_sigma_k = 1.0, 0.0
         try:
-            if self.band_target:             # in the head alone, where the signal is non-zero
-                head = data_array.abs().flatten(4).sum(dim=-1) > 0
-                self.last_target_ = self.band_limited(data_array) * head.view(
-                    *head.shape, *[1] * (data_array.dim() - 4))
+            if self.band_target:             # in the brain alone, as Deep-ER's loss is
+                amplitude = data_array.abs().pow(2).flatten(4).sum(dim=-1).sqrt()
+                brain = amplitude > BRAIN_LEVEL * torch.quantile(
+                    amplitude.flatten(1), 0.99, dim=1).view(-1, 1, 1, 1)
+                self.last_target_ = self.band_limited(data_array) * brain.view(
+                    *brain.shape, *[1] * (data_array.dim() - 4))
             else:
                 self.last_target_, _ = super().process_tensor(data_array, water_array, backend,
                                                               **kwargs)
@@ -462,6 +469,42 @@ class SpatialTransforms(SpatialAugmentations):
 
             s.update(do_rot90=False, k_rot90=0, do_coil_sub=False, coil_keep=None)
         return specs
+
+
+#**************************************************************************************************#
+#                                  Class ImageSpaceTransforms                                      #
+#**************************************************************************************************#
+#                                                                                                  #
+# SpatialTransforms on the reconstructed input and the acquisition's target alike, one draw.       #
+#                                                                                                  #
+#**************************************************************************************************#
+class ImageSpaceTransforms(SpatialTransforms):
+    """
+    SpatialTransforms on the reconstructed input and the acquisition's target alike, one draw.
+
+    Deep-ER augments in image space, after the reconstruction (Weiser et al.
+    2025, 2.4): the aliasing turns with the head, where a warp of the object
+    before the acquisition leaves it in place. As in Deep-ER, the coil-combined
+    image is warped and goes back through the *coils*' unwarped maps. The
+    brain mask, read off the target, follows the warp.
+    """
+
+    def __init__(self, acquisition: 'Acquisition', coils: CoilSampler, **kwargs):
+        super().__init__(**kwargs)
+        self.acquisition = acquisition
+        self.coils = coils
+
+    def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
+        sense = self.coils.source.last_maps(data_array.device)[:, :, :, None, :]
+        specs = self.sample_augmentations(data_array.shape[0])
+
+        def warp(v):                                  # (B, X, Y, Z, T, C)
+            img = torch.sum(torch.conj(sense) * v, dim=-1)
+            return self.apply(img, aug_spec_list=specs)[0][..., None] * sense
+
+        self.acquisition.last_target_ = warp(self.acquisition.last_target_)
+        self.aug_specs_ = specs
+        return warp(data_array), water_array
 
 
 #**************************************************************************************************#
@@ -813,19 +856,21 @@ def make_batch(x, y, sense, truth=None):
     The simulated metabolite signal is exactly zero outside the head, so the
     brain mask falls out of the (augmented) target itself and stays
     consistent with any spatial warp. The input is masked with it, as
-    Deep-ER masks its input, before the image and k-space are taken.
+    Deep-ER masks its input, and its k-space is Deep-ER's: the masked
+    coil-combined image through the coils.
     """
     ys = y.permute(3, 0, 1, 2, 4)                                  # (n, X, Y, Z, C)
     mask = (ys.abs().sum(dim=(0, 4)) > 0).float()                  # (X, Y, Z)
-    xs = x.permute(3, 0, 1, 2, 4) * mask[:, :, :, None]
+    xs = x.permute(3, 0, 1, 2, 4)
     combine = lambda v: torch.sum(torch.conj(sense) * v, dim=-1)   # (n, X, Y, Z)
     as_channels = lambda c: torch.stack((c.real, c.imag), dim=1)   # (n, 2, X, Y, Z)
 
-    img = combine(xs)
+    img = combine(xs) * mask
     scale = img.abs().flatten(1).amax(dim=1).clamp(min=1e-12).view(-1, 1, 1, 1, 1)
 
     grid, dev = xs.shape[1:4], xs.device                           # centered FFT, see checkerboard
-    k = torch.fft.fftn(xs.permute(0, 4, 1, 2, 3) * checkerboard(grid, dev), dim=(-3, -2, -1))
+    coils = img[..., None] * sense                                 # (n, X, Y, Z, C)
+    k = torch.fft.fftn(coils.permute(0, 4, 1, 2, 3) * checkerboard(grid, dev), dim=(-3, -2, -1))
     k = k * checkerboard(grid, dev, signed=True)                   # (n, C, X, Y, Z)
 
     batch = {
@@ -1115,7 +1160,8 @@ def preview(args):
 #   training   #
 #**************#
 def run_name(args) -> str:
-    return (f"{args.arm}_{args.spatial}{'_noise' if args.noise else ''}"
+    return (f"{args.arm}_{args.spatial}{'_paul' if args.paul else ''}"
+            f"{'_noise' if args.noise else ''}"
             f"_{args.trajectory}_n{args.train}_s{args.seed}")
 
 
@@ -1363,7 +1409,7 @@ def bench(args, aug, model, loss_func, device, amp):
 def conditions():
     """(arm, spatial, noise) of every ablation run: each arm alone, with each
     spatial transform, with all of them, with extra noise, with all plus noise."""
-    extras = ([(s, False) for s in ('none', 'paul') + SPATIAL_KINDS + ('all',)]
+    extras = ([(s, False) for s in ('none',) + SPATIAL_KINDS + ('all',)]
               + [('none', True), ('all', True)])
     return [(arm, spatial, noise) for arm in ARMS for spatial, noise in extras]
 
@@ -2052,9 +2098,11 @@ def main():
     parser.add_argument('--out-dir', default='results/deep_er/ablation')
     parser.add_argument('--arm', choices=sorted(ARMS), default=None,
                         help="Train this one condition. Without it, the whole ablation runs.")
-    parser.add_argument('--spatial', choices=('none', 'paul') + SPATIAL_KINDS + ('all',),
+    parser.add_argument('--spatial', choices=('none',) + SPATIAL_KINDS + ('all',),
                         default=None, help="Spatial transform(s) on top of the arm (default "
-                                           "none); paul: Deep-ER's own (PAUL).")
+                                           "none).")
+    parser.add_argument('--paul', action='store_true',
+                        help="Deep-ER's own spatial augmentation (PAUL), in image space.")
     parser.add_argument('--noise', action='store_true',
                         help="Extra noise on the input alone, level drawn per pull (INPUT_NOISE).")
     parser.add_argument('--trajectory', choices=sorted(TRAJECTORIES),
