@@ -105,12 +105,13 @@ TRAJECTORIES = {
     'cartesian-3d': dict(undersample_axes=(0, 1, 2)),
 }
 
-#: The spectral arms the spatial ablation is layered on. Macromolecules are
-#: part of every arm: the test truth ('meta+mm') carries them.
+#: The spectral arms the spatial ablation is layered on: none is Deep-ER's training without any
+#: augmentation, native its global phase, augmentrum ours, macromolecules included (the test
+#: truth, 'meta+mm', carries them).
 ARMS = {
     'none':       [],
     'native':     [PhaseShift],
-    'augmentrum': [LineBroadening, FrequencyShift, PhaseShift],
+    'augmentrum': [Macromolecules, LineBroadening, FrequencyShift, PhaseShift],
 }
 
 #: Spatial transforms, each an ablation condition on its own; --spatial all
@@ -166,9 +167,9 @@ K_PER_IMAGE_SIGMA = 0.58
 POOL_GB_PER_SUBJECT = 0.403
 
 
-def spectral_steps(arm: str, seed: int):
-    """Macromolecules plus the arm's spectral modules; object-level, in input AND target."""
-    return [Macromolecules(seed=seed)] + [module() for module in ARMS[arm]]
+def spectral_steps(arm: str):
+    """The arm's spectral modules; object-level, in input AND target."""
+    return [module() for module in ARMS[arm]]
 
 
 def build_pipeline(args, device, keep_all: bool = False) -> AugmentationPipeline:
@@ -190,13 +191,13 @@ def build_pipeline(args, device, keep_all: bool = False) -> AugmentationPipeline
 
     steps = [
         ToDevice(device),                                         # 0. one volume to the GPU
-        *spectral_steps(args.arm, args.seed),                     # 1. augment the spectra
+        *spectral_steps(args.arm),                                # 1. augment the spectra
         TimepointSampler(None if keep_all else args.n_timepoints),# 2. keep what is trained on
         *spatial,                                                 # 3. augment the object
         CoilSampler(mode='synthesize', n_coils=args.n_coils,      # 4. receive array
                     source=CachedBirdcage(), seed=args.seed),
         *acquisition_noise(args),                                 # 5. --target noisy: in both
-        acquisition_step(args, (args.acc_low, args.acc_high)),    # 6. TARGET fully sampled,
+        acquisition_step(args, (args.acc_low, args.acc_high)),    # 6. TARGET (--target),
     ]                                                             #    INPUT undersampled
     if args.crop_t:                                               # debug: shorter FID
         steps.insert(1, ZeroFill(target_pts=args.crop_t))
@@ -241,6 +242,7 @@ def acquisition_step(args, accelerations, traj_seed=None) -> 'Acquisition':
         extra_sigma_k=(INPUT_NOISE[0] * K_PER_IMAGE_SIGMA, INPUT_NOISE[1] * K_PER_IMAGE_SIGMA)
         if args.noise else (0.0, 0.0),
         trajectories=0 if traj_seed is not None else args.trajectories,
+        band_target=args.target == 'truth',
         ksp_mode='cartesian' if 'trajectory' not in trajectory else args.ksp_mode,
         noise_sigma_k=0.0 if args.target == 'noisy' else args.noise_sigma_k,
         pixdim=MRSIChallengeDataModule.VOXEL_MM,
@@ -252,32 +254,49 @@ def acquisition_step(args, accelerations, traj_seed=None) -> 'Acquisition':
 #                                       Class Acquisition                                          #
 #**************************************************************************************************#
 #                                                                                                  #
-# One acquisition, reconstructed fully sampled (the target) and undersampled (the input).          #
+# One acquisition: the fully sampled scan (the target) and its undersampled reconstruction.        #
 #                                                                                                  #
 #**************************************************************************************************#
 class Acquisition(KspaceUndersampling):
     """
-    One acquisition, reconstructed fully sampled (the target) and undersampled (the input).
+    One acquisition: the fully sampled scan (the target) and its undersampled reconstruction.
 
-    Deep-ER's target is the fully sampled reconstruction of the data the
-    input is undersampled from: both reconstructions share one trajectory,
-    drawn per call from a bank of *trajectories* seeds (a training set of as
-    many scans; 0 places the circles anew every call) unless the trajectory
-    has a seed of its own. The acceleration is an integer drawn uniformly
-    from *accelerations* (Deep-ER's AF in [1, 6]), or that one value; the
-    dropped shots are drawn anew every call. Noise of the module's own
-    (--target clean, --noise) goes into the input's samples only;
-    *extra_sigma_k* draws --noise's level per call. The target is kept in
-    "last_target_".
+    Deep-ER's target is the fully sampled scan the input is undersampled
+    from, reconstructed by TGV-ER, an iterative reconstruction. With
+    *band_target* the target is what a perfect reconstruction of that scan
+    gives: the module's noise-free input restricted to the k-space the
+    trajectory covers. Otherwise it is the scan's own fully sampled
+    reconstruction, sharing the input's trajectory, drawn per call from a
+    bank of *trajectories* seeds (a training set of as many scans; 0 places
+    the circles anew every call) unless the trajectory has a seed of its
+    own. The acceleration is an integer drawn uniformly from *accelerations*
+    (Deep-ER's AF in [1, 6]), or that one value; the dropped shots are drawn
+    anew every call. Noise of the module's own (--noise-sigma-k, --noise)
+    goes into the input's samples only; *extra_sigma_k* draws --noise's level
+    per call. The target is kept in "last_target_".
     """
 
     def __init__(self, accelerations, extra_sigma_k=(0.0, 0.0), trajectories: int = 0,
-                 **kwargs):
+                 band_target: bool = False, **kwargs):
         super().__init__(acceleration_factor=1.0, **kwargs)
         self.accelerations = accelerations
         self.extra_sigma_k = extra_sigma_k
         self.trajectories = trajectories
+        self.band_target = band_target
         self.last_target_ = None
+
+    @staticmethod
+    def band_limited(volumes):
+        """
+        "(B, X, Y, Z, ...)" volumes restricted to the k-space ellipsoid the
+        spherical ECCENTRIC stack covers: in-plane to Nyquist, each partition's
+        disk shrinking with the sphere's cross-section.
+        """
+        axes, grid = (1, 2, 3), volumes.shape[1:4]
+        k = torch.meshgrid(*(2 * torch.fft.fftfreq(n, device=volumes.device) for n in grid),
+                           indexing='ij')
+        inside = (k[0] ** 2 + k[1] ** 2 + k[2] ** 2 <= 1).view(1, *grid, *[1] * (volumes.dim() - 4))
+        return torch.fft.ifftn(torch.fft.fftn(volumes, dim=axes) * inside, dim=axes)
 
     def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
         rng = self.rng.numpy_rng()
@@ -292,8 +311,13 @@ class Acquisition(KspaceUndersampling):
         sigma_k = self.noise_sigma_k
         self.acceleration_factor, self.noise_sigma_k = 1.0, 0.0
         try:
-            self.last_target_, _ = super().process_tensor(data_array, water_array, backend,
-                                                          **kwargs)
+            if self.band_target:             # in the head alone, where the signal is non-zero
+                head = data_array.abs().flatten(4).sum(dim=-1) > 0
+                self.last_target_ = self.band_limited(data_array) * head.view(
+                    *head.shape, *[1] * (data_array.dim() - 4))
+            else:
+                self.last_target_, _ = super().process_tensor(data_array, water_array, backend,
+                                                              **kwargs)
             self.acceleration_factor = acc
             self.noise_sigma_k = sigma_k + float(rng.uniform(*self.extra_sigma_k))
             return super().process_tensor(data_array, water_array, backend, **kwargs)
@@ -788,10 +812,12 @@ def make_batch(x, y, sense, truth=None):
 
     The simulated metabolite signal is exactly zero outside the head, so the
     brain mask falls out of the (augmented) target itself and stays
-    consistent with any spatial warp.
+    consistent with any spatial warp. The input is masked with it, as
+    Deep-ER masks its input, before the image and k-space are taken.
     """
-    xs = x.permute(3, 0, 1, 2, 4)                                  # (n, X, Y, Z, C)
-    ys = y.permute(3, 0, 1, 2, 4)
+    ys = y.permute(3, 0, 1, 2, 4)                                  # (n, X, Y, Z, C)
+    mask = (ys.abs().sum(dim=(0, 4)) > 0).float()                  # (X, Y, Z)
+    xs = x.permute(3, 0, 1, 2, 4) * mask[:, :, :, None]
     combine = lambda v: torch.sum(torch.conj(sense) * v, dim=-1)   # (n, X, Y, Z)
     as_channels = lambda c: torch.stack((c.real, c.imag), dim=1)   # (n, 2, X, Y, Z)
 
@@ -802,7 +828,6 @@ def make_batch(x, y, sense, truth=None):
     k = torch.fft.fftn(xs.permute(0, 4, 1, 2, 3) * checkerboard(grid, dev), dim=(-3, -2, -1))
     k = k * checkerboard(grid, dev, signed=True)                   # (n, C, X, Y, Z)
 
-    mask = (ys.abs().sum(dim=(0, 4)) > 0).float()                  # (X, Y, Z)
     batch = {
         'inputs_img':    as_channels(img) / scale,
         'inputs_kspace': torch.cat((k.real, k.imag), dim=1) / scale,
@@ -2055,15 +2080,18 @@ def main():
     parser.add_argument('--acc-low', type=int, default=1,
                         help="Accelerations are integers drawn uniformly in [low, high].")
     parser.add_argument('--acc-high', type=int, default=6)
-    parser.add_argument('--noise-sigma-k', type=float, default=5.8e-4,
-                        help="k-space noise; 5.8e-4 gives the coil-combined input the "
-                             "challenge's own noise, SD 1.0e-3 per real and imaginary part "
-                             "(TestSub1, all - meta - mm - baseline - nuisance; measured at "
-                             "acceleration 1).")
-    parser.add_argument('--target', choices=['clean', 'noisy'], default='noisy',
-                        help="noisy: the fully sampled coil images with the acquisition's noise, "
-                             "as Deep-ER trains; clean: the noise-free signal (the network "
-                             "also denoises).")
+    parser.add_argument('--noise-sigma-k', type=float, default=0.0,
+                        help="k-space noise on the input's samples (--target truth or clean). "
+                             "0, as Deep-ER trains: its water data is noise-free next to its "
+                             "signal. 5.8e-4 gave the coil-combined input the challenge's own "
+                             "noise, SD 1.0e-3 per real and imaginary part, on the earlier "
+                             "trajectory (radius 0.25 kmax, full stack; acceleration 1).")
+    parser.add_argument('--target', choices=['truth', 'clean', 'noisy'], default='truth',
+                        help="truth: the noise-free signal restricted to the k-space the "
+                             "trajectory covers, what a perfect reconstruction of the fully "
+                             "sampled scan gives (Deep-ER's target, by TGV-ER); clean: the "
+                             "fully sampled gridding reconstruction of the noise-free signal; "
+                             "noisy: the same with the acquisition's noise in the coil images.")
     parser.add_argument('--output', choices=['image', 'kspace'], default='kspace',
                         help="The branch the reconstruction comes from (the paper's: kspace).")
     parser.add_argument('--lr', type=float, default=1e-5)
