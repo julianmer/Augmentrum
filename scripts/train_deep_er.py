@@ -158,12 +158,14 @@ EVALUATION = dict(
     val_acc=4.0, val_timepoints=8,
     test_acc=(2.0, 4.0, 6.0), test_timepoints=32,
     val_mm_scale=0.15,              # the val subjects ship no MM: add the midpoint
+    input_noise=1.0e-3,             # the challenge's own noise in every input (ACQUISITION_SIGMA)
 )
 #: The challenge's own noise per point and coil, real and imaginary each (TestSub1: all - meta -
 #: mm - baseline - nuisance): --target noisy puts it in the coil images.
 ACQUISITION_SIGMA = 1.0e-3
-#: k-space noise per image-component noise through the reconstruction: 5.8e-4 gives 1.0e-3.
-K_PER_IMAGE_SIGMA = 0.58
+#: k-space noise per image-component noise of the fully sampled reconstruction, where the
+#: challenge's is defined: 6.85e-4 gives 1.0e-3 (results/deep_er/tests/noise_calibration.py).
+K_PER_IMAGE_SIGMA = 0.685
 
 
 #: One subject's metabolite signal as complex64: 64 x 64 x 32 x 384 x 8 bytes.
@@ -221,7 +223,10 @@ def acquisition_noise(args):
 
 
 def eval_pipeline(args, device, n_timepoints: int, acc: float, add_mm: bool) -> AugmentationPipeline:
-    """The fixed chain for validation and test: no augmentation, one acceleration."""
+    """
+    The fixed chain for validation and test: no augmentation, one acceleration,
+    the challenge's own noise in the input whatever the run trained with.
+    """
     steps = [
         ToDevice(device),
         *([Macromolecules(mm_scale=EVALUATION['val_mm_scale'])] if add_mm else []),
@@ -229,15 +234,17 @@ def eval_pipeline(args, device, n_timepoints: int, acc: float, add_mm: bool) -> 
         CoilSampler(mode='synthesize', n_coils=args.n_coils, source=CachedBirdcage()),
         Tap(name='truth'),                    # the noise-free signal, for the figures
         *acquisition_noise(args),
-        acquisition_step(args, acc, traj_seed=EVALUATION['seed']),
+        acquisition_step(args, acc, traj_seed=EVALUATION['seed'],
+                         sigma_k=EVALUATION['input_noise'] * K_PER_IMAGE_SIGMA),
     ]
     return AugmentationPipeline(steps)
 
 
-def acquisition_step(args, accelerations, traj_seed=None) -> 'Acquisition':
+def acquisition_step(args, accelerations, traj_seed=None, sigma_k=None) -> 'Acquisition':
     """
     The acquisition. Its trajectory is placed anew on every call unless it
     gets a seed of its own: training leaves it free, the fixed sets pin it.
+    *sigma_k* replaces the run's k-space noise on the input's samples.
     """
     trajectory = dict(TRAJECTORIES[args.trajectory])
     if traj_seed is not None and 'traj_params' in trajectory:
@@ -249,7 +256,8 @@ def acquisition_step(args, accelerations, traj_seed=None) -> 'Acquisition':
         trajectories=0 if traj_seed is not None else args.trajectories,
         band_target=args.target == 'truth',
         ksp_mode='cartesian' if 'trajectory' not in trajectory else args.ksp_mode,
-        noise_sigma_k=0.0 if args.target == 'noisy' else args.noise_sigma_k,
+        noise_sigma_k=0.0 if args.target == 'noisy' else
+        args.noise_sigma_k if sigma_k is None else sigma_k,
         pixdim=MRSIChallengeDataModule.VOXEL_MM,
         **trajectory,
     )
@@ -2129,11 +2137,11 @@ def main():
                         help="Accelerations are integers drawn uniformly in [low, high].")
     parser.add_argument('--acc-high', type=int, default=6)
     parser.add_argument('--noise-sigma-k', type=float, default=0.0,
-                        help="k-space noise on the input's samples (--target truth or clean). "
-                             "0, as Deep-ER trains: its water data is noise-free next to its "
-                             "signal. 5.8e-4 gave the coil-combined input the challenge's own "
-                             "noise, SD 1.0e-3 per real and imaginary part, on the earlier "
-                             "trajectory (radius 0.25 kmax, full stack; acceleration 1).")
+                        help="k-space noise on the training input's samples (--target truth or "
+                             "clean). 0, as Deep-ER trains: its water data is noise-free next to "
+                             "its signal. 6.85e-4 gives the fully sampled input the challenge's "
+                             "own noise, SD 1.0e-3 per real and imaginary part, which every "
+                             "validation and test input carries (EVALUATION).")
     parser.add_argument('--target', choices=['truth', 'clean', 'noisy'], default='truth',
                         help="truth: the noise-free signal restricted to the k-space the "
                              "trajectory covers, what a perfect reconstruction of the fully "
