@@ -818,15 +818,16 @@ def make_loss(use_ssim: bool = True):
     """
     The paper's image loss, MSE + (1 - SSIM), on brain-masked volumes.
 
-    The volumes arrive on each timepoint's input scale (make_batch) and are
-    divided by the target's maximum, as Deep-ER does. With the noisy target
-    that maximum never falls below the noise; with --target clean it does,
-    late in the FID, and single timepoints then reach losses of ~1e5.
+    The volumes arrive on each timepoint's input scale (make_batch), the
+    paper's normalisation. Deep-ER's code divides once more by the target's
+    maximum, which its noise-free water data leaves at about the input's;
+    with noise in the input alone that maximum falls far below the input's
+    late in the FID, single timepoints reach losses of ~1e5 and the network
+    learns to output nothing.
     """
     def loss_func(reco, target, mask):
-        norm = target.flatten(1).amax(dim=1).clamp(min=1e-12).view(-1, 1, 1, 1, 1)
-        reco = reco * mask[:, None] / norm
-        target = target * mask[:, None] / norm
+        reco = reco * mask[:, None]
+        target = target * mask[:, None]
         loss = nn.functional.mse_loss(reco, target)
         if use_ssim:
             loss = loss + (1 - ssim(reco, target).mean())
