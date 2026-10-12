@@ -975,6 +975,7 @@ class Prefetcher:
         self.queue = queue.Queue(maxsize=depth)
         self.cuda = device.type == 'cuda'
         self.stream = torch.cuda.Stream(device) if self.cuda else None
+        self.stopped = False
         self.thread = threading.Thread(target=self._run, args=(make_iter,), daemon=True)
         self.thread.start()
 
@@ -984,13 +985,30 @@ class Prefetcher:
                 torch.cuda.set_device(self.stream.device)
                 with torch.cuda.stream(self.stream):
                     for item in make_iter():
+                        if self.stopped:
+                            return
                         self.stream.synchronize()
                         self.queue.put(item)
             else:
                 for item in make_iter():
+                    if self.stopped:
+                        return
                     self.queue.put(item)
         except BaseException as error:              # surfaced in the training thread
             self.queue.put(error)
+
+    def close(self):
+        """
+        Stops the thread after the batch it is building. Left running, it can
+        be inside torch when the interpreter exits, which then aborts
+        ("terminate called without an active exception") after the run is done.
+        """
+        self.stopped = True
+        while self.thread.is_alive():
+            try:
+                self.queue.get(timeout=0.1)
+            except queue.Empty:
+                pass
 
     def __iter__(self):
         return self
@@ -1352,6 +1370,7 @@ def train(args):
                     'step': step, 'best_val': best_val}, last_path)
         running, t0 = [], time.time()
 
+    batches.close()
     del batches, val_set
     results = {}
     for weights in ('last', 'best'):
@@ -1406,6 +1425,7 @@ def bench(args, aug, model, loss_func, device, amp):
         step(next(batches)[0])
     sync()
     full_ms = (time.time() - t0) / args.bench * 1e3
+    batches.close()
     peak = torch.cuda.max_memory_allocated(device) / 1e9 if device.type == 'cuda' else 0
     print(f"data {data_ms:.0f} ms/pull   model {model_ms:.0f} ms/step   "
           f"prefetched step {full_ms:.0f} ms   peak GPU {peak:.1f} GB   "
