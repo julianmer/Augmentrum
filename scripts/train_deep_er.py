@@ -147,9 +147,9 @@ RANGES = dict(
     shift_hz=(-10.0, 10.0),           # B0 drift
     mm_scale=(0.05, 0.25),            # macromolecule amplitude vs signal max
 )
-#: --noise: extra noise on the input alone, drawn per pull, as the SD per image component it
-#: gives the coil-combined input (put into k-space by K_PER_IMAGE_SIGMA; with --noise-in-target
-#: into the coil images by COIL_PER_IMAGE_SIGMA, so into the target too).
+#: --noise: extra noise in the coil images before the acquisition, one realisation in the input
+#: and the target alike (Deep-ER's own k-space noise), drawn per pull, as the SD per image
+#: component it gives the coil-combined input (put into the coil images by COIL_PER_IMAGE_SIGMA).
 INPUT_NOISE = (0.0, 2.0e-3)
 
 #: Fixed validation and test inputs: one root seed, one acceleration each and
@@ -170,10 +170,6 @@ K_PER_IMAGE_SIGMA = 0.685
 #: Coil-image noise per image-component noise of the fully sampled reconstruction, alike
 #: (results/deep_er/tests/fix_calibration.py).
 COIL_PER_IMAGE_SIGMA = 1.650
-#: --scale fixed: one number for every timepoint of every input, the validation chain's input
-#: maximum at the FID's first point (median over the training subjects, 0.0452-0.0477;
-#: fix_calibration.py).
-FIXED_SCALE = 0.0464
 
 
 #: One subject's metabolite signal as complex64: 64 x 64 x 32 x 384 x 8 bytes.
@@ -252,18 +248,16 @@ def acquisition_step(args, accelerations, traj_seed=None, sigma_k=None) -> 'Acqu
     """
     The acquisition. Its trajectory is placed anew on every call unless it
     gets a seed of its own: training leaves it free, the fixed sets pin it.
-    *sigma_k* replaces the run's k-space noise on the input's samples, --noise's included.
+    *sigma_k* replaces the run's noise, --noise's included, with k-space noise on the input's
+    samples.
     """
     trajectory = dict(TRAJECTORIES[args.trajectory])
     if traj_seed is not None and 'traj_params' in trajectory:
         trajectory['traj_params'] = dict(trajectory['traj_params'], seed=traj_seed)
-    noise = INPUT_NOISE if args.noise and sigma_k is None else (0.0, 0.0)
     return Acquisition(
         accelerations,
-        extra_sigma_k=(0.0, 0.0) if args.noise_in_target else
-        tuple(s * K_PER_IMAGE_SIGMA for s in noise),
-        shared_sigma=tuple(s * COIL_PER_IMAGE_SIGMA for s in noise) if args.noise_in_target
-        else (0.0, 0.0),
+        shared_sigma=tuple(s * COIL_PER_IMAGE_SIGMA for s in INPUT_NOISE)
+        if args.noise and sigma_k is None else (0.0, 0.0),
         trajectories=0 if traj_seed is not None else args.trajectories,
         band_target=args.target == 'truth',
         ksp_mode='cartesian' if 'trajectory' not in trajectory else args.ksp_mode,
@@ -295,18 +289,16 @@ class Acquisition(KspaceUndersampling):
     the circles anew every call) unless the trajectory has a seed of its
     own. The acceleration is an integer drawn uniformly from *accelerations*
     (Deep-ER's AF in [1, 6]), or that one value; the dropped shots are drawn
-    anew every call. Noise of the module's own (--noise-sigma-k, --noise)
-    goes into the input's samples only; *extra_sigma_k* draws --noise's level
-    per call. *shared_sigma* draws one for the coil images instead, a
-    realisation in the target and the input alike (--noise-in-target). The
-    target is kept in "last_target_".
+    anew every call. Noise of the module's own (--noise-sigma-k) goes into
+    the input's samples only; *shared_sigma* draws --noise's level per call
+    for the coil images, a realisation in the target and the input alike.
+    The target is kept in "last_target_".
     """
 
-    def __init__(self, accelerations, extra_sigma_k=(0.0, 0.0), shared_sigma=(0.0, 0.0),
-                 trajectories: int = 0, band_target: bool = False, **kwargs):
+    def __init__(self, accelerations, shared_sigma=(0.0, 0.0), trajectories: int = 0,
+                 band_target: bool = False, **kwargs):
         super().__init__(acceleration_factor=1.0, **kwargs)
         self.accelerations = accelerations
-        self.extra_sigma_k = extra_sigma_k
         self.shared_sigma = shared_sigma
         self.trajectories = trajectories
         self.band_target = band_target
@@ -353,7 +345,7 @@ class Acquisition(KspaceUndersampling):
                 self.last_target_, _ = super().process_tensor(data_array, water_array, backend,
                                                               **kwargs)
             self.acceleration_factor = acc
-            self.noise_sigma_k = sigma_k + float(rng.uniform(*self.extra_sigma_k))
+            self.noise_sigma_k = sigma_k
             return super().process_tensor(data_array, water_array, backend, **kwargs)
         finally:
             self.acceleration_factor, self.noise_sigma_k = 1.0, sigma_k
@@ -873,14 +865,13 @@ def metrics(reco, target, mask):
 #**********#
 #   data   #
 #**********#
-def make_batch(x, y, sense, truth=None, fixed_scale=None):
+def make_batch(x, y, sense, truth=None):
     """
     One pull, "(X, Y, Z, n, C)" complex input and target over its kept
     timepoints, into a batch of n per-timepoint volumes: the coil-combined
     image, the multi-coil k-space and the target image, each timepoint
     scaled by the maximum of its input image magnitude (Deep-ER's
-    normalisation), or every one by *fixed_scale* (--scale fixed); the
-    noise-free *truth* of the fixed sets alike.
+    normalisation); the noise-free *truth* of the fixed sets alike.
 
     The simulated metabolite signal is exactly zero outside the head, so the
     brain mask falls out of the (augmented) target itself and stays
@@ -895,8 +886,7 @@ def make_batch(x, y, sense, truth=None, fixed_scale=None):
     as_channels = lambda c: torch.stack((c.real, c.imag), dim=1)   # (n, 2, X, Y, Z)
 
     img = combine(xs) * mask
-    scale = (img.abs().flatten(1).amax(dim=1).clamp(min=1e-12) if fixed_scale is None else
-             torch.full((xs.shape[0],), fixed_scale, device=xs.device)).view(-1, 1, 1, 1, 1)
+    scale = img.abs().flatten(1).amax(dim=1).clamp(min=1e-12).view(-1, 1, 1, 1, 1)
 
     grid, dev = xs.shape[1:4], xs.device                           # centered FFT, see checkerboard
     coils = img[..., None] * sense                                 # (n, X, Y, Z, C)
@@ -916,12 +906,7 @@ def make_batch(x, y, sense, truth=None, fixed_scale=None):
     return batch
 
 
-def input_scale(args):
-    """make_batch's fixed_scale for the run's --scale."""
-    return FIXED_SCALE if args.scale == 'fixed' else None
-
-
-def pulls(aug, split: str, device, fixed_scale=None):
+def pulls(aug, split: str, device):
     """Yield (batch, timepoints) per pull of a split, on the device."""
     pipe = aug.pipelines[split]
     coil = next(s for s in pipe.steps if isinstance(s, CoilSampler))
@@ -932,7 +917,7 @@ def pulls(aug, split: str, device, fixed_scale=None):
         x = x[0].to(device, torch.cfloat)                          # (X, Y, Z, n, C)
         y = acquisition.last_target_[0].to(device, torch.cfloat)
         truth = truth[0][0].to(device, torch.cfloat) if truth else None
-        yield make_batch(x, y, sense, truth, fixed_scale), sampler.last_timepoints_
+        yield make_batch(x, y, sense, truth), sampler.last_timepoints_
 
 
 def build_train_data(args, device):
@@ -1256,7 +1241,7 @@ def load_fixed(args, device, split, names, acc, n_timepoints, keep_on):
     """Every pull of a fixed split, as batches on *keep_on*."""
     aug, split = fixed_set(args, device, split, names, acc, n_timepoints)
     out = []
-    for batch, _ in pulls(aug, split, device, input_scale(args)):
+    for batch, _ in pulls(aug, split, device):
         out.append({k: v.to(keep_on) for k, v in batch.items()})
     return out
 
@@ -1275,7 +1260,7 @@ def test(args, model, loss_func, device, amp):
             names = getattr(MRSIChallengeDataModule, f'{track.upper()}_SUBJECTS')
             aug, split = fixed_set(args, device, split, names, acc,
                                    EVALUATION['test_timepoints'])
-            batches = (batch for batch, _ in pulls(aug, split, device, input_scale(args)))
+            batches = (batch for batch, _ in pulls(aug, split, device))
             mean, rows = evaluate(model, loss_func, batches, amp)
             results[f'acc{acc:g}/{track}'] = {'mean': mean,
                                               'subjects': dict(zip(names, rows))}
@@ -1306,7 +1291,7 @@ def train(args):
     step_model = torch.compile(model) if args.compile else model
 
     if args.dry_run:
-        batch, timepoints = next(pulls(aug, 'train', device, input_scale(args)))
+        batch, timepoints = next(pulls(aug, 'train', device))
         print(f"  timepoints     {sorted(int(t) for t in timepoints)}")
         for key, value in batch.items():
             print(f"  {key:14s} {tuple(value.shape)!s:24s} {value.dtype}")
@@ -1362,8 +1347,7 @@ def train(args):
                          config=vars(args), resume='allow',
                          id=f"{Path(args.out_dir).name}-{run_name(args)}")
 
-    batches = Prefetcher(lambda: pulls(aug, 'train', device, input_scale(args)), device,
-                         args.prefetch)
+    batches = Prefetcher(lambda: pulls(aug, 'train', device), device, args.prefetch)
     model.train()
     running, t0 = [], time.time()
     while step < args.steps:
@@ -1417,7 +1401,7 @@ def train(args):
 def bench(args, aug, model, loss_func, device, amp):
     """Time data only, model only, and the full prefetched step."""
     sync = (lambda: torch.cuda.synchronize(device)) if device.type == 'cuda' else (lambda: None)
-    gen = pulls(aug, 'train', device, input_scale(args))
+    gen = pulls(aug, 'train', device)
     batch, _ = next(gen)
     sync()
     t0 = time.time()
@@ -1444,8 +1428,7 @@ def bench(args, aug, model, loss_func, device, amp):
     sync()
     model_ms = (time.time() - t0) / args.bench * 1e3
 
-    batches = Prefetcher(lambda: pulls(aug, 'train', device, input_scale(args)), device,
-                         args.prefetch)
+    batches = Prefetcher(lambda: pulls(aug, 'train', device), device, args.prefetch)
     step(next(batches)[0])
     sync()
     t0 = time.time()
@@ -1924,8 +1907,7 @@ def reconstruct(runs: dict, subject: str, track: str, acc: float, device, chunk:
     Returns ({key: FIDs}, spectral width, spectrometer frequency).
     """
     # runs from before --target and --output trained with what they now default to
-    args = argparse.Namespace(**{'target': 'clean', 'output': 'image', 'noise_in_target': False,
-                                 'scale': 'timepoint',
+    args = argparse.Namespace(**{'target': 'clean', 'output': 'image',
                                  **json.loads((next(iter(runs.values())) / 'config.json')
                                               .read_text())['args']})
     models = {}
@@ -1950,7 +1932,7 @@ def reconstruct(runs: dict, subject: str, track: str, acc: float, device, chunk:
         x, y, truth = x[0], y[0], truth[0]
         for c in range(0, x.shape[3], chunk):
             at = lambda v: v[:, :, :, c:c + chunk].to(device, torch.cfloat)
-            b = make_batch(at(x), at(y), sense, at(truth), input_scale(args))
+            b = make_batch(at(x), at(y), sense, at(truth))
             scale = b['scale'][:, 0]
             out['truth'].append((as_complex(b['img_truth']) * scale).cpu())
             out['input'].append((as_complex(b['inputs_img']) * scale).cpu())
@@ -2162,13 +2144,8 @@ def main():
     parser.add_argument('--paul', action='store_true',
                         help="Deep-ER's own spatial augmentation (PAUL), in image space.")
     parser.add_argument('--noise', action='store_true',
-                        help="Extra noise, level drawn per pull (INPUT_NOISE), on the input alone.")
-    parser.add_argument('--noise-in-target', action='store_true',
-                        help="--noise's realisation in the target too: in the coil images, before "
-                             "the acquisition (Deep-ER's own k-space noise).")
-    parser.add_argument('--scale', choices=['timepoint', 'fixed'], default='timepoint',
-                        help="timepoint: each timepoint over its input's maximum (Deep-ER's); "
-                             "fixed: every input over one number (FIXED_SCALE).")
+                        help="Extra noise, level drawn per pull (INPUT_NOISE), in the input and "
+                             "the target alike: in the coil images, before the acquisition.")
     parser.add_argument('--trajectory', choices=sorted(TRAJECTORIES),
                         default='eccentric-stack')
     parser.add_argument('--ksp-mode', choices=['nufft', 'gridded'], default='nufft',
