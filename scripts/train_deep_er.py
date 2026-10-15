@@ -244,7 +244,7 @@ def acquisition_step(args, accelerations, traj_seed=None, sigma_k=None) -> 'Acqu
     """
     The acquisition. Its trajectory is placed anew on every call unless it
     gets a seed of its own: training leaves it free, the fixed sets pin it.
-    *sigma_k* replaces the run's k-space noise on the input's samples.
+    *sigma_k* replaces the run's k-space noise on the input's samples, --noise's included.
     """
     trajectory = dict(TRAJECTORIES[args.trajectory])
     if traj_seed is not None and 'traj_params' in trajectory:
@@ -252,7 +252,7 @@ def acquisition_step(args, accelerations, traj_seed=None, sigma_k=None) -> 'Acqu
     return Acquisition(
         accelerations,
         extra_sigma_k=(INPUT_NOISE[0] * K_PER_IMAGE_SIGMA, INPUT_NOISE[1] * K_PER_IMAGE_SIGMA)
-        if args.noise else (0.0, 0.0),
+        if args.noise and sigma_k is None else (0.0, 0.0),
         trajectories=0 if traj_seed is not None else args.trajectories,
         band_target=args.target == 'truth',
         ksp_mode='cartesian' if 'trajectory' not in trajectory else args.ksp_mode,
