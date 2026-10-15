@@ -1181,7 +1181,7 @@ def preview(args):
             (naa_map(x_cc), 'NAA-band map, input')]
     vmax_map = float(maps[1][0][:, :, z_mid].max())
     for ax, (mmap, label) in zip(axes[2], maps):
-        ax.imshow(mmap[:, :, z_mid].numpy().T, cmap='viridis', origin='lower',
+        ax.imshow(mmap[:, :, z_mid].numpy().T, cmap='magma', origin='lower',
                   vmax=vmax_map)
         ax.set_xlabel(label, color=ink)
         ax.set_xticks([]), ax.set_yticks([])
@@ -1641,11 +1641,7 @@ CONDITION_NAMES = {('none', False): 'No spatial', ('translation', False): 'Trans
 MAP_BANDS = {'NAA': (1.8, 2.2), 'tCr': (2.95, 3.1), 'tCho': (3.15, 3.3)}
 COL1, COL2 = 3.42, 6.92                         # MRM single and double column (inches)
 INK, DASH, REF_GREY = '#333333', (0, (3.5, 2)), '#A6A6A6'
-#: Tol's 'iridescent' (sequential, linear in lightness) and 'BuRd' (diverging)
-IRIDESCENT = ['#FEFBE9', '#FCF7D5', '#F5F3C1', '#EAF0B5', '#DDECBF', '#D0E7CA', '#C2E3D2',
-              '#B5DDD8', '#A8D8DC', '#9BD2E1', '#8DCBE4', '#81C4E7', '#7BBCE7', '#7EB2E4',
-              '#88A5DD', '#9398D2', '#9B8AC4', '#9D7DB2', '#9A709E', '#906388', '#805770',
-              '#684957', '#46353A']
+#: Tol's 'BuRd' (diverging)
 BURD = ['#2166AC', '#4393C3', '#92C5DE', '#D1E5F0', '#F7F7F7', '#FDDBC7', '#F4A582', '#D6604D',
         '#B2182B']
 
@@ -1977,7 +1973,6 @@ def figure_maps(runs: dict, fids: dict, sw, sf, metabolite: str, acc: float, out
     nrmse = {k: float(((maps[k] - maps['truth'])[mask] ** 2).sum().sqrt()
                       / (maps['truth'][mask] ** 2).sum().sqrt()) for k in keys}
     lim = float(max(torch.quantile(e[mask].abs(), 0.99) for e in err.values()))
-    seq = LinearSegmentedColormap.from_list('iridescent', IRIDESCENT)
     div = LinearSegmentedColormap.from_list('BuRd', BURD)
     show = lambda m: np.where(mask[:, :, z].numpy(), m[:, :, z].numpy(), np.nan).T
     fig, axes = plt.subplots(2, len(keys) + 1, figsize=(COL2, 3.25))
@@ -1986,7 +1981,7 @@ def figure_maps(runs: dict, fids: dict, sw, sf, metabolite: str, acc: float, out
         titles[key] = (f'{ARM_SHORT[key[0]]}\n{CONDITION_NAMES[key[1:]].lower()}',
                        ARM_STYLE[key[0]][1])
     for ax, key in zip(axes[0], ['truth'] + keys):
-        im = ax.imshow(show(maps[key]), cmap=seq, vmin=0, vmax=top, origin='lower')
+        im = ax.imshow(show(maps[key]), cmap='magma', vmin=0, vmax=top, origin='lower')
         ax.set_title(titles[key][0], color=titles[key][1], fontsize=7, pad=3,
                      fontweight='bold' if key in runs else None)
     fig.colorbar(im, ax=axes[0].tolist(), fraction=0.015, pad=0.01,
@@ -2011,14 +2006,12 @@ def figure_maps_acceleration(runs: dict, by_acc: dict, sw, sf, metabolite: str, 
     """A metabolite map, middle slice, at every test acceleration (columns): the undersampled
     input and each arm's reconstruction (rows), the truth top left; NRMSE in the brain under
     each."""
-    from matplotlib.colors import LinearSegmentedColormap
     plt = figure_style()
     accs = sorted(by_acc)
     truth = band_map(by_acc[accs[0]]['truth'], sw, sf, MAP_BANDS[metabolite])
     mask = brain_mask(by_acc[accs[0]]['truth'], sw, sf)
     z = mask.shape[2] // 2
     top = float(torch.quantile(truth[mask], 0.99))
-    seq = LinearSegmentedColormap.from_list('iridescent', IRIDESCENT)
     show = lambda m: np.where(mask[:, :, z].numpy(), m[:, :, z].numpy(), np.nan).T
     rows = ['input'] + arm_order(runs)
     fig, axes = plt.subplots(len(rows), len(accs) + 1, figsize=(COL2, 1.6 * len(rows)))
@@ -2027,7 +2020,7 @@ def figure_maps_acceleration(runs: dict, by_acc: dict, sw, sf, metabolite: str, 
         ax.set_yticks([])
         for sp in ax.spines.values():
             sp.set_visible(False)
-    im = axes[0, 0].imshow(show(truth), cmap=seq, vmin=0, vmax=top, origin='lower')
+    im = axes[0, 0].imshow(show(truth), cmap='magma', vmin=0, vmax=top, origin='lower')
     axes[0, 0].set_title('Truth', fontsize=7, pad=3)
     for ax in axes[1:, 0]:
         ax.axis('off')
@@ -2035,7 +2028,7 @@ def figure_maps_acceleration(runs: dict, by_acc: dict, sw, sf, metabolite: str, 
         axes[0, c].set_title(f'Acceleration {acc:g}', fontsize=7, pad=3)
         for r, key in enumerate(rows):
             m = band_map(by_acc[acc][key], sw, sf, MAP_BANDS[metabolite])
-            axes[r, c].imshow(show(m), cmap=seq, vmin=0, vmax=top, origin='lower')
+            axes[r, c].imshow(show(m), cmap='magma', vmin=0, vmax=top, origin='lower')
             err = float(((m - truth)[mask] ** 2).sum().sqrt() / (truth[mask] ** 2).sum().sqrt())
             axes[r, c].set_xlabel(f'NRMSE {err:.3f}', fontsize=6.5, labelpad=1)
     for r, key in enumerate(rows):
@@ -2056,7 +2049,6 @@ def figure_spectra(runs: dict, fids: dict, sw, sf, acc: float, out: Path, name: 
     """Spectra of two voxels of the middle slice (the true NAA map's 90th and 30th percentile in
     the brain): the truth, the input and each arm's reconstruction, |spectrum| over the truth's
     maximum; where the voxels are, on the true NAA map (left)."""
-    from matplotlib.colors import LinearSegmentedColormap
     plt = figure_style()
     mask = brain_mask(fids['truth'], sw, sf)
     z = mask.shape[2] // 2
@@ -2069,8 +2061,7 @@ def figure_spectra(runs: dict, fids: dict, sw, sf, acc: float, out: Path, name: 
     band = (ppm > 1.0) & (ppm < 4.2)
     spectrum = lambda v: torch.fft.fftshift(torch.fft.ifft(v), dim=-1).abs().numpy()[band]
     fig, axes = plt.subplots(1, 3, figsize=(COL2, 2.3), gridspec_kw=dict(width_ratios=(0.7, 2, 2)))
-    seq = LinearSegmentedColormap.from_list('iridescent', IRIDESCENT)
-    axes[0].imshow(np.where(mask[:, :, z].numpy(), naa.numpy(), np.nan).T, cmap=seq,
+    axes[0].imshow(np.where(mask[:, :, z].numpy(), naa.numpy(), np.nan).T, cmap='magma',
                    origin='lower')
     markers = (('o', '○'), ('s', '□'))
     for (x, y), (marker, _) in zip(voxels, markers):
