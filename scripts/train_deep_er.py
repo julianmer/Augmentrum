@@ -91,11 +91,13 @@ TRAJECTORIES = {
     # the published Deep-ER/ECCENTRIC acquisition: 2-D eccentric circles per
     # phase-encoded kz partition, prospective center-crossing acceleration
     # (Weiser et al. 2025, 2.2: circles of radius kmax/8 on a spherical stack of partitions;
-    # 128 of them, 25 samples each, cover the 64-matrix disk at Nyquist)
+    # 128 of them, 25 samples each, cover the 64-matrix disk at Nyquist), gridded as its
+    # pipeline does (suppl.: a Hamming filter and Voronoi density compensation)
     'eccentric-stack': dict(trajectory='stack_of_eccentric',
                             undersampling='center_crossing',
                             traj_params={'n_shots': 128, 'radius_frac': 0.125,
-                                         'spherical': True}),
+                                         'spherical': True},
+                            dcf='voronoi', hamming=True),
     # true 3-D readouts, undersampled across all three axes
     'cones-3d':  dict(trajectory='cones_3d_rosette', undersampling='shell_based',
                       traj_params={'n_shots': 2048}, undersample_axes=(0, 1, 2)),
@@ -164,12 +166,12 @@ EVALUATION = dict(
 #: The challenge's own noise per point and coil, real and imaginary each (TestSub1: all - meta -
 #: mm - baseline - nuisance): --target noisy puts it in the coil images.
 ACQUISITION_SIGMA = 1.0e-3
-#: k-space noise per image-component noise of the fully sampled reconstruction, where the
-#: challenge's is defined: 6.85e-4 gives 1.0e-3 (results/deep_er/tests/noise_calibration.py).
-K_PER_IMAGE_SIGMA = 0.685
-#: Coil-image noise per image-component noise of the fully sampled reconstruction, alike
-#: (results/deep_er/tests/fix_calibration.py).
-COIL_PER_IMAGE_SIGMA = 1.650
+#: k-space noise per image-component noise of the fully sampled reconstruction without the
+#: Hamming window, where the challenge's is defined: 3.85e-4 gives 1.0e-3; the window then leaves
+#: 2.8e-4 (results/deep_er/tests/voronoi_calibration.py).
+K_PER_IMAGE_SIGMA = 0.385
+#: Coil-image noise per image-component noise of the fully sampled reconstruction, alike.
+COIL_PER_IMAGE_SIGMA = 0.989
 
 
 #: One subject's metabolite signal as complex64: 64 x 64 x 32 x 384 x 8 bytes.
@@ -2232,9 +2234,10 @@ def main():
     parser.add_argument('--noise-sigma-k', type=float, default=0.0,
                         help="k-space noise on the training input's samples (--target truth or "
                              "clean). 0, as Deep-ER trains: its water data is noise-free next to "
-                             "its signal. 6.85e-4 gives the fully sampled input the challenge's "
-                             "own noise, SD 1.0e-3 per real and imaginary part, which every "
-                             "validation and test input carries (EVALUATION).")
+                             "its signal. 3.85e-4 gives the fully sampled input the challenge's "
+                             "own noise before the Hamming window, SD 1.0e-3 per real and "
+                             "imaginary part, which every validation and test input carries "
+                             "(EVALUATION).")
     parser.add_argument('--target', choices=['truth', 'clean', 'noisy'], default='truth',
                         help="truth: the noise-free signal restricted to the k-space the "
                              "trajectory covers, what a perfect reconstruction of the fully "
