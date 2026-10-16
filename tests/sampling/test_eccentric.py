@@ -54,7 +54,9 @@ def test_center_crossing_construction_and_predicate():
     assert detected.sum() <= constructed.sum() + 0.1 * len(shots)
 
 
-def test_full_trajectory_covers_the_kspace_disk():
+def test_full_trajectory_covers_the_centre_and_thins_out():
+    """Centres at uniform polar coordinates sample k-space with a density falling as 1/|k|:
+    the inner half of the disk fully, its rim less."""
     shots, meta = build_2d(n_shots=192)
     keep_all = np.ones(len(shots), dtype=bool)
     grid = GridMask.rasterize_shots_to_grid(
@@ -62,9 +64,10 @@ def test_full_trajectory_covers_the_kspace_disk():
 
     x = (np.arange(48) - 24) / 24.0
     y = (np.arange(64) - 32) / 32.0
-    inner = (x[:, None] ** 2 + y[None, :] ** 2) <= 0.9 ** 2
-    coverage = grid[inner].mean()
-    assert coverage > 0.9, f"only {coverage:.2f} of the central disk is covered"
+    radius = np.sqrt(x[:, None] ** 2 + y[None, :] ** 2)
+    centre, rim = grid[radius <= 0.5].mean(), grid[(radius > 0.7) & (radius <= 0.9)].mean()
+    assert centre > 0.99, f"only {centre:.2f} of the inner half is covered"
+    assert 0.5 < rim < centre, f"the rim is {rim:.2f} covered, the centre {centre:.2f}"
 
 
 #**************************************************************************************************#

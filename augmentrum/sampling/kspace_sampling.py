@@ -1201,8 +1201,9 @@ class Eccentric2D(Trajectory):
     ECCENTRIC: eccentric circles covering the k-space disk (Klauser et al.).
 
     Unlike concentric rings, each shot is a circle of one fixed radius whose
-    *center* sits away from the k-space origin — randomly placed so the union
-    of circles covers the disk out to kmax. A fraction of the circles is
+    *center* sits away from the k-space origin — at uniformly random polar
+    coordinates, so the union of circles covers the disk out to kmax with a
+    density falling as 1/|k| (Klauser et al. 2024). A fraction of the circles is
     constrained to pass exactly through the k-space center; a prospective
     acceleration acquires only that center-crossing subset plus a random
     remainder, which is what the 'center_crossing' undersampling scheme
@@ -1255,15 +1256,16 @@ class Eccentric2D(Trajectory):
             raise ValueError(f"radius_frac must be in (0, 1), got {radius_frac}.")
 
         # Circle centers in normalized units (unit disk). Center-crossing
-        # circles sit at exactly one radius from the origin; the rest are
-        # uniform in area over the disk that keeps them inside kmax.
+        # circles sit at exactly one radius from the origin; the rest have
+        # uniform polar coordinates over the disk that keeps them inside kmax,
+        # as ECCENTRIC places them: a sampling density falling as 1/|k|.
         n_center = max(1, int(round(center_frac * n_shots)))
         n_free = n_shots - n_center
 
         angle_c = rng.uniform(0.0, 2.0 * math.pi, n_center)
         centers_c = radius_frac * np.stack([np.cos(angle_c), np.sin(angle_c)], axis=1)
 
-        r_free = max(disk_frac - radius_frac, 0.0) * np.sqrt(rng.uniform(0.0, 1.0, n_free))
+        r_free = max(disk_frac - radius_frac, 0.0) * rng.uniform(0.0, 1.0, n_free)
         angle_f = rng.uniform(0.0, 2.0 * math.pi, n_free)
         centers_f = np.stack([r_free * np.cos(angle_f), r_free * np.sin(angle_f)], axis=1)
 
@@ -3946,7 +3948,7 @@ class KspaceUndersampling(BaseModule):
 
         # Without density weights the adjoint weights k-space by how densely
         # the trajectory visits it, a strong low-pass even when fully sampled
-        dcf = (gridder.voronoi_weights(recon_coords, like=vol) if self.dcf == 'voronoi'
+        dcf = (gridder.voronoi_weights(recon_coords) if self.dcf == 'voronoi'
                else gridder.density_weights(recon_coords, like=vol))
         if self.hamming:
             dcf = dcf * gridder.hamming(recon_coords)

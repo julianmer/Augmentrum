@@ -367,7 +367,11 @@ class GriddingNUFFT:
         plan[('density', iterations)] = (w / w.max()).cpu().numpy()
         return plan[('density', iterations)]
 
-    def voronoi_weights(self, coords: np.ndarray, like=None) -> np.ndarray:
+    #: Voronoi weightings kept per operator, keyed by the trajectory: one takes a second to build,
+    #: and a training set draws its undersampled trajectories from a bank.
+    VORONOI_CACHE = 1024
+
+    def voronoi_weights(self, coords: np.ndarray) -> np.ndarray:
         """
         Density compensation by the area of each sample's Voronoi cell.
 
@@ -377,21 +381,20 @@ class GriddingNUFFT:
         trajectory has to be a stack of planes, one kz each, as every "StackOf"
         trajectory is. A ring of guard points one mean spacing beyond the
         outermost samples bounds the outer cells; samples on the same spot
-        share their cell. The weights are areas, up to a constant.
+        share their cell. The weights are areas, up to a constant; the last
+        VORONOI_CACHE trajectories' are kept.
 
         Args:
             coords: Trajectory in [-0.5, 0.5), "[K, ndim]".
-            like: The data the weights will meet, or None. On the kernels'
-                device they are kept with the trajectory's plan.
 
         Returns:
             Weights "[K]".
         """
         coords = np.asarray(coords, dtype=np.float64)
-        plan = self._device_plan(coords, like) \
-            if like is not None and self._kernels(like) is not None else {}
-        if 'voronoi' in plan:
-            return plan['voronoi']
+        cache = self.__dict__.setdefault('_voronoi', {})
+        key = (coords.shape, hash(coords.tobytes()))
+        if key in cache:
+            return cache[key]
         if self.ndim == 2:
             weights = _plane_voronoi_areas(coords)
         else:
@@ -405,7 +408,9 @@ class GriddingNUFFT:
             for value in planes:
                 rows = kz == value
                 weights[rows] = _plane_voronoi_areas(coords[rows, :2])
-        plan['voronoi'] = weights
+        if len(cache) >= self.VORONOI_CACHE:
+            del cache[next(iter(cache))]
+        cache[key] = weights
         return weights
 
     @staticmethod
