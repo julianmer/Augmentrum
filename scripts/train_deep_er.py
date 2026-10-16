@@ -952,14 +952,9 @@ def make_batch(x, y, sense, b0, truth=None):
     img = combine(xs) * mask
     scale = img.abs().flatten(1).amax(dim=1).clamp(min=1e-12).view(-1, 1, 1, 1, 1)
 
-    grid, dev = xs.shape[1:4], xs.device                           # centered FFT, see checkerboard
-    coils = img[..., None] * sense                                 # (n, X, Y, Z, C)
-    k = torch.fft.fftn(coils.permute(0, 4, 1, 2, 3) * checkerboard(grid, dev), dim=(-3, -2, -1))
-    k = k * checkerboard(grid, dev, signed=True)                   # (n, C, X, Y, Z)
-
     batch = {
         'inputs_img':    as_channels(img) / scale,
-        'inputs_kspace': torch.cat((k.real, k.imag), dim=1) / scale,
+        'inputs_kspace': kspace_input(img, sense) / scale,
         'img_gt':        as_channels(combine(ys)) / scale,
         'mask':          mask.expand(xs.shape[0], -1, -1, -1).contiguous(),
         'sense':         sense,
@@ -968,6 +963,16 @@ def make_batch(x, y, sense, b0, truth=None):
     if truth is not None:
         batch['img_truth'] = as_channels(combine(truth.permute(3, 0, 1, 2, 4))) / scale
     return batch
+
+
+def kspace_input(img, sense):
+    """Deep-ER's k-space input: coil-combined images (n, X, Y, Z) through the coils, as real and
+    imaginary channels (n, 2C, X, Y, Z)."""
+    grid, dev = img.shape[1:4], img.device                         # centered FFT, see checkerboard
+    coils = img[..., None] * sense                                 # (n, X, Y, Z, C)
+    k = torch.fft.fftn(coils.permute(0, 4, 1, 2, 3) * checkerboard(grid, dev), dim=(-3, -2, -1))
+    k = k * checkerboard(grid, dev, signed=True)                   # (n, C, X, Y, Z)
+    return torch.cat((k.real, k.imag), dim=1)
 
 
 def pulls(aug, split: str, device):
@@ -1306,6 +1311,64 @@ def evaluate(model, loss_func, batches, amp: bool):
     return {key: float(np.mean([r[key] for r in rows])) for key in rows[0]}, rows
 
 
+def load_val_maps(args, device, names, pull: int = 48):
+    """
+    What the validation score needs of every subject: its whole FID's inputs at the validation
+    acceleration (bf16, with their scales) and coils, and the truth's maps (MAP_BANDS, B0
+    undone) in its brain, on the CPU. The FID goes through the fixed chain *pull* timepoints at
+    a time; the fixed seed gives every pull the same coils and trajectory.
+    """
+    out = []
+    for name in names:
+        imgs, scales, truths, lo, n_total = [], [], [], 0, None
+        while n_total is None or lo < n_total:
+            timepoints = range(lo, lo + pull if n_total is None else min(lo + pull, n_total))
+            aug, split = fixed_set(args, device, 'val', [name], EVALUATION['val_acc'], timepoints)
+            nii = aug.splits[split][0].nifti_list[0]
+            n_total, sw, sf = nii.shape[3], 1.0 / nii.dwelltime, nii.spectrometer_frequency[0]
+            batch, _ = next(pulls(aug, split, device))
+            imgs.append(batch['inputs_img'].to('cpu', torch.bfloat16))
+            scales.append(batch['scale'].cpu())
+            truths.append((torch.complex(batch['img_truth'][:, 0], batch['img_truth'][:, 1])
+                           * batch['scale'][:, 0]).cpu())
+            lo += len(timepoints)
+        truth = torch.cat(truths).permute(1, 2, 3, 0)
+        out.append({'img': torch.cat(imgs), 'scale': torch.cat(scales),
+                    'sense': batch['sense'].cpu(), 'mask': brain_mask(truth, sw, sf),
+                    'maps': {met: band_map(truth, sw, sf, band) for met, band in MAP_BANDS.items()},
+                    'sw': sw, 'sf': sf})
+    return out
+
+
+@torch.no_grad()
+def map_score(model, val_maps, device, amp: bool) -> float:
+    """
+    The validation score: the NRMSE of each subject's reconstructed maps against the truth's in
+    its brain, the mean over MAP_BANDS and subjects. The maps are what the reconstruction is
+    for; the loss weighs every timepoint alike, and late in the FID there is only noise. No
+    *model* scores the input itself.
+    """
+    model = model.eval() if model is not None else (lambda img, k, sense: (img, None))
+    scores = []
+    for s in val_maps:
+        sense, recos = s['sense'].to(device), []
+        for lo in range(0, len(s['img']), EVAL_CHUNK):
+            img = s['img'][lo:lo + EVAL_CHUNK].to(device, torch.float32)
+            with torch.autocast('cuda', dtype=torch.bfloat16, enabled=amp):
+                reco, _ = model(img, kspace_input(torch.complex(img[:, 0], img[:, 1]), sense),
+                                sense)
+            recos.append(torch.complex(reco[:, 0].float(), reco[:, 1].float())
+                         * s['scale'][lo:lo + EVAL_CHUNK, 0].to(device))
+        fid, mask = torch.cat(recos).permute(1, 2, 3, 0), s['mask'].to(device)
+        for met, band in MAP_BANDS.items():
+            truth = s['maps'][met].to(device)
+            scores.append(float((band_map(fid, s['sw'], s['sf'], band) - truth)[mask].norm()
+                                / truth[mask].norm()))
+    if isinstance(model, nn.Module):
+        model.train()
+    return float(np.mean(scores))
+
+
 def load_fixed(args, device, split, names, acc, n_timepoints, keep_on):
     """Every pull of a fixed split, as batches on *keep_on*."""
     aug, split = fixed_set(args, device, split, names, acc, n_timepoints)
@@ -1385,28 +1448,30 @@ def train(args):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr,
                                  fused=device.type == 'cuda')
-    step, best_val = 0, float('inf')
+    step, best_maps = 0, float('inf')
     last_path = out_dir / 'last.pt'
     log_path = out_dir / 'log.csv'
     if args.resume and last_path.exists():
         state = torch.load(last_path, map_location=device)
         model.load_state_dict(state['model'])
         optimizer.load_state_dict(state['optimizer'])
-        step, best_val = state['step'], state['best_val']
+        step, best_maps = state['step'], state['best_maps']
         # a fresh stream, so the resumed run does not replay its first batches
         aug.reseed(args.seed + step)
         print(f"resumed at step {step}")
     else:
         with open(log_path, 'w', newline='') as f:
             csv.writer(f).writerow(['step', 'train_loss', 'val_loss', 'val_nrmse',
-                                    'val_ssim', 'ms_per_step'])
+                                    'val_ssim', 'val_maps', 'ms_per_step'])
 
     val_names = subjects(args)['val']
     val_set = load_fixed(args, device, 'val', val_names, EVALUATION['val_acc'],
                          EVALUATION['val_timepoints'],
                          keep_on='cpu' if args.val_on_cpu else device)
+    val_maps = load_val_maps(args, device, val_names)
     print(f"validation: {len(val_set)} subjects x {EVALUATION['val_timepoints']} "
-          f"timepoints at acceleration {EVALUATION['val_acc']:g}")
+          f"timepoints at acceleration {EVALUATION['val_acc']:g}, and their maps (the input's "
+          f"{map_score(None, val_maps, device, amp):.4f})")
 
     run = None
     if args.wandb:
@@ -1433,25 +1498,26 @@ def train(args):
         ms = (time.time() - t0) / len(running) * 1e3
         train_loss = torch.stack(running).mean().item()
         val, _ = evaluate(step_model, loss_func, to_device(val_set, device), amp)
+        maps = map_score(step_model, val_maps, device, amp)
         print(f"step {step:7d}/{args.steps}  train {train_loss:.5f}  val {val['loss']:.5f}  "
-              f"nrmse {val['nrmse']:.4f}  ssim {val['ssim']:.4f}  ({ms:.0f} ms/step)",
-              flush=True)
+              f"nrmse {val['nrmse']:.4f}  ssim {val['ssim']:.4f}  maps {maps:.4f}  "
+              f"({ms:.0f} ms/step)", flush=True)
         with open(log_path, 'a', newline='') as f:
             csv.writer(f).writerow([step, train_loss, val['loss'], val['nrmse'],
-                                    val['ssim'], round(ms, 1)])
+                                    val['ssim'], maps, round(ms, 1)])
         if run:
             run.log({'loss/train': train_loss, 'loss/val': val['loss'],
-                     'val/nrmse': val['nrmse'], 'val/ssim': val['ssim'],
+                     'val/nrmse': val['nrmse'], 'val/ssim': val['ssim'], 'val/maps': maps,
                      'ms_per_step': ms}, step=step)
-        if val['loss'] < best_val:
-            best_val = val['loss']
+        if maps < best_maps:                  # the checkpoint whose maps are best
+            best_maps = maps
             torch.save(model.state_dict(), out_dir / 'best.pt')
         torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
-                    'step': step, 'best_val': best_val}, last_path)
+                    'step': step, 'best_maps': best_maps}, last_path)
         running, t0 = [], time.time()
 
     batches.close()
-    del batches, val_set
+    del batches, val_set, val_maps
     results = {}
     for weights in ('last', 'best'):
         if weights == 'best':
@@ -1722,6 +1788,94 @@ def band_map(vol, sw, sf, band):
     return spec[..., torch.as_tensor((ppm > band[0]) & (ppm < band[1]))].abs().sum(dim=-1)
 
 
+#: Deep-ER's maps (Weiser et al. 2025, suppl.): the reconstruction kept at rank 40, then LCModel
+#: over 1-4.2 ppm in every voxel. The basis is the challenge's own, the signals its data was made
+#: of ("VtMeta", "VtMM" in each subject's .mat; VtMM's tenth column is a tCr reference, not a
+#: macromolecule), two points (the acquisition delay) ahead of the data
+#: (results/deep_er/tests/basis_align.py); maps add the components of each total.
+LOW_RANK = 40
+LCMODEL_PPM = (1.0, 4.2)
+CHALLENGE_METABOLITES = ('Asp', 'GABA', 'Gln', 'Glu', 'Lac', 'Lac41', 'NAA', 'NAAG', 'PE', 'PE40',
+                         'Tau', 'mIns', 'sIno', 'tCho', 'tCr', 'tCr39')
+LCMODEL_MAPS = {'NAA': ('NAA', 'NAAG'), 'tCr': ('tCr', 'tCr39'), 'tCho': ('tCho',),
+                'Glx': ('Glu', 'Gln'), 'mIns': ('mIns',)}
+LCMODEL_WORKERS = 16
+
+
+def low_rank(fids, mask, rank: int = LOW_RANK):
+    """FIDs (X, Y, Z, T) with the brain's kept at its *rank* strongest spatial x temporal
+    components, Deep-ER's pipeline step between the reconstruction and the fit."""
+    u, s, vh = torch.linalg.svd(fids[mask], full_matrices=False)
+    out = fids.clone()
+    out[mask] = (u[:, :rank] * s[:rank]) @ vh[:rank]
+    return out
+
+
+def lcmodel_basis(data_dir, path: Path) -> Path:
+    """The challenge's basis as an LCModel .BASIS at *path*, written once."""
+    import h5py
+    from lcmodel_wrapper.convert import write_basis
+    if not path.exists():
+        module = MRSIChallengeDataModule(data_dir)
+        aux = module.read_aux('TestSub1', 'meta+mm')
+        with h5py.File(module.mat_path('TestSub1', need_truth=True), 'r') as f:
+            parts = [f[key][()] for key in ('VtMeta', 'VtMM')]
+        fids = np.concatenate([p['real'] + 1j * p['imag'] for p in parts], axis=1)[2:, :-1].T
+        names = [*CHALLENGE_METABOLITES, *(f'MM{i}' for i in range(1, len(fids) - 15))]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_basis(str(path), names, list(np.conj(fids)), float(np.diff(aux['t'][:2])[0]),
+                    float(aux['hzpppm']), 0.0)               # LCModel's orientation, conjugated
+    return path
+
+
+_LCM = {}
+
+
+def _lcmodel_worker(basis, points, sw, sf, workdir):
+    """One PyLCModel per process, in a folder of its own, quiet."""
+    from lcmodel_wrapper import PyLCModel
+    from lcmodel_wrapper import control as lcm_control
+    from lcmodel_wrapper.binaries import resolve_executable
+    sys.stdout = open(os.devnull, 'w')
+    folder = Path(workdir) / str(os.getpid())
+    folder.mkdir()
+    _LCM['fit'] = PyLCModel(
+        str(basis), ppmlim=LCMODEL_PPM, conj=True, ignore='none', save_path=str(folder),
+        path2exec=resolve_executable(allow_download=True, allow_docker=False, allow_build=False,
+                                     cache_dir=os.path.abspath('data/lcmodel')),
+        sample_points=points, bandwidth=sw, central_freq=sf,
+        allow_download=False, allow_docker=False, allow_build=False)
+    lcm_control.set_key(_LCM['fit'].control, 'nsimul', 0)   # the basis has its macromolecules
+
+
+def _lcmodel_fit(fids):
+    return _LCM['fit'].forward(fids)[0]
+
+
+def lcmodel_maps(fids, mask, sw, sf, data_dir, fit=None, chunk: int = 64) -> dict:
+    """
+    Deep-ER's maps of FIDs (X, Y, Z, T): the brain *mask* kept at rank LOW_RANK, every voxel of
+    *fit* (a part of it, the whole by default) fitted by LCModel; {total: (X, Y, Z)} for
+    LCMODEL_MAPS, zero elsewhere.
+    """
+    import tempfile
+    from concurrent.futures import ProcessPoolExecutor
+    fit = mask if fit is None else fit
+    basis = lcmodel_basis(data_dir, Path('data/lcmodel/challenge.basis'))
+    rows = low_rank(fids, mask)[fit].numpy()
+    with tempfile.TemporaryDirectory() as workdir, ProcessPoolExecutor(
+            LCMODEL_WORKERS, initializer=_lcmodel_worker,
+            initargs=(basis, rows.shape[1], sw, sf, workdir)) as pool:
+        conc = np.concatenate(list(pool.map(_lcmodel_fit, [rows[i:i + chunk] for i in
+                                                            range(0, len(rows), chunk)])))
+    names = [*CHALLENGE_METABOLITES, *(f'MM{i}' for i in range(1, conc.shape[1] - 15))]
+    maps = {}
+    for total, parts in LCMODEL_MAPS.items():
+        maps[total] = torch.zeros(fit.shape, dtype=torch.float64)
+        maps[total][fit] = torch.as_tensor(sum(conc[:, names.index(p)] for p in parts))
+    return maps
+
+
 def figure_style():
     import matplotlib
     matplotlib.use('Agg')
@@ -1761,11 +1915,11 @@ def test_mean(run: Path, metric: str, acc=None, weights: str = 'best') -> float:
 
 
 def selected(runs: dict) -> dict:
-    """Per arm, the spatial condition with the lowest validation NRMSE: {arm: (spatial, noise)}."""
+    """Per arm, the spatial condition with the best validation maps: {arm: (spatial, noise)}."""
     import pandas as pd
     best = {}
     for (arm, spatial, noise), run in runs.items():
-        v = pd.read_csv(run / 'log.csv').val_nrmse.min()
+        v = pd.read_csv(run / 'log.csv').val_maps.min()
         if arm not in best or v < best[arm][0]:
             best[arm] = (v, (spatial, noise))
     return {arm: cond for arm, (_, cond) in best.items()}
@@ -2024,21 +2178,19 @@ def arm_order(runs):
     return sorted(runs, key=lambda k: list(ARM_STYLE).index(k[0]))
 
 
-def figure_maps(runs: dict, fids: dict, sw, sf, metabolite: str, acc: float, out: Path,
+def figure_maps(runs: dict, fitted: dict, mask, metabolite: str, acc: float, out: Path,
                 name: str):
     """
     A metabolite map, middle slice: truth, input and each arm's reconstruction (top), their
-    signed error over the truth's 99th percentile (bottom), NRMSE in the brain under each. The
-    brain: where the true NAA map exceeds 5 % of its 99th percentile (the test truth carries
-    macromolecules outside the head too).
+    signed error over the truth's 99th percentile (bottom), NRMSE in the brain under each.
+    *fitted* holds each one's LCModel maps ("lcmodel_maps") over *mask*, the brain of that slice.
     """
     from matplotlib.colors import LinearSegmentedColormap
     plt = figure_style()
-    maps = {k: band_map(v, sw, sf, MAP_BANDS[metabolite]) for k, v in fids.items()}
-    mask = brain_mask(fids['truth'], sw, sf)
+    maps = {k: v[metabolite] for k, v in fitted.items()}
     z = mask.shape[2] // 2
     top = float(torch.quantile(maps['truth'][mask], 0.99))
-    keys = ['input'] + sorted((k for k in fids if k not in ('truth', 'input')),
+    keys = ['input'] + sorted((k for k in fitted if k not in ('truth', 'input')),
                               key=lambda k: list(ARM_STYLE).index(k[0]))
     err = {k: (maps[k] - maps['truth']) / top for k in keys}
     nrmse = {k: float(((maps[k] - maps['truth'])[mask] ** 2).sum().sqrt()
@@ -2072,15 +2224,14 @@ def figure_maps(runs: dict, fids: dict, sw, sf, metabolite: str, acc: float, out
     plt.close(fig)
 
 
-def figure_maps_acceleration(runs: dict, by_acc: dict, sw, sf, metabolite: str, out: Path,
+def figure_maps_acceleration(runs: dict, fitted: dict, mask, metabolite: str, out: Path,
                              name: str):
     """A metabolite map, middle slice, at every test acceleration (columns): the undersampled
     input and each arm's reconstruction (rows), the truth top left; NRMSE in the brain under
-    each."""
+    each. *fitted* holds, per acceleration, each one's LCModel maps over *mask*."""
     plt = figure_style()
-    accs = sorted(by_acc)
-    truth = band_map(by_acc[accs[0]]['truth'], sw, sf, MAP_BANDS[metabolite])
-    mask = brain_mask(by_acc[accs[0]]['truth'], sw, sf)
+    accs = sorted(fitted)
+    truth = fitted[accs[0]]['truth'][metabolite]
     z = mask.shape[2] // 2
     top = float(torch.quantile(truth[mask], 0.99))
     show = lambda m: np.where(mask[:, :, z].numpy(), m[:, :, z].numpy(), np.nan).T
@@ -2098,7 +2249,7 @@ def figure_maps_acceleration(runs: dict, by_acc: dict, sw, sf, metabolite: str, 
     for c, acc in enumerate(accs, start=1):
         axes[0, c].set_title(f'Acceleration {acc:g}', fontsize=7, pad=3)
         for r, key in enumerate(rows):
-            m = band_map(by_acc[acc][key], sw, sf, MAP_BANDS[metabolite])
+            m = fitted[acc][key][metabolite]
             axes[r, c].imshow(show(m), cmap='magma', vmin=0, vmax=top, origin='lower')
             err = float(((m - truth)[mask] ** 2).sum().sqrt() / (truth[mask] ** 2).sum().sqrt())
             axes[r, c].set_xlabel(f'NRMSE {err:.3f}', fontsize=6.5, labelpad=1)
@@ -2181,10 +2332,18 @@ def figures(args):
     by_acc = {}
     for acc in EVALUATION['test_acc']:
         by_acc[acc], sw, sf = reconstruct(pick, subject, 'track1', acc, device)
+    # Deep-ER's maps (LCModel) of the middle slice's brain, the truth's fitted once
+    brain = brain_mask(by_acc[4.0]['truth'], sw, sf)
+    mask = brain.clone()
+    mask[..., torch.arange(mask.shape[2]) != mask.shape[2] // 2] = False
+    fit = lambda v: lcmodel_maps(v, brain, sw, sf, args.data_dir, fit=mask)
+    truth = fit(by_acc[4.0]['truth'])
+    fitted = {acc: {'truth': truth, **{k: fit(v) for k, v in fids.items() if k != 'truth'}}
+              for acc, fids in by_acc.items()}
     for metabolite, where in (('NAA', main_dir), ('tCr', appendix), ('tCho', appendix)):
-        figure_maps(pick, by_acc[4.0], sw, sf, metabolite, 4.0, where,
+        figure_maps(pick, fitted[4.0], mask, metabolite, 4.0, where,
                     f'fig_deep_er_maps_{metabolite}')
-    figure_maps_acceleration(pick, by_acc, sw, sf, 'NAA', main_dir,
+    figure_maps_acceleration(pick, fitted, mask, 'NAA', main_dir,
                              'fig_deep_er_maps_acceleration')
     figure_spectra(pick, by_acc[4.0], sw, sf, 4.0, main_dir, 'fig_deep_er_spectra')
 
