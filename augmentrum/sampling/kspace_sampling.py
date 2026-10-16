@@ -3653,7 +3653,10 @@ class KspaceUndersampling(BaseModule):
                  traj_scale: float = 1.0,
                  traj_affine=None,
                  traj_shift: Optional[Sequence[float]] = None,
-                 dual_trajectory: bool = False):
+                 dual_trajectory: bool = False,
+                 # how the gridding reconstruction weights the samples
+                 dcf: str = 'pipe',
+                 hamming: bool = False):
         """
         ksp_mode: 'cartesian', 'gridded', 'nufft' or 'off' (see class docstring).
         nufft_osf: NUFFT grid oversampling, used by ksp_mode='nufft' only.
@@ -3699,6 +3702,11 @@ class KspaceUndersampling(BaseModule):
         dual_trajectory: sample on the transformed trajectory, regrid on the
                 reference (see class docstring). Requires ksp_mode='nufft'
                 with the gridding engine.
+        dcf: density compensation of the gridding engine: 'pipe' (iterative,
+                any trajectory) or 'voronoi' (cell areas per in-plane
+                partition, as the ECCENTRIC pipeline weights its samples).
+        hamming: a Hamming window over k-space on the samples before the
+                adjoint, as the ECCENTRIC pipeline filters them.
         """
         super().__init__()
 
@@ -3743,6 +3751,13 @@ class KspaceUndersampling(BaseModule):
         self.traj_affine = None if traj_affine is None else np.asarray(traj_affine, np.float64)
         self.traj_shift = None if traj_shift is None else tuple(float(s) for s in traj_shift)
         self.dual_trajectory = bool(dual_trajectory)
+        if dcf not in ('pipe', 'voronoi'):
+            raise ValueError(f"dcf must be 'pipe' or 'voronoi', got {dcf!r}")
+        if (dcf != 'pipe' or hamming) and nufft_impl == 'torchkbnufft':
+            raise ValueError("dcf and hamming weight the gridding engine; torchkbnufft keeps its "
+                             "own Pipe weights.")
+        self.dcf = dcf
+        self.hamming = bool(hamming)
 
         if self.dual_trajectory:
             if ksp_mode != 'nufft':
@@ -3929,9 +3944,13 @@ class KspaceUndersampling(BaseModule):
 
         nufft, gridder = self._gridders(im_size)
 
-        # Without the Pipe weights the adjoint weights k-space by how densely
+        # Without density weights the adjoint weights k-space by how densely
         # the trajectory visits it, a strong low-pass even when fully sampled
-        dcf = gridder.density_weights(recon_coords, like=vol).astype(np.complex128)
+        dcf = (gridder.voronoi_weights(recon_coords, like=vol) if self.dcf == 'voronoi'
+               else gridder.density_weights(recon_coords, like=vol))
+        if self.hamming:
+            dcf = dcf * gridder.hamming(recon_coords)
+        dcf = dcf.astype(np.complex128)
         if dual:
             # The reference trajectory owns the regridding: the Pipe weights
             # and the translation ramp are functions of where the samples are

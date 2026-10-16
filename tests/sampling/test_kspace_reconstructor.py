@@ -274,6 +274,25 @@ class TestKspaceUndersamplingNufft:
         out, _ = us.process_tensor(vol.copy())
         assert np.linalg.norm(out - vol) / np.linalg.norm(vol) < 0.3
 
+    @pytest.mark.parametrize('hamming', [False, True])
+    def test_voronoi_weights_return_the_image(self, hamming):
+        """The ECCENTRIC pipeline's own weighting, Voronoi cells per partition and a Hamming
+        window, gives the image back as the Pipe weights do."""
+        from augmentrum.sampling import KspaceUndersampling
+        vol = self._volume()
+        us = KspaceUndersampling(ksp_mode='nufft', trajectory='stack_of_eccentric',
+                                 acceleration_factor=1.0, us_seed=0, traj_params={'n_shots': 64},
+                                 dcf='voronoi', hamming=hamming)
+        out, _ = us.process_tensor(vol.copy())
+        assert np.linalg.norm(out - vol) / np.linalg.norm(vol) < 0.3
+
+    def test_rejects_unknown_weights_and_weights_torchkbnufft_cannot_take(self):
+        from augmentrum.sampling import KspaceUndersampling
+        with pytest.raises(ValueError, match="'pipe' or 'voronoi'"):
+            KspaceUndersampling(ksp_mode='nufft', dcf='area')
+        with pytest.raises(ValueError, match="torchkbnufft"):
+            KspaceUndersampling(ksp_mode='nufft', nufft_impl='torchkbnufft', hamming=True)
+
     def test_noise_does_not_shrink_the_signal(self):
         """
         The output scale is read off the noiseless samples.

@@ -301,3 +301,51 @@ class TestDeviceKernels:
         on_device = nufft.density_weights(coords, like=like)
         np.testing.assert_allclose(on_device, nufft.density_weights(coords), rtol=1e-12)
         assert np.array_equal(on_device, nufft.density_weights(coords, like=like))
+
+
+#**************************************************************************************************#
+#                                     Class TestVoronoiWeights                                     #
+#**************************************************************************************************#
+#                                                                                                  #
+# Density compensation by cell area, per in-plane partition, and the Hamming window.               #
+#                                                                                                  #
+#**************************************************************************************************#
+class TestVoronoiWeights:
+    """Density compensation by cell area, per in-plane partition, and the Hamming window."""
+
+    @staticmethod
+    def _grid(n=16):
+        g = (np.arange(n) - n // 2) / (2 * n)
+        return np.stack(np.meshgrid(g, g, indexing='ij'), axis=-1).reshape(-1, 2)
+
+    def test_a_grid_has_equal_cells_inside(self):
+        pts = self._grid()
+        w = GriddingNUFFT((N, N)).voronoi_weights(pts)
+        inside = (np.abs(pts) < 7 / 32).all(axis=1)
+        np.testing.assert_allclose(w[inside], (1 / 32) ** 2, rtol=1e-9)
+
+    def test_samples_on_one_spot_share_their_cell(self):
+        pts = self._grid()
+        nufft = GriddingNUFFT((N, N))
+        w, twice = nufft.voronoi_weights(pts), nufft.voronoi_weights(np.concatenate([pts, pts[:5]]))
+        np.testing.assert_allclose(twice[:5] * 2, w[:5], rtol=1e-9)
+        np.testing.assert_allclose(twice[len(pts):], twice[:5], rtol=1e-9)
+
+    def test_a_stack_is_weighted_plane_by_plane(self):
+        pts = self._grid()
+        coarse = pts[(np.round(pts * 32) % 2 == 0).all(axis=1)]          # every other row and column
+        stack = np.concatenate([np.c_[pts, np.full(len(pts), -0.25)],
+                                np.c_[coarse, np.full(len(coarse), 0.25)]])
+        w = GriddingNUFFT((N, N, 4)).voronoi_weights(stack)
+        nufft = GriddingNUFFT((N, N))
+        np.testing.assert_allclose(w[:len(pts)], nufft.voronoi_weights(pts), rtol=1e-12)
+        np.testing.assert_allclose(w[len(pts):], nufft.voronoi_weights(coarse), rtol=1e-12)
+
+    def test_rejects_a_3d_trajectory_that_is_no_stack(self):
+        coords = np.random.default_rng(3).uniform(-0.5, 0.5, (500, 3))
+        with pytest.raises(ValueError, match="stack of planes"):
+            GriddingNUFFT((N, N, 8)).voronoi_weights(coords)
+
+    def test_hamming_runs_from_one_to_its_floor(self):
+        h = GriddingNUFFT.hamming(np.array([[0.0, 0.0], [0.25, 0.0], [0.5, 0.0], [0.4, 0.4]]))
+        np.testing.assert_allclose(h, [1.0, 0.54, 0.08, 0.08])

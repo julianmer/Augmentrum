@@ -53,6 +53,8 @@ class GriddingNUFFT:
     "density_weights"
         how much each sample should count, given how densely the trajectory
         covers k-space.
+    "voronoi_weights"
+        the same, read off each sample's Voronoi cell.
 
     The transform itself is only a pad, an FFT and a crop. What distinguishes
     one NUFFT from another is the interpolator that reads the trajectory off the
@@ -364,6 +366,86 @@ class GriddingNUFFT:
 
         plan[('density', iterations)] = (w / w.max()).cpu().numpy()
         return plan[('density', iterations)]
+
+    def voronoi_weights(self, coords: np.ndarray, like=None) -> np.ndarray:
+        """
+        Density compensation by the area of each sample's Voronoi cell.
+
+        The weighting of the ECCENTRIC reconstructions (Klauser et al.; Weiser
+        et al. 2025, suppl.: "each k-space point was normalized by the area of
+        its assigned Voronoi vertex"), taken per in-plane partition: a 3-D
+        trajectory has to be a stack of planes, one kz each, as every "StackOf"
+        trajectory is. A ring of guard points one mean spacing beyond the
+        outermost samples bounds the outer cells; samples on the same spot
+        share their cell. The weights are areas, up to a constant.
+
+        Args:
+            coords: Trajectory in [-0.5, 0.5), "[K, ndim]".
+            like: The data the weights will meet, or None. On the kernels'
+                device they are kept with the trajectory's plan.
+
+        Returns:
+            Weights "[K]".
+        """
+        coords = np.asarray(coords, dtype=np.float64)
+        plan = self._device_plan(coords, like) \
+            if like is not None and self._kernels(like) is not None else {}
+        if 'voronoi' in plan:
+            return plan['voronoi']
+        if self.ndim == 2:
+            weights = _plane_voronoi_areas(coords)
+        else:
+            kz = np.round(coords[:, 2], 9)
+            planes = np.unique(kz)
+            if len(planes) > self.im_size[2]:
+                raise ValueError("Voronoi weights need a 2-D trajectory or a stack of planes; "
+                                 f"this one has {len(planes)} kz values on {self.im_size[2]} "
+                                 "partitions.")
+            weights = np.empty(len(coords))
+            for value in planes:
+                rows = kz == value
+                weights[rows] = _plane_voronoi_areas(coords[rows, :2])
+        plan['voronoi'] = weights
+        return weights
+
+    @staticmethod
+    def hamming(coords: np.ndarray) -> np.ndarray:
+        """
+        A Hamming window over the trajectory, "[K]": 1 at the centre of
+        k-space, 0.08 where the radius reaches the sphere inscribed in the box
+        (0.5 on every axis), as the ECCENTRIC pipeline filters before gridding.
+        """
+        radius = np.sqrt((np.asarray(coords, dtype=np.float64) ** 2).sum(axis=1)) / 0.5
+        return 0.54 + 0.46 * np.cos(np.pi * np.clip(radius, 0.0, 1.0))
+
+
+#*************************#
+#   plane voronoi areas   #
+#*************************#
+def _plane_voronoi_areas(points: np.ndarray) -> np.ndarray:
+    """
+    The Voronoi cell area of every point of a "[K, 2]" plane, its outer cells bounded by a ring
+    of guard points one mean spacing beyond the outermost point; points on one spot share a cell.
+    Each cell is the fan of triangles from its point to its ridges.
+    """
+    from scipy.spatial import Voronoi
+    unique, inverse, counts = np.unique(np.round(points, 12), axis=0, return_inverse=True,
+                                        return_counts=True)
+    reach = np.hypot(unique[:, 0], unique[:, 1]).max()
+    spacing = np.sqrt(np.pi * reach ** 2 / len(unique))
+    ring = reach + spacing
+    n_guard = int(np.ceil(2.0 * np.pi * ring / spacing))
+    angle = 2.0 * np.pi * np.arange(n_guard) / n_guard
+    vor = Voronoi(np.concatenate([unique, ring * np.stack([np.cos(angle), np.sin(angle)], 1)]))
+
+    ridges, ends = vor.ridge_points, np.asarray(vor.ridge_vertices)
+    finite = (ends >= 0).all(axis=1)
+    ridges, a, b = ridges[finite], vor.vertices[ends[finite, 0]], vor.vertices[ends[finite, 1]]
+    area = np.zeros(len(vor.points))
+    for side in (0, 1):
+        da, db = a - vor.points[ridges[:, side]], b - vor.points[ridges[:, side]]
+        np.add.at(area, ridges[:, side], 0.5 * np.abs(da[:, 0] * db[:, 1] - da[:, 1] * db[:, 0]))
+    return (area[:len(unique)] / counts)[inverse.ravel()]
 
 
 #**************************************************************************************************#
