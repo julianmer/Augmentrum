@@ -90,12 +90,15 @@ from augmentrum.sampling.kspace_sampling import KspaceUndersampling
 TRAJECTORIES = {
     # the published Deep-ER/ECCENTRIC acquisition: 2-D eccentric circles per
     # phase-encoded kz partition, prospective center-crossing acceleration
-    # (Weiser et al. 2025, 2.2: circles of radius kmax/8 on a spherical stack of partitions;
-    # 128 of them, 25 samples each, cover the 64-matrix disk at Nyquist), gridded as its
-    # pipeline does (suppl.: a Hamming filter and Voronoi density compensation)
+    # (Klauser et al. 2024, the 64 x 64 x 31 protocol Deep-ER uses: circles of radius n / (8 FoV),
+    # a quarter of kmax, 51 samples each, centres at uniform polar coordinates, under 5 % of them
+    # through the centre, 4072 of them on the spherical stack; acceleration keeps those and a
+    # random share of the rest), gridded as Deep-ER's pipeline does (suppl.: a Hamming filter and
+    # Voronoi density compensation)
     'eccentric-stack': dict(trajectory='stack_of_eccentric',
                             undersampling='center_crossing',
-                            traj_params={'n_shots': 128, 'radius_frac': 0.125,
+                            traj_params={'n_shots': 191, 'radius_frac': 0.25,
+                                         'samples_per_shot': 51, 'center_frac': 0.04,
                                          'spherical': True},
                             dcf='voronoi', hamming=True),
     # true 3-D readouts, undersampled across all three axes
@@ -167,12 +170,17 @@ EVALUATION = dict(
 #: mm - baseline - nuisance): --target noisy puts it in the coil images.
 ACQUISITION_SIGMA = 1.0e-3
 #: k-space noise per image-component noise of the fully sampled reconstruction without the
-#: Hamming window, where the challenge's is defined: 3.85e-4 gives 1.0e-3; the window then leaves
-#: 2.8e-4 (results/deep_er/tests/voronoi_calibration.py).
-K_PER_IMAGE_SIGMA = 0.385
+#: Hamming window, where the challenge's is defined: 4.92e-4 gives 1.0e-3; the window then leaves
+#: 2.0e-4 (results/deep_er/tests/voronoi_calibration.py).
+K_PER_IMAGE_SIGMA = 0.492
 #: Coil-image noise per image-component noise of the fully sampled reconstruction, alike.
-COIL_PER_IMAGE_SIGMA = 0.989
+COIL_PER_IMAGE_SIGMA = 1.107
 
+
+#: Undersampling patterns per trajectory and acceleration, as Deep-ER trains on its 3T data
+#: (dataloaderBatchNonCart.py: "acc_ind = random.randint(0,4)"); each pattern's Voronoi weights are
+#: built once.
+PATTERNS = 5
 
 #: One subject's metabolite signal as complex64: 64 x 64 x 32 x 384 x 8 bytes.
 POOL_GB_PER_SUBJECT = 0.403
@@ -265,6 +273,7 @@ def acquisition_step(args, accelerations, traj_seed=None, sigma_k=None) -> 'Acqu
         shared_sigma=tuple(s * COIL_PER_IMAGE_SIGMA for s in INPUT_NOISE)
         if args.noise and sigma_k is None else (0.0, 0.0),
         trajectories=0 if traj_seed is not None else args.trajectories,
+        patterns=PATTERNS if traj_seed is None and args.trajectories else 0,
         band_target=args.target == 'truth',
         ksp_mode='cartesian' if 'trajectory' not in trajectory else args.ksp_mode,
         noise_sigma_k=0.0 if args.target == 'noisy' else
@@ -294,19 +303,21 @@ class Acquisition(KspaceUndersampling):
     bank of *trajectories* seeds (a training set of as many scans; 0 places
     the circles anew every call) unless the trajectory has a seed of its
     own. The acceleration is an integer drawn uniformly from *accelerations*
-    (Deep-ER's AF in [1, 6]), or that one value; the dropped shots are drawn
-    anew every call. Noise of the module's own (--noise-sigma-k) goes into
+    (Deep-ER's AF in [1, 6]), or that one value; the dropped shots are one of
+    *patterns* per trajectory and acceleration (Deep-ER's 3T data: five), or
+    drawn anew every call with 0. Noise of the module's own (--noise-sigma-k) goes into
     the input's samples only; *shared_sigma* draws --noise's level per call
     for the coil images, a realisation in the target and the input alike.
     The target is kept in "last_target_".
     """
 
     def __init__(self, accelerations, shared_sigma=(0.0, 0.0), trajectories: int = 0,
-                 band_target: bool = False, **kwargs):
+                 patterns: int = 0, band_target: bool = False, **kwargs):
         super().__init__(acceleration_factor=1.0, **kwargs)
         self.accelerations = accelerations
         self.shared_sigma = shared_sigma
         self.trajectories = trajectories
+        self.patterns = patterns
         self.band_target = band_target
         self.last_target_ = None
 
@@ -333,6 +344,10 @@ class Acquisition(KspaceUndersampling):
         else:
             lo, hi = (int(round(a)) for a in self.accelerations)
             acc = float(rng.integers(lo, hi + 1))
+        if self.patterns:
+            self.us_params['seed'] = int(np.random.SeedSequence(
+                [self.traj_params['seed'], int(acc), int(rng.integers(self.patterns))]
+            ).generate_state(1)[0])
         sigma_k = self.noise_sigma_k
         self.acceleration_factor, self.noise_sigma_k = 1.0, 0.0
         try:
@@ -2393,7 +2408,7 @@ def main():
     parser.add_argument('--noise-sigma-k', type=float, default=0.0,
                         help="k-space noise on the training input's samples (--target truth or "
                              "clean). 0, as Deep-ER trains: its water data is noise-free next to "
-                             "its signal. 3.85e-4 gives the fully sampled input the challenge's "
+                             "its signal. 4.92e-4 gives the fully sampled input the challenge's "
                              "own noise before the Hamming window, SD 1.0e-3 per real and "
                              "imaginary part, which every validation and test input carries "
                              "(EVALUATION).")
