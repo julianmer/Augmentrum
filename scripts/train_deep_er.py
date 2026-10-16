@@ -193,12 +193,14 @@ def build_pipeline(args, device, keep_all: bool = False) -> AugmentationPipeline
     """
     kinds = SPATIAL_KINDS if args.spatial == 'all' else \
         (() if args.spatial == 'none' else (args.spatial,))
-    spatial = [SpatialTransforms(kinds, **SPATIAL)] if kinds else []
+    field = FieldMap(args.data_dir, subjects(args)['train'], 'clean')
+    spatial = [SpatialTransforms(kinds, field=field, **SPATIAL)] if kinds else []
     coils = CoilSampler(mode='synthesize', n_coils=args.n_coils, source=CachedBirdcage(),
                         seed=args.seed)
     acquisition = acquisition_step(args, (args.acc_low, args.acc_high))
 
     steps = [
+        field,                                                    # its B0 map (make_batch)
         ToDevice(device),                                         # 0. one volume to the GPU
         *spectral_steps(args.arm),                                # 1. augment the spectra
         TimepointSampler(None if keep_all else args.n_timepoints),# 2. keep what is trained on
@@ -207,8 +209,8 @@ def build_pipeline(args, device, keep_all: bool = False) -> AugmentationPipeline
         *acquisition_noise(args),                                 # 5. --target noisy: in both
         acquisition,                                              # 6. TARGET (--target),
                                                                   #    INPUT undersampled
-        *([ImageSpaceTransforms(acquisition, coils, **PAUL)]      # 7. --paul: both, as
-          if args.paul else []),                                  #    reconstructed
+        *([ImageSpaceTransforms(acquisition, coils, field=field,  # 7. --paul: both, as
+                                **PAUL)] if args.paul else []),   #    reconstructed
     ]
     if args.crop_t:                                               # debug: shorter FID
         steps.insert(1, ZeroFill(target_pts=args.crop_t))
@@ -226,12 +228,14 @@ def acquisition_noise(args):
     return [Noise(sigma=ACQUISITION_SIGMA)] if args.target == 'noisy' else []
 
 
-def eval_pipeline(args, device, n_timepoints: int, acc: float, add_mm: bool) -> AugmentationPipeline:
+def eval_pipeline(args, device, field: 'FieldMap', n_timepoints: int, acc: float,
+                  add_mm: bool) -> AugmentationPipeline:
     """
     The fixed chain for validation and test: no augmentation, one acceleration,
     the challenge's own noise in the input whatever the run trained with.
     """
     steps = [
+        field,
         ToDevice(device),
         *([Macromolecules(mm_scale=EVALUATION['val_mm_scale'])] if add_mm else []),
         TimepointSampler(n_timepoints, evenly=True),
@@ -352,6 +356,48 @@ class Acquisition(KspaceUndersampling):
 
 
 #**************************************************************************************************#
+#                                        Class FieldMap                                            #
+#**************************************************************************************************#
+#                                                                                                  #
+# The B0 map of the subject a pull comes from, warped with the object by the spatial steps.        #
+#                                                                                                  #
+#**************************************************************************************************#
+class FieldMap(BaseModule):
+    """
+    The B0 map of the subject a pull comes from, warped with the object by the spatial steps.
+
+    Deep-ER's pipeline corrects B0 on the coil-combined image, before the
+    network (Weiser et al. 2025, suppl.: "a frequency shift map [...] applied
+    on the coil combined MRSI image"); make_batch does it with "phasor". The
+    challenge ships each subject's map in Hz, its signals carrying
+    exp(+2i pi B0 t) on its own time axis, which starts at the acquisition
+    delay. The pool records which of *names* a pull holds.
+    """
+
+    SUPPORTED_BACKENDS = (Backend.PYTORCH,)
+    MASKS = 'pass'
+
+    def __init__(self, data_dir, names, signal: str):
+        super().__init__()
+        aux = [MRSIChallengeDataModule(data_dir).read_aux(name, signal) for name in names]
+        self.maps = torch.as_tensor(np.stack([a['B0map'] for a in aux]), dtype=torch.float32)
+        self.t = torch.as_tensor(aux[0]['t'], dtype=torch.float64)
+        self.last_ = None
+
+    def process_tensor(self, data_array, water_array=None, backend=None, pool_origin=None,
+                       **kwargs):
+        index = torch.as_tensor(pool_origin.indices).cpu()
+        self.last_ = self.maps[index].to(data_array.device)            # (B, X, Y, Z)
+        return data_array, water_array
+
+    def phasor(self, timepoints, device):
+        """exp(-2i pi B0 t) of the pull's volume at *timepoints*, (n, X, Y, Z): its B0 undone."""
+        t = self.t[torch.as_tensor(np.asarray(timepoints))].to(self.last_.device)
+        angle = -2.0 * np.pi * t.view(-1, 1, 1, 1) * self.last_[0].double()
+        return torch.polar(torch.ones_like(angle), angle).to(device, torch.cfloat)
+
+
+#**************************************************************************************************#
 #                                        Class ToDevice                                            #
 #**************************************************************************************************#
 #                                                                                                  #
@@ -440,13 +486,15 @@ class SpatialTransforms(SpatialAugmentations):
     rot90 is always off (the in-plane field of view is not square), a flip
     is left-right only, and the free 3-D rotation ('rotation3d', Deep-ER's
     own) is off unless chosen. A *translation_mm* replaces the parent's
-    fraction of the axis length by millimetres on every axis.
+    fraction of the axis length by millimetres on every axis. The *field*'s
+    B0 map moves with the head.
     """
 
     def __init__(self, kinds=SPATIAL_KINDS, prob: float = 0.5,
                  translation_frac: float = 0.05, translation_mm: float = None,
                  max_z_angle_deg: float = 15.0, max_random_angle_deg: float = 0.0,
-                 zoom_min: float = 0.9, zoom_max: float = 1.1, shear_max: float = 0.05):
+                 zoom_min: float = 0.9, zoom_max: float = 1.1, shear_max: float = 0.05,
+                 field: FieldMap = None):
         super().__init__(dim=3, prob=prob,
                          translation_frac=1.0 if translation_mm else translation_frac,
                          max_z_angle_deg=max_z_angle_deg,
@@ -458,6 +506,17 @@ class SpatialTransforms(SpatialAugmentations):
             raise ValueError(f"Unknown spatial transforms {sorted(unknown)}.")
         self.kinds = tuple(kinds)
         self.translation_mm = translation_mm
+        self.field = field
+
+    def process_tensor(self, data_array, water_array=None, backend=None, **kwargs):
+        out = super().process_tensor(data_array, water_array, backend, **kwargs)
+        self.warp_field()
+        return out
+
+    def warp_field(self):
+        """The B0 map through the warp just drawn."""
+        self.field.last_ = self.apply(self.field.last_[..., None],
+                                      aug_spec_list=self.aug_specs_)[0][..., 0]
 
     def sample_augmentations(self, batch_size, pipeline='data', rng=None):
         specs = super().sample_augmentations(batch_size, pipeline=pipeline, rng=rng)
@@ -523,6 +582,7 @@ class ImageSpaceTransforms(SpatialTransforms):
 
         self.acquisition.last_target_ = warp(self.acquisition.last_target_)
         self.aug_specs_ = specs
+        self.warp_field()
         return warp(data_array), water_array
 
 
@@ -865,13 +925,15 @@ def metrics(reco, target, mask):
 #**********#
 #   data   #
 #**********#
-def make_batch(x, y, sense, truth=None):
+def make_batch(x, y, sense, b0, truth=None):
     """
     One pull, "(X, Y, Z, n, C)" complex input and target over its kept
     timepoints, into a batch of n per-timepoint volumes: the coil-combined
     image, the multi-coil k-space and the target image, each timepoint
     scaled by the maximum of its input image magnitude (Deep-ER's
-    normalisation); the noise-free *truth* of the fixed sets alike.
+    normalisation); the noise-free *truth* of the fixed sets alike. Every
+    coil-combined image has its B0 undone by *b0* ("FieldMap.phasor"), as
+    Deep-ER's pipeline does before the network.
 
     The simulated metabolite signal is exactly zero outside the head, so the
     brain mask falls out of the (augmented) target itself and stays
@@ -882,7 +944,7 @@ def make_batch(x, y, sense, truth=None):
     ys = y.permute(3, 0, 1, 2, 4)                                  # (n, X, Y, Z, C)
     mask = (ys.abs().sum(dim=(0, 4)) > 0).float()                  # (X, Y, Z)
     xs = x.permute(3, 0, 1, 2, 4)
-    combine = lambda v: torch.sum(torch.conj(sense) * v, dim=-1)   # (n, X, Y, Z)
+    combine = lambda v: torch.sum(torch.conj(sense) * v, dim=-1) * b0  # (n, X, Y, Z)
     as_channels = lambda c: torch.stack((c.real, c.imag), dim=1)   # (n, 2, X, Y, Z)
 
     img = combine(xs) * mask
@@ -912,12 +974,14 @@ def pulls(aug, split: str, device):
     coil = next(s for s in pipe.steps if isinstance(s, CoilSampler))
     sampler = next(s for s in pipe.steps if isinstance(s, TimepointSampler))
     acquisition = next(s for s in pipe.steps if isinstance(s, Acquisition))
+    field = next(s for s in pipe.steps if isinstance(s, FieldMap))
     for x, *truth in aug.dataloader(split=split, framework='pytorch'):
         sense = coil.source.last_maps(device)
         x = x[0].to(device, torch.cfloat)                          # (X, Y, Z, n, C)
         y = acquisition.last_target_[0].to(device, torch.cfloat)
         truth = truth[0][0].to(device, torch.cfloat) if truth else None
-        yield make_batch(x, y, sense, truth), sampler.last_timepoints_
+        b0 = field.phasor(sampler.last_timepoints_, device)
+        yield make_batch(x, y, sense, b0, truth), sampler.last_timepoints_
 
 
 def build_train_data(args, device):
@@ -960,11 +1024,14 @@ def fixed_set(args, device, split: str, names, acc: float, n_timepoints: int):
     macromolecule level; the test truth ('meta+mm') has its own.
     """
     is_test = split.startswith('test')
+    signal = 'meta+mm' if is_test else 'clean'
+    field = FieldMap(args.data_dir, names, signal)
     aug = MRSIChallengeData(
-        args.data_dir, signal={split: 'meta+mm' if is_test else 'clean'},
+        args.data_dir, signal={split: signal},
         splits={split: tuple(names)},
         batch_size=1,
-        pipelines={split: eval_pipeline(args, device, n_timepoints, acc, add_mm=not is_test)},
+        pipelines={split: eval_pipeline(args, device, field, n_timepoints, acc,
+                                        add_mm=not is_test)},
         outputs={split: ('data', 'truth')},
         modes={split: 'fixed'},
         backend='pytorch', volatile=True, seed=EVALUATION['seed'],
@@ -1922,13 +1989,15 @@ def reconstruct(runs: dict, subject: str, track: str, acc: float, device, chunk:
         nii = aug.splits[split][0].nifti_list[0]
         n_total, sw, sf = nii.shape[3], 1.0 / nii.dwelltime, nii.spectrometer_frequency[0]
         coil = next(s for s in aug.pipelines[split].steps if isinstance(s, CoilSampler))
+        field = next(s for s in aug.pipelines[split].steps if isinstance(s, FieldMap))
         x, truth = next(iter(aug.dataloader(split=split, framework='pytorch')))
         sense = torch.as_tensor(coil.last_maps_, dtype=torch.cfloat, device=device)
         y = next(s for s in aug.pipelines[split].steps if isinstance(s, Acquisition)).last_target_
         x, y, truth = x[0], y[0], truth[0]
+        b0 = field.phasor(timepoints, device)
         for c in range(0, x.shape[3], chunk):
             at = lambda v: v[:, :, :, c:c + chunk].to(device, torch.cfloat)
-            b = make_batch(at(x), at(y), sense, at(truth))
+            b = make_batch(at(x), at(y), sense, b0[c:c + chunk], at(truth))
             scale = b['scale'][:, 0]
             out['truth'].append((as_complex(b['img_truth']) * scale).cpu())
             out['input'].append((as_complex(b['inputs_img']) * scale).cpu())
