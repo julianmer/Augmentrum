@@ -850,7 +850,7 @@ class DeepER(nn.Module):
         self.out_img = nn.Conv3d(4, 2, 1)
         self.out_k = nn.Conv3d(2 * k_ch, k_ch, 1)
 
-    def forward(self, img0, k0, sense):
+    def forward(self, img0, k0, sense, batch=None):
         """sense: "(X, Y, Z, C)" complex maps, shared over the batch."""
         sense = coil_first(sense)
         img, k = img0, k0
@@ -942,7 +942,13 @@ def metrics(reco, target, mask):
 #**********#
 #   data   #
 #**********#
-def make_batch(x, y, sense, b0, truth=None):
+#: What make_batch scales a pull's volumes by: each timepoint's own input maximum ('timepoint',
+#: Deep-ER's normalisation, which lifts the noise-only tail of the FID to the signal's level) or
+#: the pull's ('pull': the tail stays small, and the loss is decided where the signal is).
+SCALE = 'timepoint'
+
+
+def make_batch(x, y, sense, b0, truth=None, acq=None):
     """
     One pull, "(X, Y, Z, n, C)" complex input and target over its kept
     timepoints, into a batch of n per-timepoint volumes: the coil-combined
@@ -950,7 +956,10 @@ def make_batch(x, y, sense, b0, truth=None):
     scaled by the maximum of its input image magnitude (Deep-ER's
     normalisation); the noise-free *truth* of the fixed sets alike. Every
     coil-combined image has its B0 undone by *b0* ("FieldMap.phasor"), as
-    Deep-ER's pipeline does before the network.
+    Deep-ER's pipeline does before the network; *b0* rides along, and so
+    does the acquisition's operator (*acq*, its "last_acquisition_") as
+    'acq_coords', 'acq_dcf' and 'acq_gain', for a model that applies the
+    acquisition to its own iterates.
 
     The simulated metabolite signal is exactly zero outside the head, so the
     brain mask falls out of the (augmented) target itself and stays
@@ -966,6 +975,8 @@ def make_batch(x, y, sense, b0, truth=None):
 
     img = combine(xs) * mask
     scale = img.abs().flatten(1).amax(dim=1).clamp(min=1e-12).view(-1, 1, 1, 1, 1)
+    if SCALE == 'pull':
+        scale = scale.amax().expand_as(scale)
 
     batch = {
         'inputs_img':    as_channels(img) / scale,
@@ -974,10 +985,19 @@ def make_batch(x, y, sense, b0, truth=None):
         'mask':          mask.expand(xs.shape[0], -1, -1, -1).contiguous(),
         'sense':         sense,
         'scale':         scale,
+        'b0':            b0,
     }
     if truth is not None:
         batch['img_truth'] = as_channels(combine(truth.permute(3, 0, 1, 2, 4))) / scale
+    if acq is not None:
+        batch.update(acq_coords=torch.as_tensor(acq['coords'], device=img.device),
+                     acq_dcf=torch.as_tensor(acq['dcf'], device=img.device).to(torch.cfloat),
+                     acq_gain=torch.as_tensor(acq['gain'], device=img.device).float())
     return batch
+
+
+#: Batch entries shared by all its timepoints, not sliced with them.
+SHARED = ('sense', 'acq_coords', 'acq_dcf', 'acq_gain')
 
 
 def kspace_input(img, sense):
@@ -1003,7 +1023,8 @@ def pulls(aug, split: str, device):
         y = acquisition.last_target_[0].to(device, torch.cfloat)
         truth = truth[0][0].to(device, torch.cfloat) if truth else None
         b0 = field.phasor(sampler.last_timepoints_, device)
-        yield make_batch(x, y, sense, b0, truth), sampler.last_timepoints_
+        yield (make_batch(x, y, sense, b0, truth, acquisition.last_acquisition_),
+               sampler.last_timepoints_)
 
 
 def build_train_data(args, device):
@@ -1295,7 +1316,7 @@ def run_name(args) -> str:
 def run_batch(model, loss_func, batch, amp: bool):
     """One forward pass + loss on a batch."""
     with torch.autocast('cuda', dtype=torch.bfloat16, enabled=amp):
-        reco_img, _ = model(batch['inputs_img'], batch['inputs_kspace'], batch['sense'])
+        reco_img, _ = model(batch['inputs_img'], batch['inputs_kspace'], batch['sense'], batch)
     return loss_func(reco_img, batch['img_gt'], batch['mask']), reco_img
 
 
@@ -1312,7 +1333,7 @@ def evaluate(model, loss_func, batches, amp: bool):
         n = batch['inputs_img'].shape[0]
         losses, errs, energies, ssims = [], [], [], []
         for lo in range(0, n, EVAL_CHUNK):
-            part = {k: (v if k == 'sense' else v[lo:lo + EVAL_CHUNK]) for k, v in batch.items()}
+            part = {k: (v if k in SHARED else v[lo:lo + EVAL_CHUNK]) for k, v in batch.items()}
             loss, reco = run_batch(model, loss_func, part, amp)
             err, energy, ssim = metrics(reco, part['img_gt'], part['mask'])
             losses.append(loss.item() * len(err))
@@ -1328,60 +1349,103 @@ def evaluate(model, loss_func, batches, amp: bool):
 
 def load_val_maps(args, device, names, pull: int = 48):
     """
-    What the validation score needs of every subject: its whole FID's inputs at the validation
-    acceleration (bf16, with their scales) and coils, and the truth's maps (MAP_BANDS, B0
-    undone) in its brain, on the CPU. The FID goes through the fixed chain *pull* timepoints at
-    a time; the fixed seed gives every pull the same coils and trajectory.
+    What the validation scores need of every subject: its whole FID's inputs at the validation
+    acceleration (bf16, with their scales) and coils, the band maps (MAP_BANDS, B0 undone) of the
+    truth and of the target in its brain, and the truth's LCModel concentrations on
+    LCMODEL_VAL_VOXELS voxels of its middle slice, on the CPU. The FID goes through the fixed
+    chain *pull* timepoints at a time; the fixed seed gives every pull the same coils and
+    trajectory.
     """
     out = []
     for name in names:
-        imgs, scales, truths, lo, n_total = [], [], [], 0, None
+        imgs, scales, truths, targets, lo, n_total = [], [], [], [], 0, None
         while n_total is None or lo < n_total:
             timepoints = range(lo, lo + pull if n_total is None else min(lo + pull, n_total))
             aug, split = fixed_set(args, device, 'val', [name], EVALUATION['val_acc'], timepoints)
             nii = aug.splits[split][0].nifti_list[0]
             n_total, sw, sf = nii.shape[3], 1.0 / nii.dwelltime, nii.spectrometer_frequency[0]
+            field = next(s for s in aug.pipelines[split].steps if isinstance(s, FieldMap))
             batch, _ = next(pulls(aug, split, device))
+            if SCALE == 'pull' and scales:        # the whole FID on its first pull's scale
+                first = scales[0][:1].to(device)
+                for key in ('inputs_img', 'inputs_kspace', 'img_gt', 'img_truth'):
+                    batch[key] = batch[key] * (batch['scale'] / first)
+                batch['scale'] = first.expand_as(batch['scale'])
             imgs.append(batch['inputs_img'].to('cpu', torch.bfloat16))
             scales.append(batch['scale'].cpu())
-            truths.append((torch.complex(batch['img_truth'][:, 0], batch['img_truth'][:, 1])
-                           * batch['scale'][:, 0]).cpu())
+            for key, store in (('img_truth', truths), ('img_gt', targets)):
+                store.append((torch.complex(batch[key][:, 0], batch[key][:, 1])
+                              * batch['scale'][:, 0]).cpu())
             lo += len(timepoints)
-        truth = torch.cat(truths).permute(1, 2, 3, 0)
+        truth, target = (torch.cat(v).permute(1, 2, 3, 0) for v in (truths, targets))
+        mask = brain_mask(truth, sw, sf)
+        fit = lcmodel_val_voxels(mask)
         out.append({'img': torch.cat(imgs), 'scale': torch.cat(scales),
-                    'sense': batch['sense'].cpu(), 'mask': brain_mask(truth, sw, sf),
+                    'sense': batch['sense'].cpu(), 'mask': mask, 'fit': fit,
+                    'acq': {k: batch[k].cpu() for k in batch if k.startswith('acq_')},
+                    'b0map': field.last_[0].float().cpu(), 't': field.t.cpu(),
                     'maps': {met: band_map(truth, sw, sf, band) for met, band in MAP_BANDS.items()},
-                    'sw': sw, 'sf': sf})
+                    'maps_target': {met: band_map(target, sw, sf, band)
+                                    for met, band in MAP_BANDS.items()},
+                    'lcmodel': lcmodel_maps(truth, mask.cpu(), sw, sf, args.data_dir, fit=fit),
+                    'sw': sw, 'sf': sf, 'data_dir': args.data_dir})
     return out
 
 
+def lcmodel_val_voxels(mask):
+    """LCMODEL_VAL_VOXELS voxels spread evenly over the brain's middle slice, as a mask."""
+    fit = mask.cpu().clone()
+    fit[..., torch.arange(fit.shape[2]) != fit.shape[2] // 2] = False
+    where = fit.nonzero()
+    keep = where[torch.linspace(0, len(where) - 1, min(LCMODEL_VAL_VOXELS, len(where))).round().long()]
+    fit = torch.zeros_like(fit)
+    fit[keep[:, 0], keep[:, 1], keep[:, 2]] = True
+    return fit
+
+
 @torch.no_grad()
-def map_score(model, val_maps, device, amp: bool) -> float:
+def map_score(model, val_maps, device, amp: bool) -> dict:
     """
-    The validation score: the NRMSE of each subject's reconstructed maps against the truth's in
-    its brain, the mean over MAP_BANDS and subjects. The maps are what the reconstruction is
-    for; the loss weighs every timepoint alike, and late in the FID there is only noise. No
-    *model* scores the input itself.
+    The validation scores, each the NRMSE of the reconstruction's maps, the mean over MAP_BANDS
+    and subjects: 'maps' the band maps against the truth's in the brain (the pipeline's own
+    resolution loss sets its floor), 'maps_target' against the fully sampled target's (what the
+    undersampling alone costs), 'lcmodel' the LCModel concentrations on the middle slice's
+    LCMODEL_VAL_VOXELS against the truth's fit. The maps are what the reconstruction is for; the
+    loss weighs every timepoint alike, and late in the FID there is only noise. No *model*
+    scores the input itself.
     """
-    model = model.eval() if model is not None else (lambda img, k, sense: (img, None))
-    scores = []
+    model = model.eval() if model is not None else (lambda img, k, sense, batch: (img, None))
+    scores = {'maps': [], 'maps_target': [], 'lcmodel': []}
     for s in val_maps:
         sense, recos = s['sense'].to(device), []
+        shared = {k: v.to(device) for k, v in s['acq'].items()}
+        b0map = s['b0map'].to(device).double()
         for lo in range(0, len(s['img']), EVAL_CHUNK):
             img = s['img'][lo:lo + EVAL_CHUNK].to(device, torch.float32)
+            angle = -2.0 * np.pi * s['t'][lo:lo + EVAL_CHUNK].to(device).double().view(-1, 1, 1, 1) * b0map
+            batch = dict(shared, b0=torch.polar(torch.ones_like(angle), angle).to(torch.cfloat))
             with torch.autocast('cuda', dtype=torch.bfloat16, enabled=amp):
                 reco, _ = model(img, kspace_input(torch.complex(img[:, 0], img[:, 1]), sense),
-                                sense)
+                                sense, batch)
             recos.append(torch.complex(reco[:, 0].float(), reco[:, 1].float())
                          * s['scale'][lo:lo + EVAL_CHUNK, 0].to(device))
         fid, mask = torch.cat(recos).permute(1, 2, 3, 0), s['mask'].to(device)
+        nrmse = lambda a, b, m: float((a - b)[m].norm() / b[m].norm())
         for met, band in MAP_BANDS.items():
-            truth = s['maps'][met].to(device)
-            scores.append(float((band_map(fid, s['sw'], s['sf'], band) - truth)[mask].norm()
-                                / truth[mask].norm()))
+            out = band_map(fid, s['sw'], s['sf'], band)
+            scores['maps'].append(nrmse(out, s['maps'][met].to(device), mask))
+            scores['maps_target'].append(nrmse(out, s['maps_target'][met].to(device), mask))
+        fitted = lcmodel_maps(fid.cpu(), s['mask'], s['sw'], s['sf'], s['data_dir'], fit=s['fit'])
+        for met in MAP_BANDS:
+            scores['lcmodel'].append(nrmse(fitted[met], s['lcmodel'][met], s['fit']))
     if isinstance(model, nn.Module):
         model.train()
-    return float(np.mean(scores))
+    return {key: float(np.mean(v)) for key, v in scores.items()}
+
+
+def scores_line(scores: dict) -> str:
+    return (f"maps {scores['maps']:.4f}  maps/target {scores['maps_target']:.4f}  "
+            f"lcmodel {scores['lcmodel']:.4f}")
 
 
 def load_fixed(args, device, split, names, acc, n_timepoints, keep_on):
@@ -1477,7 +1541,7 @@ def train(args):
     else:
         with open(log_path, 'w', newline='') as f:
             csv.writer(f).writerow(['step', 'train_loss', 'val_loss', 'val_nrmse',
-                                    'val_ssim', 'val_maps', 'ms_per_step'])
+                                    'val_ssim', 'val_maps', 'val_maps_target', 'val_lcmodel', 'ms_per_step'])
 
     val_names = subjects(args)['val']
     val_set = load_fixed(args, device, 'val', val_names, EVALUATION['val_acc'],
@@ -1486,7 +1550,7 @@ def train(args):
     val_maps = load_val_maps(args, device, val_names)
     print(f"validation: {len(val_set)} subjects x {EVALUATION['val_timepoints']} "
           f"timepoints at acceleration {EVALUATION['val_acc']:g}, and their maps (the input's "
-          f"{map_score(None, val_maps, device, amp):.4f})")
+          f"{scores_line(map_score(None, val_maps, device, amp))})")
 
     run = None
     if args.wandb:
@@ -1513,19 +1577,19 @@ def train(args):
         ms = (time.time() - t0) / len(running) * 1e3
         train_loss = torch.stack(running).mean().item()
         val, _ = evaluate(step_model, loss_func, to_device(val_set, device), amp)
-        maps = map_score(step_model, val_maps, device, amp)
+        scores = map_score(step_model, val_maps, device, amp)
         print(f"step {step:7d}/{args.steps}  train {train_loss:.5f}  val {val['loss']:.5f}  "
-              f"nrmse {val['nrmse']:.4f}  ssim {val['ssim']:.4f}  maps {maps:.4f}  "
+              f"nrmse {val['nrmse']:.4f}  ssim {val['ssim']:.4f}  {scores_line(scores)}  "
               f"({ms:.0f} ms/step)", flush=True)
         with open(log_path, 'a', newline='') as f:
-            csv.writer(f).writerow([step, train_loss, val['loss'], val['nrmse'],
-                                    val['ssim'], maps, round(ms, 1)])
+            csv.writer(f).writerow([step, train_loss, val['loss'], val['nrmse'], val['ssim'],
+                                    *scores.values(), round(ms, 1)])
         if run:
             run.log({'loss/train': train_loss, 'loss/val': val['loss'],
-                     'val/nrmse': val['nrmse'], 'val/ssim': val['ssim'], 'val/maps': maps,
-                     'ms_per_step': ms}, step=step)
-        if maps < best_maps:                  # the checkpoint whose maps are best
-            best_maps = maps
+                     'val/nrmse': val['nrmse'], 'val/ssim': val['ssim'],
+                     **{f'val/{k}': v for k, v in scores.items()}, 'ms_per_step': ms}, step=step)
+        if scores['lcmodel'] < best_maps:     # the checkpoint whose concentrations are best
+            best_maps = scores['lcmodel']
             torch.save(model.state_dict(), out_dir / 'best.pt')
         torch.save({'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
                     'step': step, 'best_maps': best_maps}, last_path)
@@ -1815,6 +1879,8 @@ CHALLENGE_METABOLITES = ('Asp', 'GABA', 'Gln', 'Glu', 'Lac', 'Lac41', 'NAA', 'NA
 LCMODEL_MAPS = {'NAA': ('NAA', 'NAAG'), 'tCr': ('tCr', 'tCr39'), 'tCho': ('tCho',),
                 'Glx': ('Glu', 'Gln'), 'mIns': ('mIns',)}
 LCMODEL_WORKERS = 16
+#: Voxels of each validation subject's middle slice LCModel fits at every evaluation.
+LCMODEL_VAL_VOXELS = 128
 
 
 def low_rank(fids, mask, rank: int = LOW_RANK):
@@ -1867,17 +1933,18 @@ def _lcmodel_fit(fids):
     return _LCM['fit'].forward(fids)[0]
 
 
-def lcmodel_maps(fids, mask, sw, sf, data_dir, fit=None, chunk: int = 64) -> dict:
+def lcmodel_maps(fids, mask, sw, sf, data_dir, fit=None, chunk: int = None) -> dict:
     """
     Deep-ER's maps of FIDs (X, Y, Z, T): the brain *mask* kept at rank LOW_RANK, every voxel of
-    *fit* (a part of it, the whole by default) fitted by LCModel; {total: (X, Y, Z)} for
-    LCMODEL_MAPS, zero elsewhere.
+    *fit* (a part of it, the whole by default) fitted by LCModel, *chunk* voxels per job (one
+    job per worker by default); {total: (X, Y, Z)} for LCMODEL_MAPS, zero elsewhere.
     """
     import tempfile
     from concurrent.futures import ProcessPoolExecutor
     fit = mask if fit is None else fit
     basis = lcmodel_basis(data_dir, Path('data/lcmodel/challenge.basis'))
     rows = low_rank(fids, mask)[fit].numpy()
+    chunk = chunk or max(1, -(-len(rows) // LCMODEL_WORKERS))
     with tempfile.TemporaryDirectory() as workdir, ProcessPoolExecutor(
             LCMODEL_WORKERS, initializer=_lcmodel_worker,
             initargs=(basis, rows.shape[1], sw, sf, workdir)) as pool:
