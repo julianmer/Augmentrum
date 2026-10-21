@@ -286,6 +286,19 @@ class TestKspaceUndersamplingNufft:
         out, _ = us.process_tensor(vol.copy())
         assert np.linalg.norm(out - vol) / np.linalg.norm(vol) < 0.3
 
+    def test_last_acquisition_rebuilds_the_reconstruction(self):
+        """The kept operator pieces reproduce the module's own output: an unrolled network can
+        apply the acquisition's normal operator to its iterates."""
+        vol = self._volume()
+        out, us = self._run(array=torch.from_numpy(vol.copy()))
+        acq = us.last_acquisition_
+        planes = torch.from_numpy(vol).permute(0, 3, 4, 1, 2).reshape(-1, self.X, self.Y)
+        again = acq['gridder'].adjoint(acq['nufft'].forward(planes, acq['coords'])
+                                       * torch.as_tensor(acq['dcf'])[None], acq['coords'])
+        again = (again * acq['gain']).reshape(self.B, self.Z, self.T, self.X, self.Y)
+        again = again.permute(0, 3, 4, 1, 2).to(out.dtype)
+        assert torch.allclose(again, out, rtol=1e-3, atol=1e-3 * out.abs().max())
+
     def test_rejects_unknown_weights_and_weights_torchkbnufft_cannot_take(self):
         from augmentrum.sampling import KspaceUndersampling
         with pytest.raises(ValueError, match="'pipe' or 'voronoi'"):

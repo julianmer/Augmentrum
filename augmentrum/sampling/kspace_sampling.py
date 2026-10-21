@@ -3577,7 +3577,13 @@ class KspaceUndersampling(BaseModule):
         different number. A radial trajectory with many long shots can still
         touch most bins at nominal acceleration 3. Read the shot-level figure
         from "last_meta_['achieved_acceleration']" and the bin coverage from
-        "last_masks_.mean()"; they are not interchangeable.
+        "last_masks_.mean()"; they are not interchangeable. With the gridding
+        engine "last_acquisition_" keeps what applying the acquisition's normal
+        operator again takes (an unrolled reconstruction's data-consistency
+        step): the trajectory in grid units, the density weights, the gain
+        and the operators, on in-plane stacks "(planes, *im_size)" as the
+        engine lays them out; "gain * gridder.adjoint(dcf * nufft.forward(x,
+        coords), coords)" is the module's own reconstruction of "x".
     "'off'"
         Identity — useful to keep a pipeline shape-identical across splits.
 
@@ -3773,6 +3779,7 @@ class KspaceUndersampling(BaseModule):
         # Populated after every call — what was actually applied, for provenance.
         self.last_masks_: Optional[np.ndarray] = None
         self.last_meta_: Optional[Dict[str, Any]] = None
+        self.last_acquisition_: Optional[Dict[str, Any]] = None
 
     #*************************#
     #   nufft undersampling   #
@@ -3812,6 +3819,7 @@ class KspaceUndersampling(BaseModule):
         )
         self.last_meta_ = meta
         self.last_masks_ = np.asarray(shot_mask, dtype=bool)
+        self.last_acquisition_ = None
 
         # ShotUndersampler clamps to at least one retained shot at any
         # acceleration, so there is no empty case to guard against here.
@@ -4010,8 +4018,10 @@ class KspaceUndersampling(BaseModule):
 
         # The dual path is already unit-calibrated against the identity pair.
         if not dual:
-            out = out * ops.cast_like(self._operator_gain(nufft, gridder, dcf, coords, im_size,
-                                                          stack), out)
+            gain = self._operator_gain(nufft, gridder, dcf, coords, im_size, stack)
+            out = out * ops.cast_like(gain, out)
+            self.last_acquisition_ = {'coords': coords, 'dcf': dcf, 'gain': gain,
+                                      'im_size': im_size, 'nufft': nufft, 'gridder': gridder}
 
         # NumPy's FFT computes in double whatever it is handed, so on that
         # backend the reconstruction comes back complex128. A pipeline stage
