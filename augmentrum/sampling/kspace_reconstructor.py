@@ -18,6 +18,7 @@
 #*************#
 #   imports   #
 #*************#
+import functools
 import math
 
 import numpy as np
@@ -199,7 +200,8 @@ class GriddingNUFFT:
     #*********************#
     #   density weights   #
     #*********************#
-    def density_weights(self, coords: np.ndarray, iterations: int = 15) -> np.ndarray:
+    def density_weights(self, coords: np.ndarray, iterations: int = 15,
+                        dcf_osf: float = 2.0, dcf_width: float = 4.0) -> np.ndarray:
         """
         Pipe-style density compensation weights for *coords*.
 
@@ -208,24 +210,79 @@ class GriddingNUFFT:
         The Pipe iteration drives the weights towards those that make gridding
         followed by de-gridding the identity.
 
+        The Pipe fixed point only approximates 1/density when the kernel it
+        iterates with spans at least about 2 Nyquist cells - enough to bridge
+        the gap between neighboring interleaves/turns at the edge of a
+        critically sampled trajectory. "width" is in *oversampled*-grid units,
+        so reusing this object's own reconstruction kernel silently halves
+        that span whenever "osf" is doubled (4 oversampled cells is 2 Nyquist
+        cells at osf=2, but only 1 at osf=4): the iteration then converges to
+        weights that merely equalize the gridded sum on the fine grid, not
+        the true area per sample, which showed up as 10-30% ring-to-ring
+        nonuniformity (and visible ripple reconstructing a uniform object) at
+        osf=4 - more iterations did not help, because the kernel itself, not
+        convergence, was the problem. "dcf_osf"/"dcf_width" fix the DCF's own
+        kernel at a span in Nyquist units (default 4/2 = 2 cells) on its own
+        dedicated grid, decoupled from whatever "osf"/"width" this object
+        reconstructs at.
+
         The weights depend only on the trajectory, never on the data, so this is
         computed in NumPy once and promoted wherever it is applied.
+
+        Returned on a physical scale, not "w / w.max()": the raw Pipe fixed
+        point is in units set by the Kaiser-Bessel kernel's own magnitude
+        (which depends on "beta", i.e. on "dcf_osf"/"dcf_width" through
+        "i0(beta)" - not a simple power of "osf"), not in Nyquist-cell-area
+        units on its own. This rescales by a one-time self-calibration
+        (:meth:`_dcf_calibration_gain`): the same kernel's Pipe fixed point on
+        a full periodic Nyquist-spaced grid, whose true density is exactly 1
+        everywhere by construction (symmetry - every cell is equivalent under
+        that periodic grid, so the converged weight is the same constant for
+        every point), establishes "raw weight / that constant = 1" as "one
+        Nyquist cell of density", independent of the kernel's own arbitrary
+        normalization. After that rescaling, "sum(w)" approximates the
+        k-space area the trajectory covers in Nyquist cells (e.g.
+        "pi/4 * N**2" for a trajectory that fully covers a disc on an N x N
+        image), consistently across interleave count and across this
+        object's own reconstruction "osf" - confirmed empirically (see the
+        handover this fixes: differed by up to 1.6x by interleave count and
+        exactly "dcf_osf ** ndim" by reconstruction osf before this fix).
+        The previous "max"-normalized scale depended on the trajectory itself
+        (two reconstructions of the same object at different acceleration or
+        interleave counts were not comparable), which is exactly what made an
+        acceleration sweep's absolute brightness meaningless; every caller in
+        this repo that depends on absolute scale renormalizes downstream
+        against the input (`_match_scale`) except the k-space-sampling
+        module's dual-trajectory path, which was already scale-free (every
+        existing test on it compares shape, correlation or a relative
+        threshold, never an absolute value).
 
         Args:
             coords: Trajectory in [-0.5, 0.5), "[K, ndim]".
             iterations: Pipe iterations; converges quickly, 10-20 is plenty.
+            dcf_osf: Grid oversampling for the Pipe iteration's own dedicated
+                kernel - independent of this object's reconstruction "osf".
+            dcf_width: Kernel width, in "dcf_osf"-oversampled grid units, for
+                the same dedicated kernel - independent of this object's
+                reconstruction "width". Default 4.0 at "dcf_osf=2.0" is 2
+                Nyquist cells, the span the Pipe iteration needs.
 
         Returns:
-            Weights "[K]".
+            Weights "[K]", on a physical (Nyquist-cell-area) scale.
         """
-        kernel = self.interpolator
-        if not isinstance(kernel, GriddingKernel):
-            # Density is a property of the trajectory and the grid, not of
-            # whichever interpolator happens to be reading it.
-            kernel = KaiserBesselInterpolator(self.grid_size, osf=self.osf, width=self.width)
+        gain = self._dcf_calibration_gain(dcf_osf, dcf_width, iterations)
+        w = self._pipe_iterate(np.asarray(coords), self.im_size, dcf_osf, dcf_width, iterations)
+        return (w / gain).astype(np.float32)
 
-        idx, weight = kernel.neighbors(np.asarray(coords))
-        n_cells = int(np.prod(self.grid_size))
+    @staticmethod
+    def _pipe_iterate(coords: np.ndarray, im_size: Tuple[int, ...],
+                      dcf_osf: float, dcf_width: float, iterations: int) -> np.ndarray:
+        """The raw Pipe-Menon fixed-point iteration, in the DCF kernel's own units."""
+        dcf_grid_size = tuple(int(math.ceil(dcf_osf * n)) for n in im_size)
+        kernel = KaiserBesselInterpolator(dcf_grid_size, osf=dcf_osf, width=dcf_width)
+
+        idx, weight = kernel.neighbors(coords)
+        n_cells = int(np.prod(dcf_grid_size))
         flat_idx = idx.reshape(-1)
 
         w = np.ones(len(coords), dtype=np.float64)
@@ -235,8 +292,21 @@ class GriddingNUFFT:
             np.add.at(grid, flat_idx, spread.reshape(-1))
             back = (grid[flat_idx].reshape(idx.shape) * weight).sum(axis=1)
             w = w / np.maximum(back, 1e-12)
+        return w
 
-        return (w / w.max()).astype(np.float32)
+    @functools.lru_cache(maxsize=32)
+    def _dcf_calibration_gain(self, dcf_osf: float, dcf_width: float, iterations: int) -> float:
+        """
+        Raw Pipe weight for "true density = 1" at this kernel/grid - see
+        "density_weights"'s own docstring for why this is the right
+        calibration reference. Depends only on "im_size" (fixed per
+        instance) and the two kernel parameters, so it is cached.
+        """
+        axes = [np.arange(n, dtype=np.float64) / n - 0.5 for n in self.im_size]
+        mesh = np.meshgrid(*axes, indexing='ij')
+        calib_coords = np.stack([m.reshape(-1) for m in mesh], axis=-1).astype(np.float32)
+        w = self._pipe_iterate(calib_coords, self.im_size, dcf_osf, dcf_width, iterations)
+        return float(w[0])
 
 
 #**************************************************************************************************#

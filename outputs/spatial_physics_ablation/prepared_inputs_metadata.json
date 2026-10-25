@@ -1,0 +1,6 @@
+{
+  "source_anatomy": "Shepp-Logan phantom (modified/Toft contrast) - clean synthetic anatomy",
+  "source_b0": "/run/media/johnlamaster/data/Augmentrum/outputs/spatial_physics_ablation/hcp_derived/b0_hz_105923_3T.nii.gz",
+  "source_b1": "/run/media/johnlamaster/data/Augmentrum/outputs/spatial_physics_ablation/hcp_derived/b1_rel_100408.nii.gz",
+  "fov_m": 0.22
+}

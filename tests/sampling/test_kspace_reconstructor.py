@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 
 from augmentrum.sampling import KspaceReconstructor, TrajectoryRegistry
+from augmentrum.sampling.kspace_reconstructor import GriddingNUFFT
 
 torch = pytest.importorskip("torch")
 tkbn = pytest.importorskip("torchkbnufft",
@@ -441,3 +442,128 @@ def test_dual_refuses_the_modes_that_cannot_do_it():
     with pytest.raises(ValueError, match="gridding engine"):
         KspaceUndersampling(ksp_mode='nufft', nufft_impl='torchkbnufft',
                             dual_trajectory=True)
+
+
+#**************************#
+#   density_weights (DCF)  #
+#**************************#
+# Regression coverage for the fix described in AUGMENTRUM_DCF_HANDOVER.md: the Pipe iteration's
+# own kernel was reused from this object's reconstruction interpolator, so its span shrank in
+# Nyquist units whenever "osf" grew, starving the iteration of the support it needs (10-30%
+# ring-to-ring nonuniformity at osf=4, not fixed by more iterations); and the returned weights
+# were normalized by their own max, an arbitrary, trajectory-dependent scale (the same object
+# reconstructed at different interleave counts were not comparable). Both are fixed here: the DCF
+# now runs on its own dedicated kernel (decoupled from this object's own "osf"/"width"), and the
+# weights are rescaled by a one-time self-calibration against a periodic Nyquist grid (whose true
+# density is exactly 1 everywhere by construction) rather than "w / w.max()".
+#
+# Known, deliberately NOT fixed here (see the handover's item 3, marked optional): the adjoint's
+# own absolute scale still depends on "osf" on its own (unrelated to density_weights) - so
+# "disc mean" below is checked for consistency across interleave count at FIXED osf, not across
+# osf itself.
+DCF_N = 128
+
+
+def _dcf_uniform_disc():
+    yy, xx = np.mgrid[:DCF_N, :DCF_N] - DCF_N / 2
+    disc = ((xx ** 2 + yy ** 2) <= (0.35 * DCF_N) ** 2).astype(np.complex64)[None]
+    inner = (xx ** 2 + yy ** 2) <= (0.25 * DCF_N) ** 2
+    return disc, inner
+
+
+def _dcf_spiral(n_shots, n_samples, turns):
+    """Archimedean spiral interleaves, |k| <= 0.5 (normalized), [n_shots*n_samples, 2]."""
+    t = np.linspace(0, 1, n_samples)
+    theta = 2 * np.pi * np.arange(n_shots)[:, None] / n_shots
+    z = 0.5 * t * np.exp(1j * (2 * np.pi * turns * t + theta))
+    coords = np.stack([z.real, z.imag], -1).reshape(-1, 2).clip(-0.5, 0.5 - 1e-6)
+    return coords.astype(np.float32), z
+
+
+def _dcf_area_weights(z):
+    """Exact area per sample for rotated interleaves - the analytic reference."""
+    dk = np.gradient(z, axis=-1)
+    return (np.abs(z) * np.abs(dk) * np.abs(np.cos(np.angle(dk) - np.angle(z)))).reshape(-1)
+
+
+def _dcf_ring_cv(coords, w, n_bins=10):
+    """CV across radius of (summed weight in ring) / (ring area); 0 for a correct DCF."""
+    r = np.hypot(*coords.T)
+    edges = np.linspace(0, 0.5, n_bins + 1)
+    density = np.array([w[(r >= a) & (r < b)].sum() / (b * b - a * a)
+                        for a, b in zip(edges[:-1], edges[1:])])
+    return density.std() / density.mean()
+
+
+@pytest.mark.parametrize("osf", [1.5, 2.0, 4.0])
+@pytest.mark.parametrize("n_shots,n_samples,turns", [
+    (16, 2000, 4), (64, 455, 1), (400, 455, 1),
+])
+def test_density_weights_ring_cv_matches_the_analytic_reference(osf, n_shots, n_samples, turns):
+    """
+    The Pipe weights' density must be ring-uniform - this is what actually broke at osf=4
+    before the fix (up to 0.33 CV; the analytic area weights stay <= 0.01 throughout).
+    """
+    coords, z = _dcf_spiral(n_shots, n_samples, turns)
+    nufft = GriddingNUFFT((DCF_N, DCF_N), osf=osf)
+
+    pipe_cv = _dcf_ring_cv(coords, nufft.density_weights(coords))
+    area_cv = _dcf_ring_cv(coords, _dcf_area_weights(z))   # ~0.002-0.01, for context in failures
+
+    assert pipe_cv <= 0.03, (osf, n_shots, pipe_cv, area_cv)
+
+
+@pytest.mark.parametrize("osf", [1.5, 2.0, 4.0])
+def test_density_weights_flat_region_ripple_is_small(osf):
+    """A uniform disc reconstructed with the Pipe weights should be flat inside its support."""
+    disc, inner = _dcf_uniform_disc()
+    coords, _ = _dcf_spiral(64, 455, 1)
+    nufft = GriddingNUFFT((DCF_N, DCF_N), osf=osf)
+
+    w = nufft.density_weights(coords)
+    kdata = nufft.forward(disc, coords)
+    img = np.abs(nufft.adjoint(kdata * w[None], coords)[0])
+
+    ripple = img[inner].std() / img[inner].mean()
+    assert ripple < 0.02, (osf, ripple)
+
+
+def test_density_weights_scale_is_consistent_across_interleave_count():
+    """
+    Two acquisitions of the same object at different interleave counts must be directly
+    comparable in brightness - the point of returning a physical (not max-normalized) scale.
+    """
+    disc, inner = _dcf_uniform_disc()
+    nufft = GriddingNUFFT((DCF_N, DCF_N), osf=2.0)
+
+    means = []
+    for n_shots, n_samples, turns in [(16, 2000, 4), (64, 455, 1), (400, 455, 1)]:
+        coords, _ = _dcf_spiral(n_shots, n_samples, turns)
+        w = nufft.density_weights(coords)
+        kdata = nufft.forward(disc, coords)
+        img = np.abs(nufft.adjoint(kdata * w[None], coords)[0])
+        means.append(img[inner].mean())
+
+    spread = (max(means) - min(means)) / np.mean(means)
+    assert spread < 0.03, means
+
+
+def test_density_weights_sum_approximates_the_covered_nyquist_area():
+    """
+    "sum(w)" should land near the trajectory's own covered k-space area, in Nyquist cells -
+    e.g. pi/4 * N**2 for a trajectory that fully covers a disc - not an arbitrary scale.
+    """
+    coords, _ = _dcf_spiral(400, 455, 1)
+    nufft = GriddingNUFFT((DCF_N, DCF_N), osf=2.0)
+
+    total = float(nufft.density_weights(coords).sum())
+    expected = np.pi / 4.0 * DCF_N ** 2
+    assert 0.5 * expected < total < 1.5 * expected, (total, expected)
+
+
+def test_density_weights_sum_is_independent_of_reconstruction_osf():
+    """The DCF's own physical scale must not depend on this object's unrelated "osf"."""
+    coords, _ = _dcf_spiral(64, 455, 1)
+    totals = [float(GriddingNUFFT((DCF_N, DCF_N), osf=osf).density_weights(coords).sum())
+             for osf in (1.5, 2.0, 4.0)]
+    assert max(totals) / min(totals) < 1.01, totals

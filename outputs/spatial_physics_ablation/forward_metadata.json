@@ -1,0 +1,14 @@
+{
+  "sequence": "outputs/spatial_physics_ablation/spatial_physics_ablation.seq",
+  "trajectory_units": "cycles/m",
+  "field_strength_T": 3.0,
+  "slice_offset_m": 0.03,
+  "girf_source": "Bacon measured GIRF (order 1)",
+  "concomitant_map_definition": "RMS phase across ADC samples",
+  "gnl_map_definition": "RMS phase across ADC samples",
+  "reconstruction": "GriddingNUFFT adjoint on nominal trajectory, Pipe DCF",
+  "n_shots": 200,
+  "gnl_source": "gradunwarp bundled test coil - NOT a real scanner calibration; see augmentrum.physics.gradient_nonlinearity.load_coefficients",
+  "gnl_coefficient_scale": 15.0,
+  "gnl_excitation_model": "none - readout-encoding phase term only; the earlier STEAM-VOI excitation-side warping model was removed when get_spiral() switched to a spoiled spiral GRE sequence (mrs_seq.imaging.build_spiral_gre), which has no volume-selective VOI to warp"
+}

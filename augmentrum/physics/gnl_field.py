@@ -1,5 +1,5 @@
 ####################################################################################################
-#                                        gnl_field.py                                                #
+#                                        gnl_field.py                                              #
 ####################################################################################################
 #                                                                                                  #
 # Authors: J. T. LaMaster (john.t.lamaster@gmail.com)                                              #
@@ -41,7 +41,7 @@ GNL_MAX_SUPPORTED_ORDER = 9
 
 
 #**************************************************************************************************#
-#                                  the per-harmonic-term basis                                      #
+#                                  the per-harmonic-term basis                                     #
 #**************************************************************************************************#
 def _cart2sph_mm(x_mm: np.ndarray, y_mm: np.ndarray, z_mm: np.ndarray
                 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -175,7 +175,7 @@ def coefficient_matrix(coeffs, terms: List[Tuple[int, int, bool]]) -> np.ndarray
 
 
 #**************************************************************************************************#
-#                                    stochastic coefficients                                        #
+#                                    stochastic coefficients                                       #
 #**************************************************************************************************#
 def _default_std(order: int, base_std: float, decay: float) -> float:
     return base_std * (decay ** order)
@@ -312,11 +312,11 @@ def perturb_coefficients_by_order(coeffs, std_by_order: Dict[int, float],
 
 
 #**************************************************************************************************#
-#                                Class GradientNonlinearityPhase                                    #
+#                                Class GradientNonlinearityPhase                                   #
 #**************************************************************************************************#
 #                                                                                                  #
 # The GNL contribution to the encoding phase itself - never an image warp, never a modified        #
-# trajectory.                                                                                       #
+# trajectory.                                                                                      #
 #                                                                                                  #
 #**************************************************************************************************#
 class GradientNonlinearityPhase:
@@ -410,4 +410,5 @@ class GradientNonlinearityPhase:
             self._q = -2.0 * np.pi * (C @ self.k_traj)                     # (n_harm, T)
 
         phi = self._phi_basis @ self._q                                    # (N, T)
-        return torch.from_numpy(phi.astype(np.float32))
+        device = positions.device if hasattr(positions, 'device') else 'cpu'
+        return torch.from_numpy(phi.astype(np.float32)).to(device)
