@@ -13,7 +13,7 @@
 #                                                                                                  #
 ####################################################################################################
 
-__version__ = "0.0.2"
+__version__ = "0.0.3"
 __author__ = "John T. LaMaster, Julian P. Merkofer, Kay C. Igwe"
 __email__ = "j.p.merkofer@tue.nl"
 

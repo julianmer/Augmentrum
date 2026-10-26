@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "augmentrum"
-version = "0.0.2"
+version = "0.0.3"
 description = "A Data Augmentation Package for MR Spectroscopy"
 readme = "README.md"
 authors = [
@@ -29,7 +29,6 @@ requires-python = ">=3.9"
 dependencies = [
     "numpy>=1.21.0",
     "scipy>=1.7.0",
-    "fsl-mrs>=2.1.0",
     "nifti-mrs>=0.1.0",
     "nifti-mrs-plus[ops]>=0.2.1",
     "spec2nii>=0.6.0",
@@ -39,6 +38,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# FSL-MRS is not on PyPI (conda-forge); the modules that need it import it lazily, so the
+# package installs and runs without it and this extra names it for those who have it
+fsl = [
+    "fsl-mrs>=2.1.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=3.0.0",
