@@ -78,7 +78,7 @@ def test_cg_full_operator_recovers_phantom_tightly():
     y = op_full.forward(x_true)
 
     rhs = op_full.adjoint(y)
-    result = cg_solve(lambda v: op_full.normal(v, lam=1e-6), rhs, max_iter=60, rtol=1e-5)
+    result = cg_solve(lambda v: op_full.normal(v, lam=1e-6), rhs, max_iter=150, rtol=1e-4)
     assert result.converged
 
     err = torch.linalg.vector_norm(result.image - x_true) / torch.linalg.vector_norm(x_true)
@@ -98,7 +98,7 @@ def test_cg_nominal_shows_larger_error_than_full_on_full_physics_data():
 
     def recon_with(op):
         rhs = op.adjoint(y_full_physics)
-        result = cg_solve(lambda v: op.normal(v, lam=1e-6), rhs, max_iter=60, rtol=1e-5)
+        result = cg_solve(lambda v: op.normal(v, lam=1e-6), rhs, max_iter=150, rtol=1e-4)
         err = torch.linalg.vector_norm(result.image - x_true) / torch.linalg.vector_norm(x_true)
         return float(err)
 

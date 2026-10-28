@@ -1,0 +1,23 @@
+{
+  "nce_sigma": 0.6984128322421649,
+  "nrmse_b0": 0.18907618522644043,
+  "nce_b0": 9.802175521850586,
+  "max_abs_diff_b0": 24.792797088623047,
+  "nrmse_b1": 0.25603705644607544,
+  "nce_b1": 17.677465438842773,
+  "max_abs_diff_b1": 45.78162384033203,
+  "nrmse_concomitant": 1.1657118648145115e-06,
+  "nce_concomitant": -3.89015553992067e-07,
+  "max_abs_diff_concomitant": 0.00022730976343154907,
+  "nrmse_girf": 0.12902966141700745,
+  "nce_girf": 4.598618984222412,
+  "max_abs_diff_girf": 6.52177619934082,
+  "nrmse_gnl": 0.3445572257041931,
+  "nce_gnl": 32.12194061279297,
+  "max_abs_diff_gnl": 48.375701904296875,
+  "nrmse_combined": 0.3559197187423706,
+  "nce_combined": 34.39421844482422,
+  "max_abs_diff_combined": 42.548641204833984,
+  "girf_trajectory_rms": 0.3392983212333393,
+  "girf_trajectory_max": 0.4044032667836361
+}

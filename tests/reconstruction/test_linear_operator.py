@@ -10,7 +10,9 @@ import torch
 import pytest
 
 from augmentrum.sampling.kspace_reconstructor import GriddingNUFFT
-from augmentrum.reconstruction.linear_operator import LinearMRIOperator, PhysicsConfig
+from augmentrum.reconstruction.linear_operator import (
+    LinearMRIOperator, PhysicsConfig, _GIRFTrajectoryErrorPhase,
+)
 
 
 IM_SIZE = (16, 16)
@@ -68,10 +70,14 @@ def _build_operator(config: PhysicsConfig, with_b1plus=False, with_girf=False):
     positions, coords, t = _make_positions_and_trajectory()
     nufft = GriddingNUFFT(IM_SIZE, osf=2.0)
 
-    k_actual = None
+    # GIRF is a phase term (-2*pi*dk.r), not a second NUFFT trajectory - the NUFFT always grids
+    # on "coords" (k_nominal) regardless of config.girf. "dk" here is an arbitrary small,
+    # deterministic synthetic trajectory-error field, standing in for a real measured one.
+    girf_term = None
     if with_girf or config.girf:
         g = torch.Generator().manual_seed(7)
-        k_actual = coords + 0.01 * (torch.rand(*coords.shape, generator=g) - 0.5)
+        dk = 0.01 * (torch.rand(2, T, generator=g) - 0.5)
+        girf_term = _GIRFTrajectoryErrorPhase(dk)
 
     b1plus_map = None
     if with_b1plus or config.b1plus:
@@ -85,10 +91,10 @@ def _build_operator(config: PhysicsConfig, with_b1plus=False, with_girf=False):
     gnl_term = _QuadraticPhase(scale=2.0) if config.gnl else None
 
     op = LinearMRIOperator(
-        positions=positions, t=t, k_nominal=coords, k_actual=k_actual,
+        positions=positions, t=t, k_nominal=coords,
         gridding_nufft=nufft, im_size=IM_SIZE, b1plus_map=b1plus_map,
         b0_term=b0_term, concomitant_term=concomitant_term, gnl_term=gnl_term,
-        config=config,
+        girf_term=girf_term, config=config,
     ).prepare()
     return op
 
@@ -129,6 +135,66 @@ def test_linearity():
     rhs = a * op.forward(x1) + b * op.forward(x2)
     rel_error = torch.linalg.vector_norm(lhs - rhs) / torch.linalg.vector_norm(rhs)
     assert rel_error < 1e-4, f"linearity violated: rel_err={rel_error}"
+
+
+def test_adjoint_inner_product_multi_coil():
+    """Handover section 5.1/6: multi-coil adjoint correctness - forward: C_c(r)*x(r) per coil;
+    adjoint: sum_c conj(C_c(r))*x_c(r). Uses a synthetic multi-coil array (not Birdcage itself,
+    to keep this test independent of augmentrum.sampling), each coil with a distinct smooth
+    sensitivity, so this is a real test of the coil summation, not of a single degenerate case."""
+    positions, coords, t = _make_positions_and_trajectory()
+    nufft = GriddingNUFFT(IM_SIZE, osf=2.0)
+    n_coils = 4
+
+    g = torch.Generator().manual_seed(21)
+    coil_map = torch.zeros(n_coils, N, dtype=torch.complex64)
+    for c in range(n_coils):
+        center = (torch.rand(2, generator=g) - 0.5)
+        r2 = (positions[:, 0] - center[0]) ** 2 + (positions[:, 1] - center[1]) ** 2
+        mag = torch.exp(-r2 / 0.3)
+        phase = torch.atan2(positions[:, 1] - center[1], positions[:, 0] - center[0])
+        coil_map[c] = (mag * torch.exp(1j * phase)).to(torch.complex64)
+    rss = torch.sqrt((coil_map.abs() ** 2).sum(dim=0, keepdim=True)).clamp(min=1e-8)
+    coil_map = coil_map / rss   # RSS-normalized, matching augmentrum's own MapSource convention
+
+    girf_term = _GIRFTrajectoryErrorPhase(0.01 * (torch.rand(2, T, generator=g) - 0.5))
+    b0_term = _LinearB0Phase()
+    config = PhysicsConfig(b0=True, girf=True, n_segments=4)
+    op = LinearMRIOperator(
+        positions=positions, t=t, k_nominal=coords, gridding_nufft=nufft, im_size=IM_SIZE,
+        coil_map=coil_map, b0_term=b0_term, girf_term=girf_term, config=config,
+    ).prepare()
+
+    assert op.n_coils == n_coils
+    g2 = torch.Generator().manual_seed(43)
+    x = torch.randn(N, dtype=torch.complex64, generator=g2)
+    y = torch.randn(n_coils, T, dtype=torch.complex64, generator=g2)
+
+    d = op.forward(x)
+    assert d.shape == (n_coils, T)
+    lhs = _vdot(d, y)
+    rhs = _vdot(x, op.adjoint(y))
+    rel_error = (lhs - rhs).abs() / max(lhs.abs(), rhs.abs(), 1e-12)
+    assert rel_error < 1e-4, f"multi-coil adjoint mismatch: rel_err={rel_error}"
+
+
+def test_single_coil_matches_multi_coil_with_one_channel():
+    """A (1, N) coil map should behave identically to the (N,) single-coil convenience path -
+    confirms the internal (C,N) promotion doesn't silently change single-coil behavior."""
+    positions, coords, t = _make_positions_and_trajectory()
+    nufft = GriddingNUFFT(IM_SIZE, osf=2.0)
+    g = torch.Generator().manual_seed(5)
+    coil_1d = torch.exp(1j * torch.rand(N, generator=g) * 2 * torch.pi).to(torch.complex64)
+
+    op_1d = LinearMRIOperator(positions=positions, t=t, k_nominal=coords, gridding_nufft=nufft,
+                              im_size=IM_SIZE, coil_map=coil_1d, config=PhysicsConfig()).prepare()
+    op_2d = LinearMRIOperator(positions=positions, t=t, k_nominal=coords, gridding_nufft=nufft,
+                              im_size=IM_SIZE, coil_map=coil_1d.unsqueeze(0),
+                              config=PhysicsConfig()).prepare()
+
+    x = torch.randn(N, dtype=torch.complex64, generator=g)
+    d1, d2 = op_1d.forward(x), op_2d.forward(x)
+    torch.testing.assert_close(d1, d2)
 
 
 def test_normal_operator_hermitian_and_psd():

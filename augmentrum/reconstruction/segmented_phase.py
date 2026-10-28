@@ -56,6 +56,29 @@ class SegmentedPhaseTerm:
         device = positions.device if hasattr(positions, "device") else t.device
         n = positions.shape[0]
 
+        # Real constraint, discovered the hard way (see this method's git history/
+        # CG_RECON_STATUS.md): the phase-term classes used here do NOT generally support being
+        # queried with an arbitrary SUBSET of positions. _MultiShotStaticOffResonancePhase
+        # ignores its own "positions" argument outright and always returns its full stored
+        # per-voxel map; GradientNonlinearityPhase caches its spatial basis matrix on first call
+        # and assumes every subsequent call uses the SAME position count. A voxel-chunked
+        # (N-subset) evaluation therefore silently produces wrong shapes/stale cached results for
+        # at least two of the three real physics terms this is used for - it is not just slower,
+        # it is INCORRECT. The actually-expensive, unavoidable part is GradientNonlinearityPhase's
+        # own T-length requirement (len(t) must match its trajectory's sample count, so T can
+        # never be chunked) - there is no way around evaluating a genuine (N, T) tensor for that
+        # term at least once.
+        #
+        # So: call .phase() with the FULL positions/t exactly ONCE (CPU, not GPU - a one-time
+        # setup cost, unlike forward/adjoint which run every CG iteration and need GPU speed; at
+        # matrix=128 this is ~5.95 GB in float32, confirmed to OOM a 12GB GPU outright), then
+        # reuse that SAME result via cheap indexing for every bin's representative curve below -
+        # eliminating what used to be L+1 separate (and, for the terms above, silently incorrect)
+        # .phase() calls down to exactly one correct one.
+        positions_cpu = positions.cpu() if hasattr(positions, "cpu") else positions
+        t_cpu = t.cpu() if hasattr(t, "cpu") else t
+        phi_full_cpu = phase_term.phase(positions_cpu, t_cpu)   # (N, T), CPU, computed ONCE
+
         if severity is None:
             # Signed phase at the LAST sample, not RMS-over-t: RMS is sign-blind (+f and -f
             # off-resonance give identical RMS severity despite opposite-sign phase curves,
@@ -64,43 +87,43 @@ class SegmentedPhaseTerm:
             # regardless of segment count before this fix. Using the final sample's signed,
             # exact phase is the natural generalization of classical frequency-segmented
             # reconstruction, which bins by the SIGNED field value itself, not a magnitude proxy.
-            phi_full = phase_term.phase(positions, t)   # (N, T) - the one expensive exact call
-            severity = phi_full[:, -1].to(torch.float64)
+            severity = phi_full_cpu[:, -1].to(torch.float64)
         severity = severity.to(device=device, dtype=torch.float64)
+        severity_cpu = severity.cpu()
 
         L = self.n_segments
         if self.binning == "quantile":
-            edges = torch.quantile(severity, torch.linspace(0.0, 1.0, L + 1, dtype=torch.float64,
-                                                             device=device))
+            edges_cpu = torch.quantile(severity_cpu, torch.linspace(0.0, 1.0, L + 1,
+                                                                    dtype=torch.float64))
         elif self.binning == "uniform":
-            edges = torch.linspace(severity.min(), severity.max(), L + 1, dtype=torch.float64,
-                                   device=device)
+            edges_cpu = torch.linspace(severity_cpu.min(), severity_cpu.max(), L + 1,
+                                       dtype=torch.float64)
         else:
             raise ValueError(f"Unknown binning {self.binning!r} (expected 'quantile' or 'uniform')")
-        edges[0] -= 1.0    # make the lowest/highest edges inclusive of the true extrema
-        edges[-1] += 1.0
+        edges_cpu[0] -= 1.0    # make the lowest/highest edges inclusive of the true extrema
+        edges_cpu[-1] += 1.0
 
         masks = torch.zeros(L, n, dtype=torch.float32, device=device)
         rep_voxel = torch.zeros(L, dtype=torch.long, device=device)
-        rep_curves = torch.zeros(L, t.numel(), dtype=torch.float32, device=device)
+        rep_curves_cpu = torch.zeros(L, t.numel(), dtype=torch.float32)
         for l in range(L):
-            in_bin = (severity > edges[l]) & (severity <= edges[l + 1])
+            in_bin = (severity_cpu > edges_cpu[l]) & (severity_cpu <= edges_cpu[l + 1])
             if not torch.any(in_bin):
                 # Empty bin (can happen with "uniform" binning on a skewed severity
                 # distribution) - give it a harmless representative voxel (voxel 0) and zero
                 # mask, so it contributes nothing rather than raising.
                 rep_voxel[l] = 0
                 continue
-            masks[l, in_bin] = 1.0
+            masks[l, in_bin.to(device)] = 1.0
             idx_in_bin = torch.nonzero(in_bin, as_tuple=True)[0]
-            bin_sev = severity[idx_in_bin]
+            bin_sev = severity_cpu[idx_in_bin]
             median_target = torch.median(bin_sev)
             closest = idx_in_bin[torch.argmin(torch.abs(bin_sev - median_target))]
-            rep_voxel[l] = closest
-            rep_curves[l] = phase_term.phase(positions[closest:closest + 1], t)[0]
+            rep_voxel[l] = closest.to(device)
+            rep_curves_cpu[l] = phi_full_cpu[closest]   # indexing, not another .phase() call
 
         self.bin_masks = masks
-        self.bin_phase_exp = torch.exp(1j * rep_curves.to(torch.complex64))
+        self.bin_phase_exp = torch.exp(1j * rep_curves_cpu.to(torch.complex64)).to(device)
         self.severity = severity
         self.representative_voxel = rep_voxel
         return self

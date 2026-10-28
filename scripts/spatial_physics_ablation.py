@@ -455,6 +455,8 @@ def _derive_hcp_b0_map(cache_path: Path, field_strength_t: float = _HCP_B0_ACQUI
     "ppm * gamma * B0", so "Hz_target = Hz_measured * (field_strength_t / 3.0)" - e.g. simulating
     what this real residual would look like at 55 mT rather than claiming a measured 55 mT map.
     """
+    if cache_path.exists():
+        return cache_path
     phantom_nifti = _phantom_3d_nifti(fov_mm, size=phantom_size)
     transformlist = _rigid_register_t1w_to_phantom(_HCP_B0_T1W, phantom_nifti, label="b0_105923")
     # The magnitude file is 2 echoes (4-D); ANTs refuses to apply_transforms on a non-3-D volume
@@ -483,10 +485,29 @@ def _derive_hcp_b0_map(cache_path: Path, field_strength_t: float = _HCP_B0_ACQUI
     return cache_path
 
 
+def _derive_hcp_anatomy_map(cache_path: Path, fov_mm: float = 220.0, phantom_size: int = 96) -> Path:
+    """Real HCP 105923 T1w, rigidly registered onto the SAME phantom grid as that subject's own
+    B0 map (reuses the "b0_105923" registration cache - same transform, same subject) so
+    anatomy_source='hcp' stays pixel-aligned with the B0/B1+ maps instead of loading independently
+    like a bare --anatomy <path> would."""
+    if cache_path.exists():
+        return cache_path
+    phantom_nifti = _phantom_3d_nifti(fov_mm, size=phantom_size)
+    transformlist = _rigid_register_t1w_to_phantom(_HCP_B0_T1W, phantom_nifti, label="b0_105923")
+    t1w_reg = _apply_rigid_transform(_HCP_B0_T1W, phantom_nifti, transformlist)
+    vol = robust_norm(t1w_reg.numpy().astype(np.float64)).astype(np.float32)
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    nib.save(nib.Nifti1Image(vol, nib.load(str(phantom_nifti)).affine), str(cache_path))
+    return cache_path
+
+
 def _derive_hcp_b1_map(cache_path: Path, fov_mm: float = 220.0, phantom_size: int = 96) -> Path:
     """Real HCP 100408 actual-flip-angle map -> rigidly registered onto the phantom (via 100408's
     own T1w) -> relative B1+, written as a NIfTI. See _derive_hcp_b0_map's docstring for why
     registration replaces the earlier raw-slice-and-hope approach."""
+    if cache_path.exists():
+        return cache_path
     phantom_nifti = _phantom_3d_nifti(fov_mm, size=phantom_size)
     transformlist = _rigid_register_t1w_to_phantom(_HCP_B1_T1W, phantom_nifti, label="b1_100408")
     rafi_reg = _apply_rigid_transform(_HCP_B1_RAFI, phantom_nifti, transformlist)
@@ -524,17 +545,41 @@ def _rotate90_ccw(arr: np.ndarray, n: int) -> np.ndarray:
 
 
 def load_or_prepare_inputs(args) -> FigureInputs:
+    # Single source of truth for which axial slice of the (shared) phantom-registered grid
+    # anatomy/B0/B1+ all come from - anatomy, B0, and B1+ are ALL registered onto the SAME 3-D
+    # phantom grid (_phantom_3d_nifti) regardless of anatomy_source, so they MUST use the same
+    # z-index or they silently show different, misaligned slices of the brain.
+    hcp_z_offset = getattr(args, "hcp_slice_offset_vox", 0)
+
+    def _hcp_slice(raw3d: np.ndarray) -> np.ndarray:
+        z = int(np.clip(raw3d.shape[2] // 2 + hcp_z_offset, 0, raw3d.shape[2] - 1))
+        return raw3d[:, :, z]
+
     # ANATOMY_SOURCE: the one flag to flip once a BrainWeb volume is reachable.
     # --anatomy <path> (an already-downloaded file) always wins if given; otherwise
-    # --anatomy-source picks the synthetic generator. Default is Shepp-Logan - no
-    # download, no license to check - swap to "brainweb" (or supply --anatomy
-    # directly) the moment a real BrainWeb volume is in hand; nothing else about
-    # this script needs to change.
+    # --anatomy-source picks the generator. Default is Shepp-Logan - no download, no
+    # license to check. "hcp" uses 105923's own real T1w, rigidly registered onto the
+    # SAME phantom grid its own B0 map already uses (see _derive_hcp_anatomy_map) so
+    # anatomy/B0/B1+ all stay pixel-aligned - unlike a bare --anatomy <path>, which
+    # loads independently via load_nifti_slice and would NOT line up with the
+    # phantom-registered B0/B1+ maps.
     if args.anatomy:
         anatomy = load_nifti_slice(Path(args.anatomy), args.matrix)
         anatomy_source = str(Path(args.anatomy).resolve())
     elif args.anatomy_source == "brainweb":
         anatomy, anatomy_source = load_brainweb_anatomy(args.matrix, args.brainweb_subject)
+    elif args.anatomy_source == "hcp":
+        anat_path = _resolve_map_path(
+            "auto", lambda p: _derive_hcp_anatomy_map(p, args.fov_mm),
+            Path(args.outdir) / "hcp_derived" / "anatomy_105923.nii.gz", "Anatomy")
+        raw = np.asarray(nib.load(anat_path).get_fdata()).squeeze()
+        # --hcp-slice-offset-vox (via _hcp_slice/hcp_z_offset above) picks which axial index is
+        # shown - independent of --slice-offset-mm, which is a separate physics parameter
+        # (off-isocenter position fed to the concomitant/GNL terms).
+        raw = _hcp_slice(raw)
+        raw = center_crop_square(raw)
+        anatomy = robust_norm(resize_2d(raw, args.matrix)).astype(np.float32)
+        anatomy_source = f"HCP 105923 T1w (rigid-registered onto phantom grid): {_HCP_B0_T1W}"
     else:
         anatomy, anatomy_source = load_shepp_logan_anatomy(args.matrix)
 
@@ -556,7 +601,7 @@ def load_or_prepare_inputs(args) -> FigureInputs:
         # Preserve sign/units rather than robust-normalizing a quantitative NIfTI map.
         raw = np.asarray(nib.load(args.b0_map).get_fdata()).squeeze()
         if raw.ndim == 3:
-            raw = raw[:, :, raw.shape[2] // 2]
+            raw = _hcp_slice(raw)
         # NO blind np.rot90 here (there used to be one) - this array is now the rigid-registered,
         # phantom-aligned map produced by _derive_hcp_b0_map, not an arbitrary raw native-space
         # NIfTI slice, so it is already in the phantom's own array orientation (confirmed
@@ -576,7 +621,7 @@ def load_or_prepare_inputs(args) -> FigureInputs:
     if args.b1_map:
         raw = np.asarray(nib.load(args.b1_map).get_fdata()).squeeze()
         if raw.ndim == 3:
-            raw = raw[:, :, raw.shape[2] // 2]
+            raw = _hcp_slice(raw)
         # See the matching comment in the --b0-map branch above - same reasoning applies here.
         raw = center_crop_square(raw)
         b1_rel = resize_2d(raw, args.matrix)
@@ -1306,10 +1351,25 @@ def plot_top_row(axs, inputs: FigureInputs, result: ForwardResult):
 
     # GIRF trajectory overlay
     if "k_nominal" in result.extras and "k_girf" in result.extras:
-        kn = np.asarray(result.extras["k_nominal"])
-        kg = np.asarray(result.extras["k_girf"])
-        axs[4].plot(kn[:, 0], kn[:, 1], lw=0.8, label="Nominal")
-        axs[4].plot(kg[:, 0], kg[:, 1], lw=0.8, alpha=0.85, label="GIRF")
+        kn_full = np.asarray(result.extras["k_nominal"])
+        kg_full = np.asarray(result.extras["k_girf"])
+        # BUG FIX: this used to plot the full flattened (n_shots*samples_per_shot, 2) arrays as
+        # ONE continuous line - with n_shots=200 that's unreadable for two reasons: (1) every
+        # shot boundary draws a spurious straight connecting line to the next shot's start, and
+        # (2) 200 overlaid interleaves saturate into a solid blob regardless. Fix: split by shot
+        # (using metadata["n_shots"], always populated by get_spiral) and plot only a few
+        # individual shots as separate line segments. Shots are golden-angle ordered (see
+        # RepoAdapter.get_spiral's own docstring), so the first few (a PREFIX) are evenly
+        # distributed in angle - unlike a strided subset, which is not.
+        n_shots = int(result.metadata.get("n_shots", 1))
+        samples_per_shot = kn_full.shape[0] // n_shots
+        n_show = min(16, n_shots)
+        for i in range(n_show):
+            sl = slice(i * samples_per_shot, (i + 1) * samples_per_shot)
+            axs[4].plot(kn_full[sl, 0], kn_full[sl, 1], lw=0.9, color="tab:blue",
+                       label="Nominal" if i == 0 else None)
+            axs[4].plot(kg_full[sl, 0], kg_full[sl, 1], lw=0.9, color="tab:orange", alpha=0.85,
+                       label="GIRF" if i == 0 else None)
         axs[4].set_aspect("equal")
         axs[4].set_xticks([])
         axs[4].set_yticks([])
@@ -1465,12 +1525,17 @@ def parse_args():
     p.add_argument("--anatomy", type=str, default=None,
                    help="Explicit NIfTI anatomy file - overrides --anatomy-source when given. "
                         "Point this at a manually-downloaded BrainWeb volume once you have one.")
-    p.add_argument("--anatomy-source", choices=["shepp_logan", "brainweb"], default="shepp_logan",
+    p.add_argument("--anatomy-source", choices=["shepp_logan", "brainweb", "hcp"], default="shepp_logan",
                    help="Synthetic anatomy source when --anatomy is not given. Default "
                         "'shepp_logan' (no download, no baked-in scanner artifacts); flip to "
                         "'brainweb' once a BrainWeb fetch actually reaches real data - as of "
                         "2026-10-23 brainweb.bic.mni.mcgill.ca (and the 'brainweb' pip package, "
                         "which points at the same host) was unreachable from this environment.")
+    p.add_argument("--hcp-slice-offset-vox", type=int, default=0,
+                   help="Only used with --anatomy-source hcp: axial voxel offset from the "
+                        "registered volume's own mid-slice (index shape[2]//2), for picking a "
+                        "different 2D anatomy slice to image - NOT the same as --slice-offset-mm "
+                        "(a separate physics parameter for the concomitant/GNL terms).")
     p.add_argument("--brainweb-subject", type=int, default=4,
                    help="BrainWeb subject number, used only with --anatomy-source brainweb.")
     p.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto",
@@ -1555,6 +1620,12 @@ def main():
     missing = [k for k in EFFECT_KEYS if k not in result.images]
     if missing:
         raise RuntimeError(f"Repository adapter did not return required image keys: {missing}")
+
+    np.savez_compressed(
+        outdir / "real_effect_results.npz",
+        **{f"image_{k}": result.images[k] for k in EFFECT_KEYS},
+        **{k: np.asarray(v) for k, v in result.extras.items()},
+    )
 
     metrics = plot_figure(inputs, result, outdir, args.dpi)
     print(json.dumps(metrics, indent=2))

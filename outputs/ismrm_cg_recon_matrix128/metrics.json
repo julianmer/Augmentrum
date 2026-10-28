@@ -1,0 +1,101 @@
+[
+  {
+    "reconstruction": "R0_nominal",
+    "nrmse": 0.6043921113014221,
+    "true_model_residual": 0.2673502266407013,
+    "native_final_residual": 2.0787055278901227e-05,
+    "iterations": 100,
+    "converged": false,
+    "runtime_s": 21.808364868164062
+  },
+  {
+    "reconstruction": "R1_b0",
+    "nrmse": 3.002674102783203,
+    "true_model_residual": 0.26074835658073425,
+    "native_final_residual": 0.0015817379305461832,
+    "iterations": 100,
+    "converged": false,
+    "runtime_s": 96.46833944320679
+  },
+  {
+    "reconstruction": "R2_b0_b1",
+    "nrmse": 2.169940233230591,
+    "true_model_residual": 0.23060432076454163,
+    "native_final_residual": 0.0013903154268319622,
+    "iterations": 100,
+    "converged": false,
+    "runtime_s": 75.29444527626038
+  },
+  {
+    "reconstruction": "R3_b0_b1_girf",
+    "nrmse": 0.2285504788160324,
+    "true_model_residual": 0.041327498853206635,
+    "native_final_residual": 4.517746054647138e-05,
+    "iterations": 100,
+    "converged": false,
+    "runtime_s": 113.3080575466156
+  },
+  {
+    "reconstruction": "R4_plus_concomitant",
+    "nrmse": 0.2285519689321518,
+    "true_model_residual": 0.04132602736353874,
+    "native_final_residual": 4.9272837240438706e-05,
+    "iterations": 100,
+    "converged": false,
+    "runtime_s": 84.3565137386322
+  },
+  {
+    "reconstruction": "R5_full",
+    "nrmse": 0.14613077044487,
+    "true_model_residual": 0.0004667415632866323,
+    "native_final_residual": 3.119390823722957e-05,
+    "iterations": 100,
+    "converged": false,
+    "runtime_s": 221.0421929359436
+  },
+  {
+    "reconstruction": "leaveout_b0",
+    "nrmse": 0.8069413900375366,
+    "true_model_residual": 0.18561315536499023,
+    "native_final_residual": 0.00031923106008903055,
+    "iterations": 100,
+    "converged": false,
+    "runtime_s": 176.57807183265686
+  },
+  {
+    "reconstruction": "leaveout_b1",
+    "nrmse": 0.2007620483636856,
+    "true_model_residual": 0.055175021290779114,
+    "native_final_residual": 1.5137242359438124e-05,
+    "iterations": 100,
+    "converged": false,
+    "runtime_s": 215.60245728492737
+  },
+  {
+    "reconstruction": "leaveout_girf",
+    "nrmse": 1.9190611839294434,
+    "true_model_residual": 0.23281408846378326,
+    "native_final_residual": 0.0010672400182568265,
+    "iterations": 100,
+    "converged": false,
+    "runtime_s": 188.70097160339355
+  },
+  {
+    "reconstruction": "leaveout_concomitant",
+    "nrmse": 0.1461111605167389,
+    "true_model_residual": 0.00046495444257743657,
+    "native_final_residual": 3.733158333721769e-05,
+    "iterations": 100,
+    "converged": false,
+    "runtime_s": 198.26601791381836
+  },
+  {
+    "reconstruction": "leaveout_gnl",
+    "nrmse": 0.2285469025373459,
+    "true_model_residual": 0.041327010840177536,
+    "native_final_residual": 3.067108878855421e-05,
+    "iterations": 100,
+    "converged": false,
+    "runtime_s": 88.86665201187134
+  }
+]

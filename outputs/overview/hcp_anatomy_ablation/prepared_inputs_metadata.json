@@ -1,0 +1,6 @@
+{
+  "source_anatomy": "HCP 105923 T1w (rigid-registered onto phantom grid): /run/media/johnlamaster/data/datasets/MRSI_Challenge_Data/dev/connectome/Data/105923_3T/scans/103_T1w/NIFTI/105923_3T_T1w_MPR1.nii.gz",
+  "source_b0": "/run/media/johnlamaster/data/Augmentrum/outputs/overview/hcp_anatomy_ablation/hcp_derived/b0_hz_105923_3T.nii.gz",
+  "source_b1": "/run/media/johnlamaster/data/Augmentrum/outputs/overview/hcp_anatomy_ablation/hcp_derived/b1_rel_100408.nii.gz",
+  "fov_m": 0.22
+}

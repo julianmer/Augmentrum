@@ -1,0 +1,297 @@
+{
+  "source_image": "/mnt/data/ghostwriter_images/generated/wide_infographic_diagram_on_a_white_background_cl_1.png",
+  "width": 1672,
+  "height": 941,
+  "crops": [
+    {
+      "name": "panel_inputs",
+      "x0": 12,
+      "y0": 75,
+      "x1": 396,
+      "y1": 822,
+      "width": 384,
+      "height": 747,
+      "file": "panel_inputs.png"
+    },
+    {
+      "name": "panel_operator",
+      "x0": 414,
+      "y0": 74,
+      "x1": 1100,
+      "y1": 810,
+      "width": 686,
+      "height": 736,
+      "file": "panel_operator.png"
+    },
+    {
+      "name": "panel_applications_top",
+      "x0": 1120,
+      "y0": 74,
+      "x1": 1628,
+      "y1": 428,
+      "width": 508,
+      "height": 354,
+      "file": "panel_applications_top.png"
+    },
+    {
+      "name": "panel_applications_bottom",
+      "x0": 1120,
+      "y0": 440,
+      "x1": 1628,
+      "y1": 756,
+      "width": 508,
+      "height": 316,
+      "file": "panel_applications_bottom.png"
+    },
+    {
+      "name": "anatomy_thumb",
+      "x0": 36,
+      "y0": 202,
+      "x1": 130,
+      "y1": 306,
+      "width": 94,
+      "height": 104,
+      "file": "anatomy_thumb.png"
+    },
+    {
+      "name": "digital_phantom_thumb",
+      "x0": 168,
+      "y0": 202,
+      "x1": 260,
+      "y1": 306,
+      "width": 92,
+      "height": 104,
+      "file": "digital_phantom_thumb.png"
+    },
+    {
+      "name": "tissue_contrast_maps_thumb",
+      "x0": 299,
+      "y0": 202,
+      "x1": 390,
+      "y1": 306,
+      "width": 91,
+      "height": 104,
+      "file": "tissue_contrast_maps_thumb.png"
+    },
+    {
+      "name": "sequence_waveform_schematic",
+      "x0": 34,
+      "y0": 408,
+      "x1": 190,
+      "y1": 535,
+      "width": 156,
+      "height": 127,
+      "file": "sequence_waveform_schematic.png"
+    },
+    {
+      "name": "spiral_trajectory_input",
+      "x0": 235,
+      "y0": 392,
+      "x1": 381,
+      "y1": 537,
+      "width": 146,
+      "height": 145,
+      "file": "spiral_trajectory_input.png"
+    },
+    {
+      "name": "scanner_b0_map",
+      "x0": 35,
+      "y0": 625,
+      "x1": 111,
+      "y1": 710,
+      "width": 76,
+      "height": 85,
+      "file": "scanner_b0_map.png"
+    },
+    {
+      "name": "scanner_b1plus_map",
+      "x0": 152,
+      "y0": 625,
+      "x1": 226,
+      "y1": 710,
+      "width": 74,
+      "height": 85,
+      "file": "scanner_b1plus_map.png"
+    },
+    {
+      "name": "scanner_b1minus_map",
+      "x0": 268,
+      "y0": 625,
+      "x1": 343,
+      "y1": 710,
+      "width": 75,
+      "height": 85,
+      "file": "scanner_b1minus_map.png"
+    },
+    {
+      "name": "scanner_girf_map",
+      "x0": 35,
+      "y0": 727,
+      "x1": 111,
+      "y1": 809,
+      "width": 76,
+      "height": 82,
+      "file": "scanner_girf_map.png"
+    },
+    {
+      "name": "scanner_concomitant_map",
+      "x0": 152,
+      "y0": 727,
+      "x1": 226,
+      "y1": 809,
+      "width": 74,
+      "height": 82,
+      "file": "scanner_concomitant_map.png"
+    },
+    {
+      "name": "scanner_gnl_map",
+      "x0": 268,
+      "y0": 727,
+      "x1": 343,
+      "y1": 809,
+      "width": 75,
+      "height": 82,
+      "file": "scanner_gnl_map.png"
+    },
+    {
+      "name": "operator_b0_map",
+      "x0": 442,
+      "y0": 356,
+      "x1": 545,
+      "y1": 473,
+      "width": 103,
+      "height": 117,
+      "file": "operator_b0_map.png"
+    },
+    {
+      "name": "operator_b1_maps",
+      "x0": 562,
+      "y0": 356,
+      "x1": 667,
+      "y1": 473,
+      "width": 105,
+      "height": 117,
+      "file": "operator_b1_maps.png"
+    },
+    {
+      "name": "operator_realized_trajectory",
+      "x0": 698,
+      "y0": 352,
+      "x1": 791,
+      "y1": 486,
+      "width": 93,
+      "height": 134,
+      "file": "operator_realized_trajectory.png"
+    },
+    {
+      "name": "operator_spatial_phase_map",
+      "x0": 864,
+      "y0": 356,
+      "x1": 969,
+      "y1": 473,
+      "width": 105,
+      "height": 117,
+      "file": "operator_spatial_phase_map.png"
+    },
+    {
+      "name": "operator_encoding_interface",
+      "x0": 982,
+      "y0": 355,
+      "x1": 1088,
+      "y1": 475,
+      "width": 106,
+      "height": 120,
+      "file": "operator_encoding_interface.png"
+    },
+    {
+      "name": "source_field_strength_image",
+      "x0": 516,
+      "y0": 642,
+      "x1": 586,
+      "y1": 730,
+      "width": 70,
+      "height": 88,
+      "file": "source_field_strength_image.png"
+    },
+    {
+      "name": "target_field_strength_image",
+      "x0": 906,
+      "y0": 642,
+      "x1": 976,
+      "y1": 730,
+      "width": 70,
+      "height": 88,
+      "file": "target_field_strength_image.png"
+    },
+    {
+      "name": "app_synthetic_kspace",
+      "x0": 1132,
+      "y0": 261,
+      "x1": 1241,
+      "y1": 381,
+      "width": 109,
+      "height": 120,
+      "file": "app_synthetic_kspace.png"
+    },
+    {
+      "name": "app_reconstructed_image",
+      "x0": 1254,
+      "y0": 261,
+      "x1": 1367,
+      "y1": 381,
+      "width": 113,
+      "height": 120,
+      "file": "app_reconstructed_image.png"
+    },
+    {
+      "name": "app_artifact_realizations",
+      "x0": 1377,
+      "y0": 261,
+      "x1": 1490,
+      "y1": 381,
+      "width": 113,
+      "height": 120,
+      "file": "app_artifact_realizations.png"
+    },
+    {
+      "name": "app_training_benchmark_data",
+      "x0": 1498,
+      "y0": 261,
+      "x1": 1595,
+      "y1": 381,
+      "width": 97,
+      "height": 120,
+      "file": "app_training_benchmark_data.png"
+    },
+    {
+      "name": "app_measured_kspace",
+      "x0": 1132,
+      "y0": 585,
+      "x1": 1234,
+      "y1": 706,
+      "width": 102,
+      "height": 121,
+      "file": "app_measured_kspace.png"
+    },
+    {
+      "name": "app_reconstruction_result",
+      "x0": 1384,
+      "y0": 585,
+      "x1": 1495,
+      "y1": 706,
+      "width": 111,
+      "height": 121,
+      "file": "app_reconstruction_result.png"
+    },
+    {
+      "name": "app_improved_result",
+      "x0": 1504,
+      "y0": 585,
+      "x1": 1613,
+      "y1": 706,
+      "width": 109,
+      "height": 121,
+      "file": "app_improved_result.png"
+    }
+  ]
+}

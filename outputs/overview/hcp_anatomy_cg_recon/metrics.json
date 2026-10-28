@@ -1,0 +1,11 @@
+[
+  {
+    "reconstruction": "R5_full",
+    "nrmse": 0.22059176862239838,
+    "true_model_residual": 0.00025585299590602517,
+    "native_final_residual": 9.38313961406267e-06,
+    "iterations": 143,
+    "converged": true,
+    "runtime_s": 321.39878368377686
+  }
+]
